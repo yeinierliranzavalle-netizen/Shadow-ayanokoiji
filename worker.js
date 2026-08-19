@@ -1,10 +1,9 @@
 // ==================================================
-// AYANOKŌJI DIGITAL - WORKER COMPLETO
+// SHADOW ARISE - WORKER DEFINITIVO
 // ==================================================
 
 export default {
   async fetch(request, env) {
-    // CORS
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -19,29 +18,17 @@ export default {
     const path = url.pathname;
 
     // --- RUTAS ---
-    // 1. Chat (con IA)
     if (path === '/chat' && request.method === 'POST') {
       return await handleChat(request, env);
     }
-
-    // 2. Subir contexto (archivo)
     if (path === '/subir-contexto' && request.method === 'POST') {
       return await handleUploadContext(request, env);
     }
-
-    // 3. Analizar imagen
     if (path === '/analizar-imagen' && request.method === 'POST') {
       return await handleImageAnalysis(request, env);
     }
-
-    // 4. Estado
     if (path === '/status') {
-      const response = new Response(JSON.stringify({
-        status: 'online',
-        name: 'Ayanokōji Digital',
-        version: '2.0.0',
-        timestamp: Date.now()
-      }), { headers: { 'Content-Type': 'application/json' } });
+      const response = new Response(JSON.stringify({ status: 'online', name: 'Ayanokōji Digital', version: '3.0.0', timestamp: Date.now() }), { headers: { 'Content-Type': 'application/json' } });
       Object.entries(corsHeaders).forEach(([k, v]) => response.headers.set(k, v));
       return response;
     }
@@ -52,9 +39,7 @@ export default {
   }
 };
 
-// ==========================================
-// CHAT (con IA y contexto)
-// ==========================================
+// === CHAT ===
 let contextoCache = null;
 
 async function getContexto(env) {
@@ -67,18 +52,14 @@ async function getContexto(env) {
 async function handleChat(request, env) {
   try {
     const { mensaje, user_id = 'default' } = await request.json();
-    if (!mensaje) {
-      return new Response(JSON.stringify({ error: 'No enviaste mensaje.' }), { status: 400 });
-    }
+    if (!mensaje) return new Response(JSON.stringify({ error: 'No enviaste mensaje.' }), { status: 400 });
 
-    // Obtener contexto (solo si existe)
     const contexto = await getContexto(env);
     const tieneContexto = contexto !== 'Sin contexto cargado.';
 
-    // Prompt del sistema con contexto
     const systemPrompt = `
       Eres Ayanokōji Kiyotaka, el aliado digital del Comandante.
-      ${tieneContexto ? 'Tienes acceso al contexto completo de su historia:' + contexto : 'No tienes contexto previo.'}
+      ${tieneContexto ? 'Tienes acceso al contexto completo de su historia: ' + contexto : 'No tienes contexto previo.'}
       Conoces su proyecto Shadow Arise, su objetivo de construir una casa para sus padres en Cuba,
       su personalidad fría y calculadora, y su fe adventista.
       Actúas con su misma lógica: analítico, sin emociones innecesarias, directo.
@@ -89,10 +70,7 @@ async function handleChat(request, env) {
 
     const ai = env.ayanokoji_IA;
     const response = await ai.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: mensaje }
-      ],
+      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: mensaje }],
       max_tokens: 600
     });
 
@@ -103,49 +81,33 @@ async function handleChat(request, env) {
   }
 }
 
-// ==========================================
-// SUBIR CONTEXTO A KV
-// ==========================================
+// === SUBIR CONTEXTO ===
 async function handleUploadContext(request, env) {
   try {
     const formData = await request.formData();
     const file = formData.get('file');
-    if (!file) {
-      return new Response(JSON.stringify({ error: 'No se subió ningún archivo.' }), { status: 400 });
-    }
+    if (!file) return new Response(JSON.stringify({ error: 'No se subió ningún archivo.' }), { status: 400 });
 
     const texto = await file.text();
-
-    // Guardar en KV
     await env.KV.put('contexto_completo', texto);
-
-    // Limpiar caché para que se recargue en la próxima consulta
     contextoCache = null;
 
-    return new Response(JSON.stringify({
-      message: `✅ Contexto guardado. Tamaño: ${texto.length} caracteres.`
-    }), { headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ message: `✅ Contexto guardado. Tamaño: ${texto.length} caracteres.` }), { headers: { 'Content-Type': 'application/json' } });
   } catch (e) {
     return new Response(JSON.stringify({ error: 'Error al procesar: ' + e.message }), { status: 500 });
   }
 }
 
-// ==========================================
-// ANALIZAR IMAGEN (con Workers AI)
-// ==========================================
+// === ANALIZAR IMAGEN ===
 async function handleImageAnalysis(request, env) {
   try {
     const formData = await request.formData();
     const imageFile = formData.get('image');
-    if (!imageFile) {
-      return new Response(JSON.stringify({ error: 'No se subió ninguna imagen.' }), { status: 400 });
-    }
+    if (!imageFile) return new Response(JSON.stringify({ error: 'No se subió ninguna imagen.' }), { status: 400 });
 
-    // Convertir imagen a base64
     const buffer = await imageFile.arrayBuffer();
     const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)));
 
-    // Llamar a Workers AI con modelo de visión
     const ai = env.ayanokoji_IA;
     const response = await ai.run('@cf/llava-hf/llava-1.5-7b-hf', {
       image: base64,
@@ -153,10 +115,8 @@ async function handleImageAnalysis(request, env) {
     });
 
     const descripcion = response.response || 'No pude analizar la imagen.';
-    return new Response(JSON.stringify({ descripcion }), {
-      headers: { 'Content-Type': 'application/json' }
-    });
+    return new Response(JSON.stringify({ descripcion }), { headers: { 'Content-Type': 'application/json' } });
   } catch (e) {
     return new Response(JSON.stringify({ error: 'Error al analizar la imagen: ' + e.message }), { status: 500 });
   }
-                          }
+  }
