@@ -1,5 +1,5 @@
 // ==================================================
-// SHADOW ARISE - WORKER COMPLETO (IA + SUBIDA + D1)
+// SHADOW ARISE - WORKER SIMPLE CON IA
 // ==================================================
 
 export default {
@@ -17,31 +17,29 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // --- RUTA: CHAT CON IA ---
+    // --- CHAT ---
     if (path === '/chat' && request.method === 'POST') {
       return await handleChat(request, env);
     }
 
-    // --- RUTA: SUBIR ARCHIVO A D1 ---
+    // --- SUBIR CONTEXTO ---
     if (path === '/subir' && request.method === 'POST') {
       return await handleUpload(request, env);
     }
 
-    // --- RUTA: VERIFICAR CONTEXTO ---
+    // --- VERIFICAR CONTEXTO ---
     if (path === '/verificar' && request.method === 'GET') {
       return await handleVerificar(request, env);
     }
 
-    // --- RUTA: ESTADO ---
+    // --- ESTADO ---
     if (path === '/status') {
-      const response = new Response(JSON.stringify({
+      return new Response(JSON.stringify({
         status: 'online',
         name: 'Ayanokōji Digital',
         version: '4.0.0',
         timestamp: Date.now()
       }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
-      Object.entries(corsHeaders).forEach(([k, v]) => response.headers.set(k, v));
-      return response;
     }
 
     return new Response('Ruta no encontrada', { status: 404, headers: corsHeaders });
@@ -49,32 +47,22 @@ export default {
 };
 
 // ==========================================
-// CHAT CON IA
+// CHAT (con IA y contexto desde KV)
 // ==========================================
 let contextoCache = null;
-let contextoCacheTime = 0;
-const CACHE_TTL = 3600000; // 1 hora
 
 async function getContexto(env) {
-  // Si el caché es válido, usarlo
-  if (contextoCache && (Date.now() - contextoCacheTime < CACHE_TTL)) {
-    return contextoCache;
-  }
-
+  if (contextoCache) return contextoCache;
   try {
-    // Leer desde D1
-    const result = await env.DB.prepare("SELECT texto FROM contexto WHERE id = 1").first();
-    if (result && result.texto) {
-      contextoCache = result.texto;
-      contextoCacheTime = Date.now();
-      console.log(`📖 Contexto cargado desde D1: ${result.texto.length} caracteres`);
-      return result.texto;
+    const texto = await env.KV.get('contexto_completo');
+    if (texto) {
+      contextoCache = texto;
+      console.log(`📖 Contexto cargado: ${texto.length} caracteres`);
+      return texto;
     }
   } catch (e) {
-    console.warn('⚠️ Error al leer D1:', e.message);
+    console.warn('⚠️ Error al leer KV:', e.message);
   }
-
-  contextoCache = null;
   return null;
 }
 
@@ -116,13 +104,13 @@ async function handleChat(request, env) {
     const respuesta = response.response || 'No pude procesar tu mensaje.';
     return new Response(JSON.stringify({ respuesta, user_id }));
   } catch (error) {
-    console.error('❌ Error en handleChat:', error);
+    console.error('❌ Error en chat:', error);
     return new Response(JSON.stringify({ error: error.message }), { status: 500 });
   }
 }
 
 // ==========================================
-// SUBIR ARCHIVO A D1
+// SUBIR CONTEXTO
 // ==========================================
 async function handleUpload(request, env) {
   try {
@@ -132,46 +120,29 @@ async function handleUpload(request, env) {
       return new Response(JSON.stringify({
         success: false,
         error: 'No se subió ningún archivo.'
-      }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      }), { status: 400 });
     }
 
     const texto = await file.text();
     const tamaño = texto.length;
 
-    console.log(`📂 Archivo recibido: ${file.name}, tamaño: ${tamaño} caracteres`);
+    await env.KV.put('contexto_completo', texto);
+    contextoCache = texto;
 
-    // Asegurar que la tabla existe
-    await env.DB.prepare(`
-      CREATE TABLE IF NOT EXISTS contexto (
-        id INTEGER PRIMARY KEY,
-        texto TEXT
-      )
-    `).run();
-
-    // Guardar en D1
-    await env.DB.prepare(`
-      INSERT OR REPLACE INTO contexto (id, texto) VALUES (1, ?)
-    `).bind(texto).run();
-
-    // Limpiar caché para forzar recarga
-    contextoCache = null;
-    contextoCacheTime = 0;
-
-    console.log(`✅ Contexto guardado en D1: ${tamaño} caracteres`);
+    console.log(`✅ Contexto guardado en KV: ${tamaño} caracteres`);
 
     return new Response(JSON.stringify({
       success: true,
-      message: `✅ Contexto guardado en D1. Tamaño: ${tamaño} caracteres.`,
+      message: `✅ Contexto guardado. Tamaño: ${tamaño} caracteres.`,
       tamaño: tamaño,
       filename: file.name
-    }), { headers: { 'Content-Type': 'application/json' } });
-
+    }));
   } catch (error) {
     console.error('❌ Error al subir:', error);
     return new Response(JSON.stringify({
       success: false,
-      error: 'Error al procesar el archivo: ' + error.message
-    }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+      error: 'Error al procesar: ' + error.message
+    }), { status: 500 });
   }
 }
 
@@ -180,25 +151,25 @@ async function handleUpload(request, env) {
 // ==========================================
 async function handleVerificar(request, env) {
   try {
-    const result = await env.DB.prepare("SELECT texto FROM contexto WHERE id = 1").first();
-    if (result && result.texto) {
+    const texto = await env.KV.get('contexto_completo');
+    if (texto) {
       return new Response(JSON.stringify({
         success: true,
         existe: true,
-        tamaño: result.texto.length,
-        mensaje: `✅ Contexto encontrado en D1 (${result.texto.length} caracteres)`
-      }), { headers: { 'Content-Type': 'application/json' } });
+        tamaño: texto.length,
+        mensaje: `✅ Contexto encontrado (${texto.length} caracteres)`
+      }));
     } else {
       return new Response(JSON.stringify({
         success: true,
         existe: false,
-        mensaje: '⚠️ No hay contexto guardado en D1.'
-      }), { headers: { 'Content-Type': 'application/json' } });
+        mensaje: '⚠️ No hay contexto guardado.'
+      }));
     }
   } catch (error) {
     return new Response(JSON.stringify({
       success: false,
       error: 'Error al verificar: ' + error.message
-    }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+    }), { status: 500 });
   }
-    }
+      }
