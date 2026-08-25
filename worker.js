@@ -172,4 +172,4 @@ async function handleVerificar(request, env) {
       error: 'Error al verificar: ' + error.message
     }), { status: 500 });
   }
-      }
+        }
