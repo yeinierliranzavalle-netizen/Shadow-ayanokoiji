@@ -1,45 +1,46 @@
 // ==================================================
-// SHADOW ARISE - WORKER SIMPLE CON IA
+// SHADOW ARISE - WORKER MODULAR (RUTAS AISLADAS)
 // ==================================================
 
 export default {
   async fetch(request, env) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const method = request.method;
+
+    console.log(`📡 [${method}] ${path}`);
+
+    // --- CORS ---
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
     };
 
-    if (request.method === 'OPTIONS') {
+    if (method === 'OPTIONS') {
       return new Response(null, { headers: corsHeaders });
     }
 
-    const url = new URL(request.url);
-    const path = url.pathname;
-
-    // --- CHAT ---
-    if (path === '/chat' && request.method === 'POST') {
-      return await handleChat(request, env);
-    }
-
-    // --- SUBIR CONTEXTO ---
-    if (path === '/subir' && request.method === 'POST') {
-      return await handleUpload(request, env);
-    }
-
-    // --- VERIFICAR CONTEXTO ---
-    if (path === '/verificar' && request.method === 'GET') {
-      return await handleVerificar(request, env);
-    }
-
-    // --- ESTADO ---
-    if (path === '/status') {
+    // --- RUTAS ---
+    try {
+      if (path === '/chat' && method === 'POST') {
+        return await handleChat(request, env);
+      }
+      if (path === '/subir' && method === 'POST') {
+        return await handleUpload(request, env);
+      }
+      if (path === '/verificar' && method === 'GET') {
+        return await handleVerificar(request, env);
+      }
+      if (path === '/status' && method === 'GET') {
+        return handleStatus(env);
+      }
+    } catch (error) {
+      console.error('❌ Error en ruta:', error);
       return new Response(JSON.stringify({
-        status: 'online',
-        name: 'Ayanokōji Digital',
-        version: '4.0.0',
-        timestamp: Date.now()
-      }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+        error: 'Error en el Worker: ' + error.message,
+        ruta: path
+      }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
     return new Response('Ruta no encontrada', { status: 404, headers: corsHeaders });
@@ -47,7 +48,7 @@ export default {
 };
 
 // ==========================================
-// CHAT (con IA y contexto desde KV)
+// CHAT (con IA + contexto KV)
 // ==========================================
 let contextoCache = null;
 
@@ -72,6 +73,8 @@ async function handleChat(request, env) {
     if (!mensaje) {
       return new Response(JSON.stringify({ error: 'No enviaste mensaje.' }), { status: 400 });
     }
+
+    console.log(`💬 Mensaje de ${user_id}: ${mensaje.substring(0, 50)}...`);
 
     const contexto = await getContexto(env);
     const tieneContexto = contexto !== null;
@@ -102,6 +105,7 @@ async function handleChat(request, env) {
     });
 
     const respuesta = response.response || 'No pude procesar tu mensaje.';
+    console.log(`✅ Respuesta generada (${respuesta.length} caracteres)`);
     return new Response(JSON.stringify({ respuesta, user_id }));
   } catch (error) {
     console.error('❌ Error en chat:', error);
@@ -125,6 +129,8 @@ async function handleUpload(request, env) {
 
     const texto = await file.text();
     const tamaño = texto.length;
+
+    console.log(`📂 Archivo recibido: ${file.name}, tamaño: ${tamaño} caracteres`);
 
     await env.KV.put('contexto_completo', texto);
     contextoCache = texto;
@@ -172,4 +178,16 @@ async function handleVerificar(request, env) {
       error: 'Error al verificar: ' + error.message
     }), { status: 500 });
   }
+}
+
+// ==========================================
+// ESTADO
+// ==========================================
+function handleStatus(env) {
+  return new Response(JSON.stringify({
+    status: 'online',
+    name: 'Ayanokōji Digital (modular)',
+    version: '5.0.0',
+    timestamp: Date.now()
+  }), { headers: { 'Content-Type': 'application/json' } });
         }
