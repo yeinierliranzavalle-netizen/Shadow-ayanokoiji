@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ayanokōji Digital - Centro de Control</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: system-ui, sans-serif; }
+        body { background: #0a0a14; color: #d0d0e8; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 1rem; }
+        .card { max-width: 650px; width: 100%; background: #0d1420; border: 1px solid #2c3a5a; border-radius: 20px; padding: 1.5rem; }
+        h1 { color: #aaffff; text-align: center; font-weight: 300; }
+        h1 span { color: #7a5cff; font-weight: 600; }
+        .modos { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 1rem 0; }
+        .modo-btn { flex: 1; min-width: 55px; padding: 0.5rem; border: 1px solid #2a2a4a; border-radius: 10px; background: #0a1525; color: #6a6a8a; cursor: pointer; transition: 0.3s; text-align: center; font-size: 0.75rem; }
+        .modo-btn.active { background: #2a1a5a; border-color: #7a5cff; color: #b8aaff; }
+        .area { margin-top: 1rem; padding: 1rem; background: #0a1525; border-radius: 14px; border: 1px solid #1a2a3a; min-height: 220px; display: flex; flex-direction: column; gap: 0.5rem; }
+        .area input, .area textarea { width: 100%; padding: 0.7rem; border-radius: 10px; border: 1px solid #2c4a6a; background: #0f1625; color: white; }
+        .area button { padding: 0.7rem; border: none; border-radius: 10px; background: linear-gradient(135deg, #2a1a5a, #4a2a7a); color: white; font-weight: bold; cursor: pointer; }
+        .area button:hover { background: #3a2a6a; }
+        .chat-box { max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.4rem; }
+        .msg { max-width: 85%; padding: 0.4rem 0.8rem; border-radius: 12px; font-size: 0.9rem; }
+        .msg.user { align-self: flex-end; background: #1a2a4a; }
+        .msg.bot { align-self: flex-start; background: #0f1a2a; border: 1px solid #2c3a5a; }
+        .resultado { background: #0f1a2a; padding: 0.6rem; border-radius: 10px; border: 1px solid #2c3a5a; white-space: pre-wrap; max-height: 150px; overflow-y: auto; font-size: 0.85rem; }
+        .status { font-size: 0.8rem; color: #6a6a8a; text-align: center; margin-top: 0.5rem; }
+    </style>
+</head>
+<body>
+<div class="card">
+    <h1>⚡ <span>SHADOW</span> ARISE</h1>
+    <p style="text-align:center; color:#6a6a8a; font-size:0.85rem;">Ayanokōji Digital · Centro de Control</p>
+    <div class="modos" id="modosBar">
+        <button class="modo-btn active" data-modo="chat">💬 Chat</button>
+        <button class="modo-btn" data-modo="subir">📤 Subir</button>
+        <button class="modo-btn" data-modo="analizar">🧠 Analizar</button>
+        <button class="modo-btn" data-modo="eliminar">🗑️ Eliminar</button>
+        <button class="modo-btn" data-modo="historial">📜 Historial</button>
+        <button class="modo-btn" data-modo="ejecutar">⚡ Ejecutar</button>
+    </div>
+    <div class="area" id="areaTrabajo"></div>
+    <div class="status" id="status">Listo</div>
+</div>
+<script>
+    const area = document.getElementById('areaTrabajo');
+    const status = document.getElementById('status');
+    const botonesModo = document.querySelectorAll('.modo-btn');
+    let modoActivo = 'chat';
+    const user_id = 'comandante';
+
+    const modos = {
+        chat() {
+            return `
+                <div class="chat-box" id="chatMessages">
+                    <div class="msg bot">*El agente está listo.* ¿Qué necesitas construir hoy?</div>
+                </div>
+                <div style="display:flex; gap:0.5rem;">
+                    <input type="text" id="chatInput" placeholder="Escribe tu mensaje...">
+                    <button id="chatSendBtn">Enviar</button>
+                </div>
+            `;
+        },
+        subir() {
+            return `
+                <p style="color:#6a6a8a; font-size:0.9rem;">Sube un archivo</p>
+                <input type="file" id="fileInput" accept="*/*">
+                <button id="fileUploadBtn">Subir</button>
+                <div id="uploadResult" class="resultado"></div>
+            `;
+        },
+        analizar() {
+            return `
+                <p style="color:#6a6a8a; font-size:0.9rem;">Sube una imagen para analizar</p>
+                <input type="file" id="imageInput" accept="image/*">
+                <button id="imageAnalyzeBtn">Analizar</button>
+                <div id="analysisResult" class="resultado"></div>
+            `;
+        },
+        eliminar() {
+            return `
+                <p style="color:#6a6a8a; font-size:0.9rem;">Elimina un registro por ID</p>
+                <input type="text" id="deleteInput" placeholder="ID">
+                <button id="deleteBtn">Eliminar</button>
+                <div id="deleteResult" class="resultado"></div>
+            `;
+        },
+        historial() {
+            return `
+                <p style="color:#6a6a8a; font-size:0.9rem;">Historial de conversaciones</p>
+                <button id="historyBtn">Cargar historial</button>
+                <div id="historyResult" class="resultado"></div>
+            `;
+        },
+        ejecutar() {
+            return `
+                <p style="color:#6a6a8a; font-size:0.9rem;">Ejecuta una orden (ej. "crear_worker", "listar_d1")</p>
+                <input type="text" id="ordenInput" placeholder='{"orden":"listar_d1","parametros":{"tabla":"historial"}}'>
+                <button id="ejecutarBtn">Ejecutar</button>
+                <div id="ejecutarResult" class="resultado"></div>
+            `;
+        }
+    };
+
+    function renderizarModo(modo) {
+        area.innerHTML = modos[modo] ? modos[modo]() : '<div>Modo no disponible</div>';
+        if (modo === 'chat') asignarChat();
+        if (modo === 'subir') asignarSubir();
+        if (modo === 'analizar') asignarAnalizar();
+        if (modo === 'eliminar') asignarEliminar();
+        if (modo === 'historial') asignarHistorial();
+        if (modo === 'ejecutar') asignarEjecutar();
+    }
+
+    function asignarChat() {
+        const input = document.getElementById('chatInput');
+        const btn = document.getElementById('chatSendBtn');
+        const chatBox = document.getElementById('chatMessages');
+        function addMsg(tipo, texto) {
+            const div = document.createElement('div');
+            div.className = 'msg ' + tipo;
+            div.textContent = texto;
+            chatBox.appendChild(div);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+        async function send() {
+            const texto = input.value.trim();
+            if (!texto) return;
+            addMsg('user', texto);
+            input.value = '';
+            input.disabled = true;
+            btn.disabled = true;
+            status.textContent = '⏳ Procesando...';
+            try {
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mensaje: texto, user_id })
+                });
+                const data = await res.json();
+                addMsg('bot', data.respuesta || '⚠️ ' + (data.error || 'Error'));
+            } catch (e) { addMsg('bot', '⚠️ Error: ' + e.message); }
+            input.disabled = false;
+            btn.disabled = false;
+            input.focus();
+            status.textContent = 'Listo';
+        }
+        btn.onclick = send;
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
+    }
+
+    function asignarSubir() {
+        const input = document.getElementById('fileInput');
+        const btn = document.getElementById('fileUploadBtn');
+        const res = document.getElementById('uploadResult');
+        btn.onclick = async () => {
+            const file = input.files[0];
+            if (!file) { res.textContent = '⚠️ Selecciona un archivo.'; return; }
+            const form = new FormData();
+            form.append('archivo', file);
+            form.append('user_id', user_id);
+            res.textContent = '⏳ Subiendo...';
+            try {
+                const r = await fetch('/api/subir', { method: 'POST', body: form });
+                const d = await r.json();
+                res.textContent = d.mensaje || '✅ Subido.';
+            } catch (e) { res.textContent = '❌ Error: ' + e.message; }
+        };
+    }
+
+    function asignarAnalizar() {
+        const input = document.getElementById('imageInput');
+        const btn = document.getElementById('imageAnalyzeBtn');
+        const res = document.getElementById('analysisResult');
+        btn.onclick = async () => {
+            const file = input.files[0];
+            if (!file) { res.textContent = '⚠️ Selecciona una imagen.'; return; }
+            const form = new FormData();
+            form.append('imagen', file);
+            form.append('user_id', user_id);
+            res.textContent = '⏳ Analizando...';
+            try {
+                const r = await fetch('/api/analizar', { method: 'POST', body: form });
+                const d = await r.json();
+                res.textContent = d.analisis || '✅ Procesado.';
+            } catch (e) { res.textContent = '❌ Error: ' + e.message; }
+        };
+    }
+
+    function asignarEliminar() {
+        const input = document.getElementById('deleteInput');
+        const btn = document.getElementById('deleteBtn');
+        const res = document.getElementById('deleteResult');
+        btn.onclick = async () => {
+            const id = input.value.trim();
+            if (!id) { res.textContent = '⚠️ Ingresa un ID.'; return; }
+            res.textContent = '⏳ Eliminando...';
+            try {
+                const r = await fetch('/api/eliminar', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id, user_id })
+                });
+                const d = await r.json();
+                res.textContent = d.mensaje || '✅ Eliminado.';
+            } catch (e) { res.textContent = '❌ Error: ' + e.message; }
+        };
+    }
+
+    function asignarHistorial() {
+        const btn = document.getElementById('historyBtn');
+        const res = document.getElementById('historyResult');
+        btn.onclick = async () => {
+            res.textContent = '⏳ Cargando...';
+            try {
+                const r = await fetch(`/api/historial?user_id=${user_id}`);
+                const d = await r.json();
+                if (d.historial?.length) {
+                    res.textContent = d.historial.map(h => `👤 ${h.mensaje}\n🤖 ${h.respuesta}`).join('\n\n');
+                } else {
+                    res.textContent = '📭 No hay historial.';
+                }
+            } catch (e) { res.textContent = '❌ Error: ' + e.message; }
+        };
+    }
+
+    function asignarEjecutar() {
+        const input = document.getElementById('ordenInput');
+        const btn = document.getElementById('ejecutarBtn');
+        const res = document.getElementById('ejecutarResult');
+        btn.onclick = async () => {
+            const texto = input.value.trim();
+            if (!texto) { res.textContent = '⚠️ Ingresa una orden.'; return; }
+            let orden, parametros = {};
+            try {
+                const parsed = JSON.parse(texto);
+                orden = parsed.orden || parsed.comando || texto;
+                parametros = parsed.parametros || parsed;
+            } catch {
+                orden = texto;
+                parametros = { mensaje: texto };
+            }
+            res.textContent = '⏳ Ejecutando...';
+            try {
+                const r = await fetch('/api/ejecutar', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ orden, parametros })
+                });
+                const d = await r.json();
+                res.textContent = JSON.stringify(d, null, 2);
+            } catch (e) { res.textContent = '❌ Error: ' + e.message; }
+        };
+    }
+
+    botonesModo.forEach(btn => {
+        btn.addEventListener('click', () => {
+            botonesModo.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            modoActivo = btn.dataset.modo;
+            renderizarModo(modoActivo);
+            status.textContent = `Modo: ${modoActivo}`;
+        });
+    });
+
+    renderizarModo('chat');
+    status.textContent = 'Listo · Modo chat';
+</script>
+</body>
+  </html>
