@@ -14,10 +14,10 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'  # ← Cambia esto de '18' a '22'
+          node-version: '22'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install   # ← Cambiado de npm ci
 
       - name: Deploy Worker
         run: npx wrangler deploy --minify
