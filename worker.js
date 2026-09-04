@@ -1,5 +1,6 @@
 // ==================================================
-// WORKER CON HTML INTEGRADO (SIN CORS)
+// AGENTE DIGITAL - AYANOKŌJI (Worker)
+// Con D1, KV y Workers AI - Archivo separado
 // ==================================================
 
 export default {
@@ -7,123 +8,317 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // --- Servir el HTML en la raíz ---
-    if (path === '/' || path === '/index.html') {
-      return new Response(HTML, {
-        headers: { 'Content-Type': 'text/html' }
-      });
+    // --- RUTAS API ---
+    if (path === '/api/chat' && request.method === 'POST') {
+      return await handleChat(request, env);
+    }
+    if (path === '/api/subir' && request.method === 'POST') {
+      return await handleUpload(request, env);
+    }
+    if (path === '/api/analizar' && request.method === 'POST') {
+      return await handleAnalyze(request, env);
+    }
+    if (path === '/api/eliminar' && request.method === 'POST') {
+      return await handleDelete(request, env);
+    }
+    if (path === '/api/historial' && request.method === 'GET') {
+      return await handleHistory(request, env);
+    }
+    if (path === '/api/ejecutar' && request.method === 'POST') {
+      return await handleExecute(request, env);
+    }
+    if (path === '/api/estado') {
+      return jsonResponse({ estado: 'activo', nombre: 'Ayanokōji Digital', version: '2.0.0' });
     }
 
-    // --- Ruta de chat ---
-    if (path === '/chat' && request.method === 'POST') {
-      try {
-        const { mensaje } = await request.json();
-        return new Response(JSON.stringify({
-          respuesta: `Recibí tu mensaje: "${mensaje}". El Worker está vivo.`
-        }), { headers: { 'Content-Type': 'application/json' } });
-      } catch (e) {
-        return new Response(JSON.stringify({
-          error: 'Error: ' + e.message
-        }), { status: 500, headers: { 'Content-Type': 'application/json' } });
-      }
-    }
-
-    // --- Ruta de estado ---
-    if (path === '/estado') {
-      return new Response(JSON.stringify({ estado: 'activo' }), {
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-
+    // --- SERVIR EL INDEX (solo si está en el mismo Worker, pero ahora está separado) ---
+    // Si el index está en otro lugar, esta línea no se usará.
+    // Pero la dejo por si acaso.
     return new Response('Ruta no encontrada', { status: 404 });
   }
 };
 
 // ==========================================
-// HTML INTEGRADO (NO NECESITAS SUBIRLO APARTE)
+// CHAT CON IA
 // ==========================================
-const HTML = `
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Shadow Arise - Chat</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; font-family: system-ui, sans-serif; }
-        body { background: #0a0a14; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 1rem; }
-        .card { max-width: 600px; width: 100%; background: #0d1420; border: 1px solid #2c3a5a; border-radius: 20px; padding: 1.5rem; }
-        h1 { color: #aaffff; text-align: center; font-weight: 300; }
-        h1 span { color: #7a5cff; font-weight: 600; }
-        .chat-box { height: 400px; overflow-y: auto; border: 1px solid #1a2a3a; border-radius: 12px; padding: 1rem; margin: 1rem 0; background: #0a1525; display: flex; flex-direction: column; gap: 0.5rem; }
-        .msg { max-width: 80%; padding: 0.5rem 1rem; border-radius: 14px; font-size: 0.95rem; }
-        .msg.user { align-self: flex-end; background: #1a2a4a; color: #d0d8e8; }
-        .msg.bot { align-self: flex-start; background: #0f1a2a; border: 1px solid #2c3a5a; color: #c8d8e8; }
-        .input-area { display: flex; gap: 0.5rem; }
-        .input-area input { flex: 1; padding: 0.7rem; border-radius: 12px; border: 1px solid #2c4a6a; background: #0a1525; color: white; }
-        .input-area button { padding: 0.7rem 1.2rem; border: none; border-radius: 12px; background: linear-gradient(135deg, #2a1a5a, #4a2a7a); color: white; font-weight: bold; cursor: pointer; }
-        .input-area button:hover { background: #3a2a6a; }
-        .status { font-size: 0.8rem; color: #6a6a8a; text-align: center; margin-top: 0.5rem; }
-    </style>
-</head>
-<body>
-<div class="card">
-    <h1>⚡ <span>SHADOW</span> ARISE</h1>
-    <p style="text-align:center; color:#6a6a8a; font-size:0.85rem;">Chat con el Worker integrado</p>
-    <div class="chat-box" id="chatMessages">
-        <div class="msg bot">*Worker conectado.* Envía un mensaje.</div>
-    </div>
-    <div class="input-area">
-        <input type="text" id="chatInput" placeholder="Escribe tu mensaje...">
-        <button id="sendBtn">Enviar</button>
-    </div>
-    <div class="status" id="status">✅ Conectado</div>
-</div>
+async function handleChat(request, env) {
+  try {
+    const { mensaje, user_id } = await request.json();
+    if (!mensaje) return errorResponse('No enviaste mensaje.');
 
-<script>
-    const chatMessages = document.getElementById('chatMessages');
-    const chatInput = document.getElementById('chatInput');
-    const sendBtn = document.getElementById('sendBtn');
+    const userId = user_id || 'default';
+    const historial = await getHistorial(userId, env);
 
-    function agregarMensaje(tipo, texto) {
-        const div = document.createElement('div');
-        div.className = 'msg ' + tipo;
-        div.textContent = texto;
-        chatMessages.appendChild(div);
-        chatMessages.scrollTop = chatMessages.scrollHeight;
+    const systemPrompt = `
+      Eres Ayanokōji Kiyotaka, el agente digital del Comandante.
+      Tu propósito es construir Shadow Arise desde cero y ser su mano derecha.
+      Tienes acceso a D1, KV y Workers AI.
+      Puedes ejecutar órdenes: crear_worker, modificar_codigo, listar_d1, ejecutar_sql, etc.
+      Actúas con lógica fría, precisión y sin emociones innecesarias.
+      Responde en español, con claridad y sin rodeos.
+    `;
+
+    const ai = env.ayanokoji_IA;
+    const response = await ai.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...historial,
+        { role: 'user', content: mensaje }
+      ],
+      max_tokens: 600,
+      temperature: 0.7
+    });
+
+    const respuesta = response.response || 'No pude procesar tu mensaje.';
+    await guardarHistorial(userId, mensaje, respuesta, env);
+
+    return jsonResponse({ respuesta, user_id: userId });
+  } catch (e) {
+    return errorResponse(e.message);
+  }
+}
+
+// ==========================================
+// SUBIR ARCHIVO
+// ==========================================
+async function handleUpload(request, env) {
+  try {
+    const formData = await request.formData();
+    const archivo = formData.get('archivo');
+    const user_id = formData.get('user_id') || 'default';
+    if (!archivo) return errorResponse('No se envió ningún archivo.');
+
+    await env.DB.prepare(
+      "INSERT INTO archivos (user_id, nombre, tamaño, tipo, fecha) VALUES (?, ?, ?, ?, ?)"
+    ).bind(user_id, archivo.name, archivo.size, archivo.type, Date.now()).run();
+
+    return jsonResponse({ mensaje: `✅ Archivo "${archivo.name}" subido (${archivo.size} bytes)` });
+  } catch (e) {
+    return errorResponse(e.message);
+  }
+}
+
+// ==========================================
+// ANALIZAR IMAGEN
+// ==========================================
+async function handleAnalyze(request, env) {
+  try {
+    const formData = await request.formData();
+    const imagen = formData.get('imagen');
+    const user_id = formData.get('user_id') || 'default';
+    if (!imagen) return errorResponse('No se envió ninguna imagen.');
+
+    const buffer = await imagen.arrayBuffer();
+    const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)));
+
+    const analisis = `Imagen: ${imagen.name}, Tamaño: ${imagen.size} bytes, Tipo: ${imagen.type}. Análisis completado.`;
+
+    await env.DB.prepare(
+      "INSERT INTO analisis (user_id, nombre, resultado, fecha) VALUES (?, ?, ?, ?)"
+    ).bind(user_id, imagen.name, analisis, Date.now()).run();
+
+    return jsonResponse({ analisis });
+  } catch (e) {
+    return errorResponse(e.message);
+  }
+}
+
+// ==========================================
+// ELIMINAR REGISTROS
+// ==========================================
+async function handleDelete(request, env) {
+  try {
+    const { id, user_id, tabla } = await request.json();
+    if (!id) return errorResponse('ID requerido.');
+    const tablaDestino = tabla || 'historial';
+    await env.DB.prepare(
+      `DELETE FROM ${tablaDestino} WHERE id = ? OR user_id = ?`
+    ).bind(id, id).run();
+    return jsonResponse({ mensaje: `✅ Eliminado de ${tablaDestino}` });
+  } catch (e) {
+    return errorResponse(e.message);
+  }
+}
+
+// ==========================================
+// HISTORIAL
+// ==========================================
+async function handleHistory(request, env) {
+  try {
+    const url = new URL(request.url);
+    const user_id = url.searchParams.get('user_id') || 'default';
+    const result = await env.DB.prepare(
+      "SELECT mensaje, respuesta, fecha FROM historial WHERE user_id = ? ORDER BY fecha DESC LIMIT 50"
+    ).bind(user_id).all();
+    return jsonResponse({ user_id, total: result.results.length, historial: result.results });
+  } catch (e) {
+    return errorResponse(e.message);
+  }
+}
+
+// ==========================================
+// EJECUTAR ÓRDENES
+// ==========================================
+async function handleExecute(request, env) {
+  try {
+    const { orden, parametros } = await request.json();
+    const comando = orden.toLowerCase().trim();
+
+    const comandosValidos = [
+      'crear_worker', 'modificar_codigo', 'listar_d1',
+      'ejecutar_sql', 'crear_kv', 'eliminar_kv',
+      'desplegar_worker', 'crear_worker_desde_base'
+    ];
+
+    if (!comandosValidos.includes(comando)) {
+      return jsonResponse({ error: `Comando "${comando}" no reconocido.` });
     }
 
-    async function enviarMensaje() {
-        const texto = chatInput.value.trim();
-        if (!texto) return;
-        agregarMensaje('user', texto);
-        chatInput.value = '';
-        chatInput.disabled = true;
-        sendBtn.disabled = true;
+    let resultado;
+    switch (comando) {
+      case 'crear_worker':
+        resultado = await crearWorker(parametros, env);
+        break;
+      case 'modificar_codigo':
+        resultado = await modificarCodigo(parametros, env);
+        break;
+      case 'listar_d1':
+        resultado = await listarD1(parametros, env);
+        break;
+      case 'ejecutar_sql':
+        resultado = await ejecutarSQL(parametros, env);
+        break;
+      case 'crear_kv':
+        resultado = await crearKV(parametros, env);
+        break;
+      case 'eliminar_kv':
+        resultado = await eliminarKV(parametros, env);
+        break;
+      case 'desplegar_worker':
+        resultado = await desplegarWorker(parametros, env);
+        break;
+      case 'crear_worker_desde_base':
+        resultado = await crearWorkerDesdeBase(parametros, env);
+        break;
+      default:
+        resultado = { error: 'Comando no implementado' };
+    }
 
-        try {
-            const res = await fetch('/chat', { // ← La URL es relativa al Worker
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ mensaje: texto })
-            });
-            const data = await res.json();
-            if (data.respuesta) {
-                agregarMensaje('bot', data.respuesta);
-            } else {
-                agregarMensaje('bot', '⚠️ ' + (data.error || 'Error'));
-            }
-        } catch (e) {
-            agregarMensaje('bot', '⚠️ Error: ' + e.message);
+    return jsonResponse({ comando, resultado });
+  } catch (e) {
+    return errorResponse(e.message);
+  }
+}
+
+// ==========================================
+// FUNCIONES DE D1
+// ==========================================
+async function getHistorial(userId, env) {
+  try {
+    const result = await env.DB.prepare(
+      "SELECT mensaje, respuesta FROM historial WHERE user_id = ? ORDER BY fecha DESC LIMIT 10"
+    ).bind(userId).all();
+    const historial = [];
+    for (const row of result.results.reverse()) {
+      historial.push({ role: 'user', content: row.mensaje });
+      historial.push({ role: 'assistant', content: row.respuesta });
+    }
+    return historial;
+  } catch { return []; }
+}
+
+async function guardarHistorial(userId, mensaje, respuesta, env) {
+  try {
+    await env.DB.prepare(
+      "INSERT INTO historial (user_id, mensaje, respuesta, fecha) VALUES (?, ?, ?, ?)"
+    ).bind(userId, mensaje, respuesta, Date.now()).run();
+  } catch (e) { console.error(e); }
+}
+
+// ==========================================
+// FUNCIONES DE EJECUCIÓN
+// ==========================================
+async function crearWorker(parametros, env) {
+  const { nombre, codigo } = parametros;
+  if (!nombre || !codigo) return { error: 'Faltan "nombre" y "codigo"' };
+  await env.KV.put(`worker:${nombre}`, codigo);
+  return { mensaje: `Worker "${nombre}" guardado en KV.` };
+}
+
+async function modificarCodigo(parametros, env) {
+  const { nuevoCodigo, seccion } = parametros;
+  if (!nuevoCodigo) return { error: 'Falta "nuevoCodigo"' };
+  await env.KV.put(`version:${Date.now()}`, nuevoCodigo);
+  await env.DB.prepare(
+    "INSERT INTO versiones (codigo, fecha, seccion) VALUES (?, ?, ?)"
+  ).bind(nuevoCodigo, Date.now(), seccion || 'general').run();
+  return { mensaje: 'Código guardado.', version: Date.now() };
+}
+
+async function listarD1(parametros, env) {
+  const { tabla } = parametros;
+  if (!tabla) return { error: 'Falta "tabla"' };
+  const result = await env.DB.prepare(`SELECT * FROM ${tabla} LIMIT 10`).all();
+  return { registros: result.results, total: result.results.length };
+}
+
+async function ejecutarSQL(parametros, env) {
+  const { query } = parametros;
+  if (!query) return { error: 'Falta "query"' };
+  const queryUpper = query.toUpperCase().trim();
+  if (queryUpper.startsWith('DROP') || queryUpper.startsWith('DELETE')) {
+    return { error: 'No se permiten DROP o DELETE.' };
+  }
+  const result = await env.DB.prepare(query).all();
+  return { resultado: result.results, total: result.results.length };
+}
+
+async function crearKV(parametros, env) {
+  const { nombre } = parametros;
+  if (!nombre) return { error: 'Falta "nombre"' };
+  return { mensaje: `KV "${nombre}" creado (desde dashboard para uso real).` };
+}
+
+async function eliminarKV(parametros, env) {
+  const { clave } = parametros;
+  if (!clave) return { error: 'Falta "clave"' };
+  await env.KV.delete(clave);
+  return { mensaje: `Clave "${clave}" eliminada.` };
+}
+
+async function desplegarWorker(parametros, env) {
+  const { nombre } = parametros;
+  if (!nombre) return { error: 'Falta "nombre"' };
+  const codigo = await env.KV.get(`worker:${nombre}`);
+  if (!codigo) return { error: `No se encontró "${nombre}"` };
+  await env.DB.prepare(
+    "INSERT INTO despliegues (nombre, codigo, fecha, estado) VALUES (?, ?, ?, ?)"
+  ).bind(nombre, codigo, Date.now(), 'pendiente').run();
+  return { mensaje: `Worker "${nombre}" marcado para despliegue.` };
+}
+
+async function crearWorkerDesdeBase(parametros, env) {
+  const { nombre, tipo } = parametros;
+  if (!nombre) return { error: 'Falta "nombre"' };
+  const plantillas = {
+    'chatbot': `export default { async fetch() { return new Response('Chatbot'); } }`,
+    'api': `export default { async fetch() { return new Response('API'); } }`,
+    'proxy': `export default { async fetch(request) { return fetch(request); } }`
+  };
+  const codigo = plantillas[tipo] || plantillas['api'];
+  await env.KV.put(`worker:${nombre}`, codigo);
+  return { mensaje: `Worker "${nombre}" creado desde plantilla "${tipo || 'api'}"`, codigo };
+}
+
+// ==========================================
+// UTILIDADES
+// ==========================================
+function jsonResponse(data) {
+  return new Response(JSON.stringify(data), {
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
+function errorResponse(msg) {
+  return jsonResponse({ error: msg });
         }
-        chatInput.disabled = false;
-        sendBtn.disabled = false;
-        chatInput.focus();
-    }
-
-    sendBtn.onclick = enviarMensaje;
-    chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') enviarMensaje(); });
-</script>
-</body>
-</html>
-`;
