@@ -406,7 +406,7 @@ const HTML = `<!DOCTYPE html>
             const data = await res.json();
             resultDiv.textContent = data.mensaje || data.error || '✅ Subido.';
             if (data.mensaje) {
-                agregarMensaje('bot', `📎 "${file.name}" subido (${data.tamaño_legible})`);
+                agregarMensaje('bot', ` "${file.name}" subido (${data.tamaño_legible})`);
             }
         } catch (e) {
             resultDiv.textContent = '❌ Error: ' + e.message;
