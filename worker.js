@@ -107,20 +107,19 @@ async function handleD1(request, env) {
     // --- ESCRIBIR ---
     if (accion === 'escribir') {
       if (!tabla || !datos) return jsonResponse({ error: 'Faltan "tabla" y "datos"' });
-      // Construir consulta dinámicamente
       const keys = Object.keys(datos);
       const placeholders = keys.map(() => '?').join(', ');
       const values = Object.values(datos);
       const query = `INSERT INTO ${tabla} (${keys.join(', ')}) VALUES (${placeholders})`;
       await env.DB.prepare(query).bind(...values).run();
-      return jsonResponse({ mensaje: `✅ Dato insertado en ${tabla}` });
+      return jsonResponse({ mensaje: `Dato insertado en ${tabla}` });
     }
 
     // --- ELIMINAR ---
     if (accion === 'eliminar') {
       if (!tabla || !condicion) return jsonResponse({ error: 'Faltan "tabla" y "condicion"' });
       await env.DB.prepare(`DELETE FROM ${tabla} WHERE ${condicion}`).run();
-      return jsonResponse({ mensaje: `✅ Datos eliminados de ${tabla}` });
+      return jsonResponse({ mensaje: `Datos eliminados de ${tabla}` });
     }
 
     return jsonResponse({ error: 'Acción no reconocida' });
@@ -150,14 +149,14 @@ async function handleKV(request, env) {
       if (!clave) return jsonResponse({ error: 'Falta "clave"' });
       if (!valor) return jsonResponse({ error: 'Falta "valor"' });
       await env.KV.put(clave, valor);
-      return jsonResponse({ mensaje: `✅ Clave "${clave}" guardada en KV` });
+      return jsonResponse({ mensaje: `Clave "${clave}" guardada en KV` });
     }
 
     // --- ELIMINAR ---
     if (accion === 'eliminar') {
       if (!clave) return jsonResponse({ error: 'Falta "clave"' });
       await env.KV.delete(clave);
-      return jsonResponse({ mensaje: `✅ Clave "${clave}" eliminada de KV` });
+      return jsonResponse({ mensaje: `Clave "${clave}" eliminada de KV` });
     }
 
     return jsonResponse({ error: 'Acción no reconocida' });
@@ -177,15 +176,10 @@ async function handleCrearWorker(request, env) {
       return jsonResponse({ error: 'Faltan "nombre" y "codigo"' });
     }
 
-    // Guardar el código en KV para referencia
     await env.KV.put(`worker:${nombre}`, codigo);
 
-    // En un entorno real, aquí llamarías a la API de Cloudflare para desplegar el Worker
-    // Pero desde un Worker no puedes crear otro Worker directamente.
-    // Esto requiere un token de API con permisos.
-
     return jsonResponse({
-      mensaje: `✅ Worker "${nombre}" preparado para despliegue.`,
+      mensaje: `Worker "${nombre}" preparado para despliegue.`,
       nota: 'Para desplegarlo, usa /api/desplegar con el nombre del Worker.'
     });
   } catch (e) {
@@ -194,7 +188,7 @@ async function handleCrearWorker(request, env) {
 }
 
 // ==========================================
-// MEJORARSE A SÍ MISMO (guardar nueva versión)
+// MEJORARSE A SÍ MISMO
 // ==========================================
 async function handleMejorar(request, env) {
   try {
@@ -204,7 +198,7 @@ async function handleMejorar(request, env) {
     await env.KV.put('worker:version', nuevoCodigo);
 
     return jsonResponse({
-      mensaje: '✅ Código guardado. Usa /api/desplegar para aplicar la nueva versión.',
+      mensaje: 'Código guardado. Usa /api/desplegar para aplicar la nueva versión.',
       version: Date.now()
     });
   } catch (e) {
@@ -219,7 +213,6 @@ async function handleDesplegar(request, env) {
   try {
     const { nombre } = await request.json();
 
-    // Recuperar el código guardado
     let codigo;
     if (nombre) {
       codigo = await env.KV.get(`worker:${nombre}`);
@@ -231,14 +224,10 @@ async function handleDesplegar(request, env) {
       return jsonResponse({ error: 'No se encontró código para desplegar.' });
     }
 
-    // Aquí iría la llamada a la API de Cloudflare para desplegar el Worker.
-    // Esto requiere un token de API con permisos de edición.
-    // Por ahora, guardamos el código en KV y lo marcamos como "pendiente".
-
     await env.KV.put('worker:pendiente', codigo);
 
     return jsonResponse({
-      mensaje: `✅ Código preparado para despliegue.`,
+      mensaje: `Código preparado para despliegue.`,
       nota: 'Para desplegar automáticamente, necesitas un token de API de Cloudflare.'
     });
   } catch (e) {
@@ -273,7 +262,7 @@ async function handleUpload(request, env) {
     await env.KV.put(`file:${id}`, base64);
 
     return jsonResponse({
-      mensaje: `✅ Archivo "${nombre}" subido a KV.`,
+      mensaje: `Archivo "${nombre}" subido a KV.`,
       id: id,
       tamaño_legible: `${(size / 1024).toFixed(2)} KB`
     });
@@ -292,7 +281,7 @@ function jsonResponse(data) {
 }
 
 // ==========================================
-// HTML DEL INDEX (simplificado)
+// HTML DEL INDEX
 // ==========================================
 const HTML = `<!DOCTYPE html>
 <html lang="es">
@@ -336,11 +325,11 @@ const HTML = `<!DOCTYPE html>
 
     <div class="file-area">
         <input type="file" id="fileInput">
-        <button id="uploadBtn">📤 Subir archivo</button>
+        <button id="uploadBtn">Subir archivo</button>
     </div>
 
     <div class="result" id="result"></div>
-    <div class="status" id="status">✅ Conectado</div>
+    <div class="status" id="status">Conectado</div>
 </div>
 
 <script>
@@ -367,7 +356,7 @@ const HTML = `<!DOCTYPE html>
         chatInput.value = '';
         chatInput.disabled = true;
         sendBtn.disabled = true;
-        status.textContent = '⏳ Procesando...';
+        status.textContent = 'Procesando...';
 
         try {
             const res = await fetch('/api/chat', {
@@ -379,37 +368,37 @@ const HTML = `<!DOCTYPE html>
             if (data.respuesta) {
                 agregarMensaje('bot', data.respuesta);
             } else {
-                agregarMensaje('bot', '⚠️ ' + (data.error || 'Error'));
+                agregarMensaje('bot', 'Error: ' + (data.error || 'Error desconocido'));
             }
         } catch (e) {
-            agregarMensaje('bot', '⚠️ Error: ' + e.message);
+            agregarMensaje('bot', 'Error: ' + e.message);
         }
         chatInput.disabled = false;
         sendBtn.disabled = false;
         chatInput.focus();
-        status.textContent = '✅ Conectado';
+        status.textContent = 'Conectado';
     }
 
     async function subirArchivo() {
         const file = fileInput.files[0];
-        if (!file) { resultDiv.textContent = '⚠️ Selecciona un archivo.'; return; }
+        if (!file) { resultDiv.textContent = 'Selecciona un archivo.'; return; }
 
         const formData = new FormData();
         formData.append('archivo', file);
         formData.append('nombre', file.name);
 
-        resultDiv.textContent = '⏳ Subiendo...';
+        resultDiv.textContent = 'Subiendo...';
         uploadBtn.disabled = true;
 
         try {
             const res = await fetch('/api/subir', { method: 'POST', body: formData });
             const data = await res.json();
-            resultDiv.textContent = data.mensaje || data.error || '✅ Subido.';
+            resultDiv.textContent = data.mensaje || data.error || 'Subido.';
             if (data.mensaje) {
-                agregarMensaje('bot', ` "${file.name}" subido (${data.tamaño_legible})`);
+                agregarMensaje('bot', `${file.name} subido (${data.tamaño_legible})`);
             }
         } catch (e) {
-            resultDiv.textContent = '❌ Error: ' + e.message;
+            resultDiv.textContent = 'Error: ' + e.message;
         }
         uploadBtn.disabled = false;
         fileInput.value = '';
