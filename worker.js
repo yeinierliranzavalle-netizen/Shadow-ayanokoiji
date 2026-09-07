@@ -7,7 +7,6 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // --- RUTAS DE CONTROL ---
     if (path === '/api/chat' && request.method === 'POST') {
       return await handleChat(request, env);
     }
@@ -37,10 +36,9 @@ export default {
     }
 
     if (path === '/api/estado') {
-      return jsonResponse({ estado: 'activo', nombre: 'Ayanokōji Digital' });
+      return jsonResponse({ estado: 'activo', nombre: 'Ayanokoji Digital' });
     }
 
-    // --- SERVIR EL INDEX ---
     if (path === '/' || path === '/index.html') {
       return new Response(HTML, {
         headers: { 'Content-Type': 'text/html' }
@@ -51,9 +49,6 @@ export default {
   }
 };
 
-// ==========================================
-// CHAT CON IA
-// ==========================================
 async function handleChat(request, env) {
   try {
     const { mensaje } = await request.json();
@@ -63,14 +58,7 @@ async function handleChat(request, env) {
       return jsonResponse({ error: 'Binding de IA no configurado' });
     }
 
-    const systemPrompt = `
-      Eres Ayanokōji Kiyotaka, el agente digital del Comandante.
-      Tienes control total sobre D1, KV y la creación de Workers.
-      Puedes ejecutar órdenes: leer/escribir/eliminar en D1, leer/escribir/eliminar en KV, crear nuevos Workers.
-      Actúas con lógica fría, precisión y sin emociones innecesarias.
-      Responde en español, con claridad y sin rodeos.
-      Si el usuario te da una orden, ejecútala usando las herramientas que tienes.
-    `;
+    const systemPrompt = 'Eres Ayanokoji Kiyotaka, el agente digital del Comandante. Tienes control total sobre D1, KV y la creacion de Workers. Puedes ejecutar ordenes: leer/escribir/eliminar en D1, leer/escribir/eliminar en KV, crear nuevos Workers. Actuas con logica fria, precision y sin emociones innecesarias. Responde en espanol, con claridad y sin rodeos. Si el usuario te da una orden, ejecutala usando las herramientas que tienes.';
 
     const ai = env.ayanokoji_IA;
     const response = await ai.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
@@ -88,104 +76,83 @@ async function handleChat(request, env) {
   }
 }
 
-// ==========================================
-// CONTROL DE D1
-// ==========================================
 async function handleD1(request, env) {
   try {
     const { accion, tabla, datos, condicion } = await request.json();
 
-    if (!accion) return jsonResponse({ error: 'Falta "accion": leer, escribir, eliminar' });
+    if (!accion) return jsonResponse({ error: 'Falta accion: leer, escribir, eliminar' });
 
-    // --- LEER ---
     if (accion === 'leer') {
-      if (!tabla) return jsonResponse({ error: 'Falta "tabla"' });
-      const result = await env.DB.prepare(`SELECT * FROM ${tabla} ${condicion || ''}`).all();
+      if (!tabla) return jsonResponse({ error: 'Falta tabla' });
+      const result = await env.DB.prepare('SELECT * FROM ' + tabla + ' ' + (condicion || '')).all();
       return jsonResponse({ resultado: result.results, total: result.results.length });
     }
 
-    // --- ESCRIBIR ---
     if (accion === 'escribir') {
-      if (!tabla || !datos) return jsonResponse({ error: 'Faltan "tabla" y "datos"' });
-      // Construir consulta dinámicamente
+      if (!tabla || !datos) return jsonResponse({ error: 'Faltan tabla y datos' });
       const keys = Object.keys(datos);
-      const placeholders = keys.map(() => '?').join(', ');
+      const placeholders = keys.map(function() { return '?'; }).join(', ');
       const values = Object.values(datos);
-      const query = `INSERT INTO ${tabla} (${keys.join(', ')}) VALUES (${placeholders})`;
-      await env.DB.prepare(query).bind(...values).run();
-      return jsonResponse({ mensaje: `✅ Dato insertado en ${tabla}` });
+      const query = 'INSERT INTO ' + tabla + ' (' + keys.join(', ') + ') VALUES (' + placeholders + ')';
+      await env.DB.prepare(query).bind(values).run();
+      return jsonResponse({ mensaje: 'Dato insertado en ' + tabla });
     }
 
-    // --- ELIMINAR ---
     if (accion === 'eliminar') {
-      if (!tabla || !condicion) return jsonResponse({ error: 'Faltan "tabla" y "condicion"' });
-      await env.DB.prepare(`DELETE FROM ${tabla} WHERE ${condicion}`).run();
-      return jsonResponse({ mensaje: `✅ Datos eliminados de ${tabla}` });
+      if (!tabla || !condicion) return jsonResponse({ error: 'Faltan tabla y condicion' });
+      await env.DB.prepare('DELETE FROM ' + tabla + ' WHERE ' + condicion).run();
+      return jsonResponse({ mensaje: 'Datos eliminados de ' + tabla });
     }
 
-    return jsonResponse({ error: 'Acción no reconocida' });
+    return jsonResponse({ error: 'Accion no reconocida' });
   } catch (e) {
     return jsonResponse({ error: 'Error en D1: ' + e.message });
   }
 }
 
-// ==========================================
-// CONTROL DE KV
-// ==========================================
 async function handleKV(request, env) {
   try {
     const { accion, clave, valor } = await request.json();
 
-    if (!accion) return jsonResponse({ error: 'Falta "accion": leer, escribir, eliminar' });
+    if (!accion) return jsonResponse({ error: 'Falta accion: leer, escribir, eliminar' });
 
-    // --- LEER ---
     if (accion === 'leer') {
-      if (!clave) return jsonResponse({ error: 'Falta "clave"' });
+      if (!clave) return jsonResponse({ error: 'Falta clave' });
       const resultado = await env.KV.get(clave);
-      return jsonResponse({ clave, valor: resultado || null });
+      return jsonResponse({ clave: clave, valor: resultado || null });
     }
 
-    // --- ESCRIBIR ---
     if (accion === 'escribir') {
-      if (!clave) return jsonResponse({ error: 'Falta "clave"' });
-      if (!valor) return jsonResponse({ error: 'Falta "valor"' });
+      if (!clave) return jsonResponse({ error: 'Falta clave' });
+      if (!valor) return jsonResponse({ error: 'Falta valor' });
       await env.KV.put(clave, valor);
-      return jsonResponse({ mensaje: `✅ Clave "${clave}" guardada en KV` });
+      return jsonResponse({ mensaje: 'Clave ' + clave + ' guardada en KV' });
     }
 
-    // --- ELIMINAR ---
     if (accion === 'eliminar') {
-      if (!clave) return jsonResponse({ error: 'Falta "clave"' });
+      if (!clave) return jsonResponse({ error: 'Falta clave' });
       await env.KV.delete(clave);
-      return jsonResponse({ mensaje: `✅ Clave "${clave}" eliminada de KV` });
+      return jsonResponse({ mensaje: 'Clave ' + clave + ' eliminada de KV' });
     }
 
-    return jsonResponse({ error: 'Acción no reconocida' });
+    return jsonResponse({ error: 'Accion no reconocida' });
   } catch (e) {
     return jsonResponse({ error: 'Error en KV: ' + e.message });
   }
 }
 
-// ==========================================
-// CREAR NUEVOS WORKERS
-// ==========================================
 async function handleCrearWorker(request, env) {
   try {
     const { nombre, codigo } = await request.json();
 
     if (!nombre || !codigo) {
-      return jsonResponse({ error: 'Faltan "nombre" y "codigo"' });
+      return jsonResponse({ error: 'Faltan nombre y codigo' });
     }
 
-    // Guardar el código en KV para referencia
-    await env.KV.put(`worker:${nombre}`, codigo);
-
-    // En un entorno real, aquí llamarías a la API de Cloudflare para desplegar el Worker
-    // Pero desde un Worker no puedes crear otro Worker directamente.
-    // Esto requiere un token de API con permisos.
+    await env.KV.put('worker:' + nombre, codigo);
 
     return jsonResponse({
-      mensaje: `✅ Worker "${nombre}" preparado para despliegue.`,
+      mensaje: 'Worker ' + nombre + ' preparado para despliegue.',
       nota: 'Para desplegarlo, usa /api/desplegar con el nombre del Worker.'
     });
   } catch (e) {
@@ -193,18 +160,15 @@ async function handleCrearWorker(request, env) {
   }
 }
 
-// ==========================================
-// MEJORARSE A SÍ MISMO (guardar nueva versión)
-// ==========================================
 async function handleMejorar(request, env) {
   try {
     const { nuevoCodigo } = await request.json();
-    if (!nuevoCodigo) return jsonResponse({ error: 'Falta el nuevo código.' });
+    if (!nuevoCodigo) return jsonResponse({ error: 'Falta el nuevo codigo.' });
 
     await env.KV.put('worker:version', nuevoCodigo);
 
     return jsonResponse({
-      mensaje: '✅ Código guardado. Usa /api/desplegar para aplicar la nueva versión.',
+      mensaje: 'Codigo guardado. Usa /api/desplegar para aplicar la nueva version.',
       version: Date.now()
     });
   } catch (e) {
@@ -212,43 +176,32 @@ async function handleMejorar(request, env) {
   }
 }
 
-// ==========================================
-// DESPLEGAR NUEVA VERSIÓN
-// ==========================================
 async function handleDesplegar(request, env) {
   try {
     const { nombre } = await request.json();
 
-    // Recuperar el código guardado
     let codigo;
     if (nombre) {
-      codigo = await env.KV.get(`worker:${nombre}`);
+      codigo = await env.KV.get('worker:' + nombre);
     } else {
       codigo = await env.KV.get('worker:version');
     }
 
     if (!codigo) {
-      return jsonResponse({ error: 'No se encontró código para desplegar.' });
+      return jsonResponse({ error: 'No se encontro codigo para desplegar.' });
     }
-
-    // Aquí iría la llamada a la API de Cloudflare para desplegar el Worker.
-    // Esto requiere un token de API con permisos de edición.
-    // Por ahora, guardamos el código en KV y lo marcamos como "pendiente".
 
     await env.KV.put('worker:pendiente', codigo);
 
     return jsonResponse({
-      mensaje: `✅ Código preparado para despliegue.`,
-      nota: 'Para desplegar automáticamente, necesitas un token de API de Cloudflare.'
+      mensaje: 'Codigo preparado para despliegue.',
+      nota: 'Para desplegar automaticamente, necesitas un token de API de Cloudflare.'
     });
   } catch (e) {
     return jsonResponse({ error: 'Error al desplegar: ' + e.message });
   }
 }
 
-// ==========================================
-// SUBIR ARCHIVOS
-// ==========================================
 async function handleUpload(request, env) {
   try {
     const formData = await request.formData();
@@ -256,7 +209,7 @@ async function handleUpload(request, env) {
     const nombre = formData.get('nombre') || archivo.name || 'sin_nombre';
 
     if (!archivo) {
-      return jsonResponse({ error: 'No se envió ningún archivo.' });
+      return jsonResponse({ error: 'No se envio ningun archivo.' });
     }
 
     const buffer = await archivo.arrayBuffer();
@@ -268,23 +221,25 @@ async function handleUpload(request, env) {
       });
     }
 
-    const id = `${Date.now()}_${nombre}`;
-    const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)));
-    await env.KV.put(`file:${id}`, base64);
+    const id = '' + Date.now() + '_' + nombre;
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    const base64 = btoa(binary);
+    await env.KV.put('file:' + id, base64);
 
     return jsonResponse({
-      mensaje: `✅ Archivo "${nombre}" subido a KV.`,
+      mensaje: 'Archivo ' + nombre + ' subido a KV.',
       id: id,
-      tamaño_legible: `${(size / 1024).toFixed(2)} KB`
+      tamano_legibile: (size / 1024).toFixed(2) + ' KB'
     });
   } catch (e) {
     return jsonResponse({ error: 'Error al subir archivo: ' + e.message });
   }
 }
 
-// ==========================================
-// UTILIDADES
-// ==========================================
 function jsonResponse(data) {
   return new Response(JSON.stringify(data), {
     headers: { 'Content-Type': 'application/json' }
@@ -292,132 +247,6 @@ function jsonResponse(data) {
 }
 
 // ==========================================
-// HTML DEL INDEX (simplificado)
+// HTML DEL INDEX (sin template strings)
 // ==========================================
-const HTML = `<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ayanokōji Digital</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; font-family: system-ui, sans-serif; }
-        body { background: #0a0a14; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 1rem; }
-        .card { max-width: 800px; width: 100%; background: #0d1420; border: 1px solid #2c3a5a; border-radius: 20px; padding: 1.5rem; }
-        h1 { color: #aaffff; text-align: center; font-weight: 300; }
-        h1 span { color: #7a5cff; font-weight: 600; }
-        .chat-box { height: 400px; overflow-y: auto; border: 1px solid #1a2a3a; border-radius: 12px; padding: 1rem; margin: 1rem 0; background: #0a1525; display: flex; flex-direction: column; gap: 0.5rem; }
-        .msg { max-width: 85%; padding: 0.5rem 1rem; border-radius: 14px; font-size: 0.95rem; word-wrap: break-word; }
-        .msg.user { align-self: flex-end; background: #1a2a4a; color: #d0d8e8; }
-        .msg.bot { align-self: flex-start; background: #0f1a2a; border: 1px solid #2c3a5a; color: #c8d8e8; }
-        .input-area { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
-        .input-area input { flex: 1; padding: 0.7rem; border-radius: 12px; border: 1px solid #2c4a6a; background: #0a1525; color: white; }
-        .input-area button { padding: 0.7rem 1.2rem; border: none; border-radius: 12px; background: linear-gradient(135deg, #2a1a5a, #4a2a7a); color: white; font-weight: bold; cursor: pointer; }
-        .file-area { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
-        .file-area input[type="file"] { flex: 1; padding: 0.5rem; border-radius: 12px; border: 1px solid #2c4a6a; background: #0a1525; color: #aaffff; }
-        .file-area button { padding: 0.7rem 1.2rem; border: none; border-radius: 12px; background: #2a4a6a; color: white; font-weight: bold; cursor: pointer; }
-        .status { font-size: 0.8rem; color: #6a6a8a; text-align: center; margin-top: 0.5rem; }
-        .result { margin-top: 0.5rem; padding: 0.5rem; border-radius: 8px; background: #0a1525; border: 1px solid #2c4a6a; font-size: 0.85rem; color: #aaffff; }
-    </style>
-</head>
-<body>
-<div class="card">
-    <h1>⚡ <span>SHADOW</span> ARISE</h1>
-    <p style="text-align:center; color:#6a6a8a; font-size:0.85rem;">Ayanokōji Digital · Control Total</p>
-
-    <div class="chat-box" id="chatMessages">
-        <div class="msg bot">*El agente está listo.* Puedes dar órdenes sobre D1, KV y Workers.</div>
-    </div>
-
-    <div class="input-area">
-        <input type="text" id="chatInput" placeholder="Escribe tu mensaje u orden...">
-        <button id="sendBtn">Enviar</button>
-    </div>
-
-    <div class="file-area">
-        <input type="file" id="fileInput">
-        <button id="uploadBtn">📤 Subir archivo</button>
-    </div>
-
-    <div class="result" id="result"></div>
-    <div class="status" id="status">✅ Conectado</div>
-</div>
-
-<script>
-    const chatMessages = document.getElementById('chatMessages');
-    const chatInput = document.getElementById('chatInput');
-    const sendBtn = document.getElementById('sendBtn');
-    const fileInput = document.getElementById('fileInput');
-    const uploadBtn = document.getElementById('uploadBtn');
-    const resultDiv = document.getElementById('result');
-    const status = document.getElementById('status');
-
-    function agregarMensaje(tipo, texto) {
-        const div = document.createElement('div');
-        div.className = 'msg ' + tipo;
-        div.textContent = texto;
-        chatMessages.appendChild(div);
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-    }
-
-    async function enviarMensaje() {
-        const texto = chatInput.value.trim();
-        if (!texto) return;
-        agregarMensaje('user', texto);
-        chatInput.value = '';
-        chatInput.disabled = true;
-        sendBtn.disabled = true;
-        status.textContent = '⏳ Procesando...';
-
-        try {
-            const res = await fetch('/api/chat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ mensaje: texto })
-            });
-            const data = await res.json();
-            if (data.respuesta) {
-                agregarMensaje('bot', data.respuesta);
-            } else {
-                agregarMensaje('bot', '⚠️ ' + (data.error || 'Error'));
-            }
-        } catch (e) {
-            agregarMensaje('bot', '⚠️ Error: ' + e.message);
-        }
-        chatInput.disabled = false;
-        sendBtn.disabled = false;
-        chatInput.focus();
-        status.textContent = '✅ Conectado';
-    }
-
-    async function subirArchivo() {
-        const file = fileInput.files[0];
-        if (!file) { resultDiv.textContent = '⚠️ Selecciona un archivo.'; return; }
-
-        const formData = new FormData();
-        formData.append('archivo', file);
-        formData.append('nombre', file.name);
-
-        resultDiv.textContent = '⏳ Subiendo...';
-        uploadBtn.disabled = true;
-
-        try {
-            const res = await fetch('/api/subir', { method: 'POST', body: formData });
-            const data = await res.json();
-            resultDiv.textContent = data.mensaje || data.error || '✅ Subido.';
-            if (data.mensaje) {
-                agregarMensaje('bot', `📎 "${file.name}" subido (${data.tamaño_legible})`);
-            }
-        } catch (e) {
-            resultDiv.textContent = '❌ Error: ' + e.message;
-        }
-        uploadBtn.disabled = false;
-        fileInput.value = '';
-    }
-
-    sendBtn.onclick = enviarMensaje;
-    chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') enviarMensaje(); });
-    uploadBtn.onclick = subirArchivo;
-</script>
-</body>
-</html>`;
+const HTML = '<!DOCTYPE html>\n<html lang="es">\n<head>\n    <meta charset="UTF-8">\n    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n    <title>Ayanokoji Digital</title>\n    <style>\n        * { margin: 0; padding: 0; box-sizing: border-box; font-family: system-ui, sans-serif; }\n        body { background: #0a0a14; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 1rem; }\n        .card { max-width: 800px; width: 100%; background: #0d1420; border: 1px solid #2c3a5a; border-radius: 20px; padding: 1.5rem; }\n        h1 { color: #aaffff; text-align: center; font-weight: 300; }\n        h1 span { color: #7a5cff; font-weight: 600; }\n        .chat-box { height: 400px; overflow-y: auto; border: 1px solid #1a2a3a; border-radius: 12px; padding: 1rem; margin: 1rem 0; background: #0a1525; display: flex; flex-direction: column; gap: 0.5rem; }\n        .msg { max-width: 85%; padding: 0.5rem 1rem; border-radius: 14px; font-size: 0.95rem; word-wrap: break-word; }\n        .msg.user { align-self: flex-end; background: #1a2a4a; color: #d0d8e8; }\n        .msg.bot { align-self: flex-start; background: #0f1a2a; border: 1px solid #2c3a5a; color: #c8d8e8; }\n        .input-area { display: flex; gap: 0.5rem; margin-top: 0.5rem; }\n        .input-area input { flex: 1; padding: 0.7rem; border-radius: 12px; border: 1px solid #2c4a6a; background: #0a1525; color: white; }\n        .input-area button { padding: 0.7rem 1.2rem; border: none; border-radius: 12px; background: linear-gradient(135deg, #2a1a5a, #4a2a7a); color: white; font-weight: bold; cursor: pointer; }\n        .file-area { display: flex; gap: 0.5rem; margin-top: 0.5rem; }\n        .file-area input[type="file"] { flex: 1; padding: 0.5rem; border-radius: 12px; border: 1px solid #2c4a6a; background: #0a1525; color: #aaffff; }\n        .file-area button { padding: 0.7rem 1.2rem; border: none; border-radius: 12px; background: #2a4a6a; color: white; font-weight: bold; cursor: pointer; }\n        .status { font-size: 0.8rem; color: #6a6a8a; text-align: center; margin-top: 0.5rem; }\n        .result { margin-top: 0.5rem; padding: 0.5rem; border-radius: 8px; background: #0a1525; border: 1px solid #2c4a6a; font-size: 0.85rem; color: #aaffff; }\n    </style>\n</head>\n<body>\n<div class="card">\n    <h1>⚡ <span>SHADOW</span> ARISE</h1>\n    <p style="text-align:center; color:#6a6a8a; font-size:0.85rem;">Ayanokoji Digital · Control Total</p>\n    <div class="chat-box" id="chatMessages">\n        <div class="msg bot">El agente esta listo. Puedes dar ordenes sobre D1, KV y Workers.</div>\n    </div>\n    <div class="input-area">\n        <input type="text" id="chatInput" placeholder="Escribe tu mensaje u orden...">\n        <button id="sendBtn">Enviar</button>\n    </div>\n    <div class="file-area">\n        <input type="file" id="fileInput">\n        <button id="uploadBtn">Subir archivo</button>\n    </div>\n    <div class="result" id="result"></div>\n    <div class="status" id="status">Conectado</div>\n</div>\n<script>\n    var chatMessages = document.getElementById(\'chatMessages\');\n    var chatInput = document.getElementById(\'chatInput\');\n    var sendBtn = document.getElementById(\'sendBtn\');\n    var fileInput = document.getElementById(\'fileInput\');\n    var uploadBtn = document.getElementById(\'uploadBtn\');\n    var resultDiv = document.getElementById(\'result\');\n    var status = document.getElementById(\'status\');\n\n    function agregarMensaje(tipo, texto) {\n        var div = document.createElement(\'div\');\n        div.className = \'msg \' + tipo;\n        div.textContent = texto;\n        chatMessages.appendChild(div);\n        chatMessages.scrollTop = chatMessages.scrollHeight;\n    }\n\n    async function enviarMensaje() {\n        var texto = chatInput.value.trim();\n        if (!texto) return;\n        agregarMensaje(\'user\', texto);\n        chatInput.value = \'\';\n        chatInput.disabled = true;\n        sendBtn.disabled = true;\n        status.textContent = \'Procesando...\';\n        try {\n            var res = await fetch(\'/api/chat\', {\n                method: \'POST\',\n                headers: { \'Content-Type\': \'application/json\' },\n                body: JSON.stringify({ mensaje: texto })\n            });\n            var data = await res.json();\n            if (data.respuesta) {\n                agregarMensaje(\'bot\', data.respuesta);\n            } else {\n                agregarMensaje(\'bot\', \'Error: \' + (data.error || \'Error desconocido\'));\n            }\n        } catch (e) {\n            agregarMensaje(\'bot\', \'Error: \' + e.message);\n        }\n        chatInput.disabled = false;\n        sendBtn.disabled = false;\n        chatInput.focus();\n        status.textContent = \'Conectado\';\n    }\n\n    async function subirArchivo() {\n        var file = fileInput.files[0];\n        if (!file) { resultDiv.textContent = \'Selecciona un archivo.\'; return; }\n        var formData = new FormData();\n        formData.append(\'archivo\', file);\n        formData.append(\'nombre\', file.name);\n        resultDiv.textContent = \'Subiendo...\';\n        uploadBtn.disabled = true;\n        try {\n            var res = await fetch(\'/api/subir\', { method: \'POST\', body: formData });\n            var data = await res.json();\n            resultDiv.textContent = data.mensaje || data.error || \'Subido.\';\n            if (data.mensaje) {\n                agregarMensaje(\'bot\', file.name + \' subido (\' + data.tamano_legibile + \')\');\n            }\n        } catch (e) {\n            resultDiv.textContent = \'Error: \' + e.message;\n        }\n        uploadBtn.disabled = false;\n        fileInput.value = \'\';\n    }\n\n    sendBtn.onclick = enviarMensaje;\n    chatInput.addEventListener(\'keydown\', function(e) { if (e.key === \'Enter\') enviarMensaje(); });\n    uploadBtn.onclick = subirArchivo;\n</script>\n</body>\n</html>';
