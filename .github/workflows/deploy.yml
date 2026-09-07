@@ -19,26 +19,30 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Configurar Node.js (sin cache, porque no tenemos package-lock.json)
+      # 2. Configurar Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      # 3. Instalar Wrangler globalmente (no usa package-lock.json)
+      # 3. Instalar Wrangler globalmente
       - name: Install Wrangler
         run: npm install -g wrangler
 
-      # 4. Verificar que el Worker existe
+      # 4. Verificar que el Worker existe (con el nombre correcto)
       - name: Check Worker file
         run: |
-          if [ ! -f "_worker.js" ]; then
-            echo "❌ No se encontró _worker.js en la raíz del proyecto."
+          if [ ! -f "worker.js" ]; then
+            echo "❌ No se encontró worker.js en la raíz del proyecto."
             exit 1
           fi
-          echo "✅ _worker.js encontrado"
+          if [ ! -f "wrangler.toml" ]; then
+            echo "❌ No se encontró wrangler.toml"
+            exit 1
+          fi
+          echo "✅ worker.js y wrangler.toml encontrados"
 
-      # 5. Desplegar a Cloudflare Workers
+      # 5. Desplegar usando wrangler.toml
       - name: Deploy to Cloudflare Workers
         run: wrangler deploy --minify
         env:
