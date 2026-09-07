@@ -1,8 +1,6 @@
 # ==================================================
 # SHADOW ARISE - DEPLOY A CLOUDFLARE WORKERS
 # ==================================================
-# Este workflow se ejecuta al hacer push a la rama main
-# y también se puede ejecutar manualmente desde Actions.
 
 name: Deploy to Cloudflare Workers
 
@@ -10,106 +8,43 @@ on:
   push:
     branches:
       - main
-      - develop
-  workflow_dispatch: # Permite ejecución manual desde el panel de GitHub
-
-env:
-  # Versión de Node a usar (evita problemas de compatibilidad)
-  NODE_VERSION: '22'
-  # Versión de Wrangler (fija para evitar cambios inesperados)
-  WRANGLER_VERSION: '3.90.0'
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10 # Evita que el job se cuelgue indefinidamente
 
     steps:
-      # ==========================================
-      # 1. CHECKOUT DEL CÓDIGO
-      # ==========================================
+      # 1. Descargar el código
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ==========================================
-      # 2. CONFIGURAR NODE.js
-      # ==========================================
+      # 2. Configurar Node.js (sin cache, porque no tenemos package-lock.json)
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
+          node-version: '22'
 
-      # ==========================================
-      # 3. INSTALAR DEPENDENCIAS
-      # ==========================================
-      - name: Install dependencies
-        run: npm ci --no-audit --no-fund
-        # npm ci es más rápido y fiable que npm install en CI
+      # 3. Instalar Wrangler globalmente (no usa package-lock.json)
+      - name: Install Wrangler
+        run: npm install -g wrangler
 
-      # ==========================================
-      # 4. VERIFICAR QUE EL CÓDIGO ES VÁLIDO
-      # ==========================================
-      - name: Validate Worker code
+      # 4. Verificar que el Worker existe
+      - name: Check Worker file
         run: |
-          if [ ! -f "_worker.js" ] && [ ! -f "src/index.ts" ]; then
-            echo "❌ No se encontró _worker.js ni src/index.ts"
+          if [ ! -f "_worker.js" ]; then
+            echo "❌ No se encontró _worker.js en la raíz del proyecto."
             exit 1
           fi
-          echo "✅ Worker code found"
+          echo "✅ _worker.js encontrado"
 
-      # ==========================================
-      # 5. VERIFICAR VARIABLES DE ENTORNO
-      # ==========================================
-      - name: Verify secrets
-        run: |
-          if [ -z "${{ secrets.CF_API_TOKEN }}" ]; then
-            echo "❌ CF_API_TOKEN no está configurado"
-            exit 1
-          fi
-          if [ -z "${{ secrets.CF_ID }}" ]; then
-            echo "❌ CF_ID (Account ID) no está configurado"
-            exit 1
-          fi
-          echo "✅ Secrets verificados"
-
-      # ==========================================
-      # 6. CONSTRUIR PROYECTO (si existe script de build)
-      # ==========================================
-      - name: Build project
-        run: |
-          if npm run | grep -q " build"; then
-            npm run build
-          else
-            echo "ℹ️ No se encontró script de build, saltando..."
-          fi
-
-      # ==========================================
-      # 7. DEPLOY A CLOUDFLARE WORKERS (v4)
-      # ==========================================
-      # Usamos v4 porque es más estable y maneja mejor las dependencias
+      # 5. Desplegar a Cloudflare Workers
       - name: Deploy to Cloudflare Workers
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ID }}
-          wranglerVersion: ${{ env.WRANGLER_VERSION }}
-          command: deploy --minify
-          # --minify reduce el tamaño del código desplegado
+        run: wrangler deploy --minify
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ID }}
 
-      # ==========================================
-      # 8. NOTIFICACIÓN DE ÉXITO (opcional)
-      # ==========================================
-      - name: Deployment successful
-        run: echo "✅ Despliegue completado correctamente"
-
-      # ==========================================
-      # 9. NOTIFICACIÓN DE FALLO (con logs)
-      # ==========================================
-      - name: Debug logs on failure
-        if: failure()
-        run: |
-          echo "❌ El despliegue falló. Revisa los logs arriba."
-          echo "Verifica que las variables CF_API_TOKEN y CF_ID estén configuradas."
-          echo "También revisa que el código del Worker sea válido."
-          
+      # 6. Mensaje de éxito
+      - name: Success
+        run: echo "✅ Despliegue completado"
