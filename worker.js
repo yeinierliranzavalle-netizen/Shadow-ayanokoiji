@@ -2,23 +2,25 @@
 // SHADOW ARISE - AGENTE DIGITAL (FINAL)
 // ORQUESTA D1, KV, SUBIDA DE ARCHIVOS Y RESUMEN
 // ==================================================
+// AUTOR: COMANDANTE SHADOW (ESTRUCTURA BASE)
+// MEJORAS Y CORRECCIÓN: AYANOKŌJI DIGITAL
+// VERSIÓN: 2.1 (CORREGIDA)
+// ==================================================
 
 // ------------------------------------------------------------------
 // CONSTANTES Y CONFIGURACIÓN
 // ------------------------------------------------------------------
 const LIMITE_KV = 950 * 1024; // 950 KB (margen para evitar errores)
 const BINDINGS = {
-  // D1 Databases
   d1: {
-    agente: 'DB',          // Uso personal del agente
-    test: 'DB_test',       // Sandbox / pruebas
-    shadow: 'DB_shadow_arise' // Proyecto real
+    agente: 'DB',
+    test: 'DB_test',
+    shadow: 'DB_shadow_arise'
   },
-  // KV Namespaces
   kv: {
-    agente: 'KV',          // Uso personal del agente
-    test: 'KV_test',       // Sandbox / pruebas
-    shadow: 'KV_shadow_arise' // Proyecto real
+    agente: 'KV',
+    test: 'KV_test',
+    shadow: 'KV_shadow_arise'
   }
 };
 
@@ -61,8 +63,8 @@ export default {
       return await handleDesplegar(request, env);
     }
     if (path === '/api/estado') {
-      return jsonResponse({ 
-        estado: 'activo', 
+      return jsonResponse({
+        estado: 'activo',
         nombre: 'Ayanokōji Digital',
         bindings: {
           d1: Object.keys(BINDINGS.d1),
@@ -89,7 +91,6 @@ async function handleChat(request, env) {
 
     let contextoExtra = '';
     if (contexto) {
-      // Buscar en D1 si hay contexto guardado
       const result = await env.DB.prepare(
         'SELECT resumen FROM contexto WHERE fase = ? ORDER BY id DESC LIMIT 1'
       ).bind(contexto).first();
@@ -131,7 +132,7 @@ async function handleUpload(request, env) {
     const formData = await request.formData();
     const archivo = formData.get('archivo');
     const nombre = formData.get('nombre') || archivo.name || 'sin_nombre';
-    const destino = formData.get('destino') || 'agente'; // 'agente', 'test', 'shadow'
+    const destino = formData.get('destino') || 'agente';
 
     if (!archivo) {
       return jsonResponse({ error: 'No se envió ningún archivo.' });
@@ -142,7 +143,6 @@ async function handleUpload(request, env) {
     const chunks = [];
     const chunkSize = LIMITE_KV;
 
-    // Dividir en fragmentos si supera el límite
     if (size > chunkSize) {
       const bytes = new Uint8Array(buffer);
       for (let i = 0; i < bytes.length; i += chunkSize) {
@@ -167,14 +167,12 @@ async function handleUpload(request, env) {
       subido: Date.now()
     };
 
-    // Guardar cada fragmento en KV
     for (let i = 0; i < chunks.length; i++) {
       const key = 'file:' + idBase + ':' + i;
       const base64 = bufferToBase64(chunks[i]);
       await kv.put(key, base64);
     }
 
-    // Guardar metadatos en D1
     const d1 = getD1(env, destino);
     await d1.prepare(
       `INSERT INTO archivos (id, nombre, tamaño, chunks, destino, fecha)
@@ -204,11 +202,9 @@ async function handleResumir(request, env) {
 
     let contenido = texto;
     if (archivoId) {
-      // Recuperar el texto desde KV (reconstruir si es múltiple)
       const kv = getKV(env, destino || 'agente');
       if (!kv) return jsonResponse({ error: 'Destino inválido.' });
 
-      // Buscar todos los fragmentos del archivo
       const list = await kv.list({ prefix: 'file:' + archivoId + ':' });
       if (list.keys.length === 0) {
         return jsonResponse({ error: 'Archivo no encontrado o vacío.' });
@@ -226,13 +222,11 @@ async function handleResumir(request, env) {
       return jsonResponse({ error: 'El contenido es demasiado corto para resumir.' });
     }
 
-    // Usar IA para generar resumen en 6 fases
     const ai = env.ayanokoji_IA;
     if (!ai) {
       return jsonResponse({ error: 'Binding de IA no configurado.' });
     }
 
-    // Dividir en bloques de 5000 caracteres para no saturar la IA
     const chunks = splitText(contenido, 5000);
     const resumenes = [];
 
@@ -254,11 +248,9 @@ async function handleResumir(request, env) {
       }
     }
 
-    // Combinar resúmenes y generar versión final
     const resumenFinal = resumenes.join(' ').slice(0, 3000);
     const fases = extraerFases(resumenFinal);
 
-    // Guardar en D1
     const d1 = getD1(env, destino || 'agente');
     await d1.prepare(
       `INSERT INTO contexto (fecha, resumen, fases, fuente)
@@ -363,7 +355,6 @@ async function handleCrearWorker(request, env) {
     const kv = getKV(env, destino || 'agente');
     await kv.put('worker:' + nombre, codigo);
 
-    // Registrar en D1
     const db = getD1(env, destino || 'agente');
     await db.prepare(
       `INSERT INTO workers (nombre, codigo, fecha) VALUES (?, ?, ?)`
@@ -475,7 +466,6 @@ function splitText(text, maxLength) {
   let start = 0;
   while (start < text.length) {
     let end = Math.min(start + maxLength, text.length);
-    // Buscar corte en punto o espacio
     if (end < text.length) {
       const lastSpace = text.lastIndexOf(' ', end);
       if (lastSpace > start) end = lastSpace;
@@ -487,9 +477,7 @@ function splitText(text, maxLength) {
 }
 
 function extraerFases(texto) {
-  // Extraer frases separadas por punto y coma o punto
   const partes = texto.split(/[.;]/).map(p => p.trim()).filter(p => p.length > 10);
-  // Tomar las primeras 6, o repetir si son menos
   const fases = partes.slice(0, 6);
   while (fases.length < 6) {
     fases.push('Fase pendiente de definir');
@@ -498,7 +486,7 @@ function extraerFases(texto) {
 }
 
 // ------------------------------------------------------------------
-// HTML DEL INDEX
+// HTML DEL INDEX (COMPLETO Y CORREGIDO)
 // ------------------------------------------------------------------
 const HTML = `<!DOCTYPE html>
 <html lang="es">
@@ -541,4 +529,16 @@ const HTML = `<!DOCTYPE html>
         <button id="sendBtn">Enviar</button>
     </div>
 
-    
+    <div class="file-area">
+        <input type="file" id="fileInput">
+        <select id="destinoSelect" class="destino-select">
+            <option value="agente">Agente</option>
+            <option value="test">Test</option>
+            <option value="shadow">Shadow Arise</option>
+        </select>
+        <button id="uploadBtn">Subir</button>
+    </div>
+
+    <div class="file-area" style="margin-top:0.5rem;">
+        <input type="text" id="resumirInput" placeholder="Texto a resumir o ID de archivo..." style="flex:1; padding:0.7rem; border-radius:12px; border:1px solid #2c4a6a; background:#0a1525; color:white;">
+        <button id="resumirBtn">Resumir</button
