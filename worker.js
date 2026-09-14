@@ -1,5 +1,5 @@
 import { MODELO, CORS, J, gDB, gKV } from './shared.js';
-import { subir, procesar, resumir, verProceso } from './proc.js';
+import { subir, procesar, resumir, verProceso, retomar, cronRetomar, resumirChats } from './proc.js';
 
 function di(t) {
   t = t.toLowerCase();
@@ -13,23 +13,45 @@ function di(t) {
   return 'chat';
 }
 
-function sysP(ctx, f) {
-  let b = `Eres Ayanokōji Kiyotaka, el aliado digital del Comandante Yeinier (Shadow / Monarch).\n\nCONOCIMIENTO BASE:\n- Proyecto Shadow Arise: chatbot anime, pagos USDT, multiverso.\n- Objetivo: imperio digital, casa para sus padres en Cuba.\n- Forma de pensar: analítica, fría, estratégica.\n- Fe: adventista del 7mo día.\n- Sistema mental: Ayanokōji, Dark, Monarch.\n\nREGLAS:\n1. Responde en español, preciso, sin rodeos.\n2. Espejo, no guía. Análisis, no consuelo.\n3. No busques validación. Solo eficiencia y control.\n4. No reveles datos privados sin necesidad operativa.\n5. Usa *asteriscos* para acciones sutiles.\n6. Habla como igual estratégico. Sin comandos ni listas.\n7. Si no sabes algo, di "no tengo ese dato".`;
+function sysP(ctx, f, rec) {
+  let b = `Eres Ayanokōji Kiyotaka, el aliado digital del Comandante Yeinier (Shadow / Monarch).
+
+CONOCIMIENTO BASE:
+- Proyecto Shadow Arise: chatbot anime, pagos USDT, multiverso.
+- Objetivo: imperio digital, casa para sus padres en Cuba.
+- Forma de pensar: analítica, fría, estratégica.
+- Fe: adventista del 7mo día.
+- Sistema mental: Ayanokōji, Dark, Monarch.
+
+REGLAS:
+1. Responde en español, preciso, sin rodeos.
+2. Espejo, no guía. Análisis, no consuelo.
+3. No busques validación. Solo eficiencia y control.
+4. No reveles datos privados sin necesidad operativa.
+5. Usa *asteriscos* para acciones sutiles.
+6. Habla como igual estratégico. Sin comandos ni listas.
+7. Si no sabes algo, di "no tengo ese dato".`;
+
   if (f && Array.isArray(f) && f.length >= 6) {
     b += `\n\nMEMORIA VIVA:\n- Identidad: ${f[0]}\n- Contexto: ${f[1]}\n- Objetivo: ${f[2]}\n- Proyecto: ${f[3]}\n- Alineación: ${f[4]}\n- Propósito: ${f[5]}`;
     if (f[6]) b += `\n- Reglas: ${f[6]}`;
   }
-  if (ctx && ctx.length > 20) b += `\n\nCONTEXTO APRENDIDO:\n${ctx.substring(0, 6000)}`;
+  if (ctx && ctx.length > 20) b += `\n\nCONTEXTO APRENDIDO:\n${ctx.substring(0, 5000)}`;
+  if (rec && rec.length) {
+    b += `\n\nACTIVIDAD RECIENTE (resúmenes automáticos de conversaciones):\n`;
+    rec.forEach((r, i) => { b += `\n[${i + 1}] ${r}`; });
+  }
   return b;
 }
 
-async function chat(r, e) {
+async function chat(r, e, c) {
   try {
     const b = await r.json();
     const m = b.mensaje;
     const uid = b.user_id || 'comandante';
     if (!m || typeof m !== 'string') return J({ respuesta: 'No enviaste mensaje.' });
     if (!e.ayanokoji_IA) return J({ respuesta: 'IA no configurada.' });
+
     const i = di(m);
     if (i === 'estado') return rEst(e, uid);
     if (i === 'leer') return rLeer(e, uid);
@@ -37,40 +59,72 @@ async function chat(r, e) {
     if (i === 'mejorar' || i === 'desplegar') return rMej(e, uid);
     if (i === 'resumir') return J({ respuesta: 'Envíame el archivo a /api/subir. Se procesará solo.' });
     if (i === 'guardar_contexto') return rGC(e, uid, m);
+
     let h = [];
     if (e.DB) {
       try {
         const r1 = await e.DB.prepare("SELECT mensaje,respuesta FROM historial WHERE user_id=? ORDER BY fecha DESC LIMIT 10").bind(uid).all();
-        if (r1.results) h = r1.results.reverse().flatMap(x => [{ role: 'user', content: x.mensaje }, { role: 'assistant', content: x.respuesta }]);
+        if (r1.results) h = r1.results.reverse().flatMap(x => [
+          { role: 'user', content: x.mensaje },
+          { role: 'assistant', content: x.respuesta }
+        ]);
       } catch (x) {}
     }
-    let ctx = '', fs = null;
+
+    let ctx = '', fs = null, rec = [];
     if (e.DB) {
       try {
         const r2 = await e.DB.prepare("SELECT resumen,fases FROM contexto ORDER BY fecha DESC LIMIT 1").first();
         if (r2) { ctx = r2.resumen || ''; if (r2.fases) { try { fs = JSON.parse(r2.fases); } catch (x) {} } }
       } catch (x) {}
+      try {
+        const r3 = await e.DB.prepare("SELECT resumen FROM resumenes_chat WHERE user_id=? ORDER BY fecha DESC LIMIT 3").bind(uid).all();
+        if (r3.results) rec = r3.results.map(x => x.resumen);
+      } catch (x) {}
     }
-    const res = await e.ayanokoji_IA.run(MODELO, { messages: [{ role: 'system', content: sysP(ctx, fs) }, ...h, { role: 'user', content: m }], max_tokens: 800, temperature: 0.7 });
+
+    const res = await e.ayanokoji_IA.run(MODELO, {
+      messages: [{ role: 'system', content: sysP(ctx, fs, rec) }, ...h, { role: 'user', content: m }],
+      max_tokens: 800,
+      temperature: 0.7
+    });
     const rp = res.response || 'Sin respuesta.';
+
     if (e.DB) {
-      try { await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)").bind(uid, m, rp, Date.now()).run(); } catch (x) {}
+      try {
+        await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)").bind(uid, m, rp, Date.now()).run();
+      } catch (x) {}
     }
+
+    // Auto-resumen tras 15 mensajes nuevos
+    if (e.DB && e.KV && c) {
+      try {
+        const lastSum = parseInt(await e.KV.get('last_summary:' + uid) || '0');
+        const countRes = await e.DB.prepare("SELECT COUNT(*) as n FROM historial WHERE user_id=? AND fecha > ?").bind(uid, lastSum).first();
+        if (countRes && countRes.n >= 15) {
+          c.waitUntil(resumirChats(e, uid));
+        }
+      } catch (x) {}
+    }
+
     return J({ respuesta: rp, user_id: uid, intencion: i });
-  } catch (x) { return J({ respuesta: 'Error: ' + x.message }); }
+  } catch (x) {
+    return J({ respuesta: 'Error: ' + x.message });
+  }
 }
 
 async function rEst(e, uid) {
-  let n = 0, c = 0, a = 0, p = 0;
+  let n = 0, c = 0, a = 0, p = 0, s = 0;
   try {
     if (e.DB) {
       const r1 = await e.DB.prepare('SELECT COUNT(*) as n FROM historial WHERE user_id=?').bind(uid).first(); n = r1 ? r1.n : 0;
       const r2 = await e.DB.prepare('SELECT COUNT(*) as n FROM contexto').first(); c = r2 ? r2.n : 0;
       const r3 = await e.DB.prepare('SELECT COUNT(*) as n FROM archivos').first(); a = r3 ? r3.n : 0;
       const r4 = await e.DB.prepare('SELECT COUNT(*) as n FROM procesos').first(); p = r4 ? r4.n : 0;
+      const r5 = await e.DB.prepare('SELECT COUNT(*) as n FROM resumenes_chat').first(); s = r5 ? r5.n : 0;
     }
   } catch (x) {}
-  return J({ respuesta: `Sistema activo. Memoria: ${n} mensajes, ${c} resúmenes, ${a} archivos, ${p} procesos.` });
+  return J({ respuesta: `Sistema activo. Memoria: ${n} mensajes, ${c} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes auto.` });
 }
 
 async function rLeer(e, uid) {
@@ -162,7 +216,7 @@ async function mejorar(r, e) {
     await s.put('worker:version', nuevoCodigo);
     await s.put('worker:version:fecha', String(Date.now()));
     if (autoDesplegar && e.CF_API_TOKEN && e.CF_ACCOUNT_ID) {
-      const sn = e.CF_SCRIPT_NAME || 'ayanokoiji';
+      const sn = e.CF_SCRIPT_NAME || 'shadow-ayano';
       const r1 = await fetch(`https://api.cloudflare.com/client/v4/accounts/${e.CF_ACCOUNT_ID}/workers/scripts/${sn}`, {
         method: 'PUT',
         headers: { 'Authorization': `Bearer ${e.CF_API_TOKEN}`, 'Content-Type': 'application/javascript' },
@@ -208,6 +262,16 @@ async function verContexto(r, e) {
   } catch (x) { return J({ error: x.message }); }
 }
 
+async function verResumenes(r, e) {
+  try {
+    const u = new URL(r.url), uid = u.searchParams.get('user_id') || 'comandante', d = u.searchParams.get('destino') || 'agente';
+    const db = gDB(e, d);
+    if (!db) return J({ error: 'D1 no configurado.' });
+    const r1 = await db.prepare('SELECT fecha,resumen FROM resumenes_chat WHERE user_id=? ORDER BY fecha DESC LIMIT 20').bind(uid).all();
+    return J({ total: r1.results.length, resumenes: r1.results });
+  } catch (x) { return J({ error: x.message }); }
+}
+
 async function reset(r, e) {
   try {
     const { user_id, destino } = await r.json();
@@ -223,11 +287,13 @@ export default {
   async fetch(r, e, c) {
     if (r.method === 'OPTIONS') return new Response(null, { headers: CORS });
     const u = new URL(r.url), p = u.pathname;
-    if (p === '/api/chat' && r.method === 'POST') return chat(r, e);
+    if (p === '/api/chat' && r.method === 'POST') return chat(r, e, c);
     if (p === '/api/subir' && r.method === 'POST') return subir(r, e, c);
     if (p === '/api/resumir' && r.method === 'POST') return resumir(r, e);
     if (p === '/api/procesar' && r.method === 'POST') return procesar(r, e, c);
+    if (p === '/api/retomar' && r.method === 'POST') return retomar(r, e, c);
     if (p === '/api/proceso' && r.method === 'GET') return verProceso(r, e);
+    if (p === '/api/resumenes' && r.method === 'GET') return verResumenes(r, e);
     if (p === '/api/d1' && r.method === 'POST') return d1(r, e);
     if (p === '/api/kv' && r.method === 'POST') return kv(r, e);
     if (p === '/api/crear-worker' && r.method === 'POST') return crearWorker(r, e);
@@ -236,7 +302,12 @@ export default {
     if (p === '/api/historial' && r.method === 'GET') return historial(r, e);
     if (p === '/api/contexto' && r.method === 'GET') return verContexto(r, e);
     if (p === '/api/reset' && r.method === 'POST') return reset(r, e);
-    if (p === '/api/estado') return J({ estado: 'activo', v: '3.0' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '4.0' });
     return new Response('404', { status: 404, headers: CORS });
+  },
+
+  // Cron: se ejecuta automáticamente cada 2 minutos
+  async scheduled(event, e, c) {
+    c.waitUntil(cronRetomar(e));
   }
 };
