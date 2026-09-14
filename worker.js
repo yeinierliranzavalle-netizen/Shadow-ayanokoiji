@@ -195,7 +195,7 @@ async function historial(r, e) {
     if (!db) return J({ error: 'D1 no configurado.' });
     const r1 = await db.prepare('SELECT mensaje,respuesta,fecha FROM historial WHERE user_id=? ORDER BY fecha DESC LIMIT 50').bind(uid).all();
     return J({ user_id: uid, total: r1.results.length, historial: r1.results });
-  } catch x) { return J({ error: x.message }); }
+  } catch (x) { return J({ error: x.message }); }
 }
 
 async function verContexto(r, e) {
