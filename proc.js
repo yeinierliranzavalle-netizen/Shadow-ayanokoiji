@@ -1,5 +1,32 @@
 import { MODELO, CS, LPB, BPL, J, gDB, gKV, b64e, b64d, j2t } from './shared.js';
 
+// Cortar bytes respetando fronteras UTF-8 (no partir caracteres multibyte)
+function chunkBytes(bs, size) {
+  const ch = [];
+  let pos = 0;
+  while (pos < bs.length) {
+    let end = Math.min(pos + size, bs.length);
+    if (end < bs.length) {
+      while (end > pos && (bs[end] & 0xC0) === 0x80) end--;
+    }
+    ch.push(bs.slice(pos, end));
+    pos = end;
+  }
+  return ch;
+}
+
+// Reconstruir texto desde chunks KV (decodifica cada uno por separado)
+async function reconstruir(kv, prefix) {
+  const ls = await kv.list({ prefix });
+  const ks = ls.keys.sort((a, b) => parseInt(a.name.split(':').pop()) - parseInt(b.name.split(':').pop()));
+  let texto = '';
+  for (const k of ks) {
+    const c = await kv.get(k.name);
+    if (c) texto += b64d(c);
+  }
+  return texto;
+}
+
 export async function subir(r, e, c) {
   try {
     const f = await r.formData();
@@ -16,9 +43,10 @@ export async function subir(r, e, c) {
     const db = gDB(e, d);
     const id = Date.now() + '_' + nm.replace(/[^a-zA-Z0-9._-]/g, '_');
     const bs = new Uint8Array(buf);
-    const ch = [];
-    for (let i = 0; i < bs.length; i += CS) ch.push(bs.slice(i, i + CS));
-    for (let i = 0; i < ch.length; i++) await kv.put('file:' + id + ':' + i, b64e(ch[i]));
+    const ch = chunkBytes(bs, CS);
+    for (let i = 0; i < ch.length; i++) {
+      await kv.put('file:' + id + ':' + i, b64e(ch[i]));
+    }
     if (db) {
       try { await db.prepare('INSERT INTO archivos(id,nombre,tamaño,chunks,destino,fecha) VALUES(?,?,?,?,?,?)').bind(id, nm, t, ch.length, d, Date.now()).run(); } catch (x) {}
     }
@@ -47,11 +75,7 @@ export async function resumir(r, e) {
     if (!kv || !db) return J({ error: 'Destino inválido.' });
     let ct = b.texto;
     if (b.archivoId) {
-      const ls = await kv.list({ prefix: 'file:' + b.archivoId + ':' });
-      const ks = ls.keys.sort((a, b) => parseInt(a.name.split(':').pop()) - parseInt(b.name.split(':').pop()));
-      let bb = '';
-      for (const k of ks) { const c = await kv.get(k.name); if (c) bb += c; }
-      ct = j2t(b64d(bb));
+      ct = j2t(await reconstruir(kv, 'file:' + b.archivoId + ':'));
     }
     if (!ct || ct.length < 100) return J({ error: 'Contenido corto.' });
     const id = 'm_' + Date.now();
@@ -79,11 +103,7 @@ export async function procesarLote(e, aId, d, off) {
   try {
     let txt = await kv.get('proc:' + aId + ':texto');
     if (!txt) {
-      const ls = await kv.list({ prefix: 'file:' + aId + ':' });
-      const ks = ls.keys.sort((a, b) => parseInt(a.name.split(':').pop()) - parseInt(b.name.split(':').pop()));
-      let bb = '';
-      for (const k of ks) { const c = await kv.get(k.name); if (c) bb += c; }
-      txt = j2t(b64d(bb));
+      txt = j2t(await reconstruir(kv, 'file:' + aId + ':'));
       await kv.put('proc:' + aId + ':texto', txt);
     }
     const ln = txt.split('\n'), bl = [];
