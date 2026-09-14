@@ -1,7 +1,7 @@
 export const MODELO = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 export const CS = 500 * 1024;
 export const LPB = 120;
-export const BPL = 15;
+export const BPL = 5;
 
 export const CORS = {
   'Access-Control-Allow-Origin': '*',
