@@ -1,4 +1,44 @@
 name = "shadow-ayano"
 main = "worker.js"
-compatibility_date = "2026-08-11"
-workers_dev = true
+compatibility_date = "2024-11-01"
+
+# ===================== D1 =====================
+[[d1_databases]]
+binding = "DB"
+database_name = "memory_ayanokoiji"
+database_id = "28c25ce7-8c44-4cdb-a715-61234a5a90bd"
+
+[[d1_databases]]
+binding = "DB_test"
+database_name = "shadow_test"
+database_id = "364c4c82-dff5-448e-b6e6-17ceaf0b6013"
+
+[[d1_databases]]
+binding = "DB_shadow_arise"
+database_name = "shadow_arise"
+database_id = "66de1d53-ec2d-43f1-b29a-9c75ccf460fb"
+
+# ===================== KV =====================
+[[kv_namespaces]]
+binding = "KV"
+id = "ba719d17ca1247e4b463dedcaa1101be"
+
+[[kv_namespaces]]
+binding = "KV_test"
+id = "d87863688efe423389faa14b071e2d1e"
+
+[[kv_namespaces]]
+binding = "KV_shadow_arise"
+id = "c142ee747433431a8a2324327c3ca5c5"
+
+# ===================== WORKERS AI =====================
+[ai]
+binding = "ayanokoji_IA"
+
+# ===================== CRON =====================
+[triggers]
+crons = ["*/2 * * * *"]
+
+# ===================== OBSERVABILIDAD =====================
+[observability]
+enabled = true
