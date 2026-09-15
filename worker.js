@@ -1,5 +1,6 @@
 import { MODELO, CORS, J, gDB, gKV } from './shared.js';
 import { subir, procesar, resumir, verProceso, retomar, cronRetomar, resumirChats } from './proc.js';
+import { notificar } from './notify.js';
 
 function di(t) {
   t = t.toLowerCase();
@@ -96,7 +97,6 @@ async function chat(r, e, c) {
       } catch (x) {}
     }
 
-    // Auto-resumen tras 15 mensajes nuevos
     if (e.DB && e.KV && c) {
       try {
         const lastSum = parseInt(await e.KV.get('last_summary:' + uid) || '0');
@@ -154,7 +154,7 @@ async function rGC(e, uid, m) {
 }
 
 async function rMej(e, uid) {
-  if (!e.CF_API_TOKEN || !e.CF_ACCOUNT_ID) return J({ respuesta: 'Para desplegar mejoras necesito CF_API_TOKEN y CF_ACCOUNT_ID como secretos.' });
+  if (!e.CF_API_TOKEN || !e.CF_ACCOUNT_ID) return J({ respuesta: 'Para desplegar mejoras necesito CF_API_TOKEN y CF_ACCOUNT_ID como secretos en el Worker.' });
   return J({ respuesta: 'Entendido. Dime el área específica a mejorar.' });
 }
 
@@ -171,7 +171,7 @@ async function d1(r, e) {
     if (accion === 'escribir') {
       if (!tabla || !datos) return J({ error: 'Faltan datos.' });
       const k = Object.keys(datos), ph = k.map(() => '?').join(',');
-      await db.prepare('INSERT INTO ' + tabla + '(' + k.join(',') + ') VALUES(' + ph + ')').bind(...Object.values(datos)).run();
+      await db.prepare('INSERT INTO ' + tabla + ' (' + k.join(',') + ') VALUES(' + ph + ')').bind(...Object.values(datos)).run();
       return J({ mensaje: 'Insertado.' });
     }
     if (accion === 'eliminar') {
@@ -224,6 +224,7 @@ async function mejorar(r, e) {
       });
       const d = await r1.json();
       if (!d.success) return J({ mensaje: 'Guardado en KV, despliegue falló.', error: d.errors });
+      await notificar(e, `🚀 *Auto-mejora desplegada*\n\nWorker actualizado vía API de Cloudflare.`);
       return J({ mensaje: 'Desplegado.' });
     }
     return J({ mensaje: 'Guardado en KV.' });
@@ -302,11 +303,19 @@ export default {
     if (p === '/api/historial' && r.method === 'GET') return historial(r, e);
     if (p === '/api/contexto' && r.method === 'GET') return verContexto(r, e);
     if (p === '/api/reset' && r.method === 'POST') return reset(r, e);
-    if (p === '/api/estado') return J({ estado: 'activo', v: '4.0' });
+    if (p === '/api/notificar' && r.method === 'POST') {
+      const { texto, bot } = await r.json();
+      const ok = await notificar(e, texto || '🧪 Prueba desde Ayanokōji Digital.', bot || 'titiritero');
+      return J({ enviado: ok, bot: bot || 'titiritero' });
+    }
+    if (p === '/api/test_notif') {
+      const ok = await notificar(e, '🧪 *Ping del aliado digital*\n\nSistema operativo. Notificaciones funcionando.', 'titiritero');
+      return J({ enviado: ok });
+    }
+    if (p === '/api/estado') return J({ estado: 'activo', v: '4.1' });
     return new Response('404', { status: 404, headers: CORS });
   },
 
-  // Cron: se ejecuta automáticamente cada 2 minutos
   async scheduled(event, e, c) {
     c.waitUntil(cronRetomar(e));
   }
