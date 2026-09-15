@@ -1,4 +1,5 @@
 import { MODELO, CS, LPB, BPL, J, gDB, gKV, b64e, b64d, j2t } from './shared.js';
+import { notificar } from './notify.js';
 
 function chunkBytes(bs, size) {
   const ch = [];
@@ -171,6 +172,7 @@ export async function procesarLote(e, aId, d, off) {
     try {
       await db.prepare('UPDATE procesos SET estado=?,error=?,fecha_avance=? WHERE id=?')
         .bind('error', x.message, Date.now(), aId).run();
+      await notificar(e, `❌ *Proceso falló*\n\nID: \`${aId}\`\nBloque: ${off}\nError: ${x.message}`);
     } catch (y) {}
   }
 }
@@ -215,15 +217,17 @@ export async function consolidar(e, aId, d, ac) {
     await kv.delete('proc:' + aId + ':texto');
     await kv.delete('proc:' + aId + ':parciales');
     try { await db.prepare('DELETE FROM archivos WHERE id=?').bind(aId).run(); } catch (x) {}
+
+    await notificar(e, `✅ *Contexto procesado*\n\nID: \`${aId}\`\nFases: ${fs.length}/7\n\nEl aliado ya tiene memoria viva del Comandante.`);
   } catch (x) {
     try {
       await db.prepare('UPDATE procesos SET estado=?,error=?,fecha_avance=? WHERE id=?')
         .bind('error', x.message, Date.now(), aId).run();
+      await notificar(e, `❌ *Consolidación falló*\n\nID: \`${aId}\`\nError: ${x.message}`);
     } catch (y) {}
   }
 }
 
-// CRON: retoma procesos atascados automáticamente
 export async function cronRetomar(e) {
   const db = gDB(e, 'agente');
   const ai = e.ayanokoji_IA;
@@ -242,7 +246,6 @@ export async function cronRetomar(e) {
   } catch (x) {}
 }
 
-// Resumir chats acumulados
 export async function resumirChats(e, uid) {
   const db = gDB(e, 'agente'), kv = gKV(e, 'agente'), ai = e.ayanokoji_IA;
   if (!db || !kv || !ai) return;
@@ -266,5 +269,7 @@ export async function resumirChats(e, uid) {
     await db.prepare('INSERT INTO resumenes_chat(user_id,fecha,resumen,desde,hasta) VALUES(?,?,?,?,?)')
       .bind(uid, now, rm, lastSum, now).run();
     await kv.put('last_summary:' + uid, String(now));
+
+    await notificar(e, `🧠 *Resumen automático guardado*\n\nInteracciones: ${msgs.results.length}\nContexto actualizado para el aliado.`);
   } catch (x) {}
 }
