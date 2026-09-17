@@ -149,8 +149,8 @@ export async function procesarLote(e, aId, d, off) {
     for (let i = off; i < fin; i++) {
       try {
         const r1 = await ai.run(MODELO, {
-          messages: [{ role: 'user', content: `Analiza este fragmento. Extrae: (1) identidad y forma de pensar del Comandante, (2) decisiones, (3) errores/correcciones, (4) datos del proyecto Shadow Arise, (5) planes futuros, (6) objetivos, (7) cómo quiere que su aliado le hable y actúe. Si no aplica, escribe "ninguno". Máximo 250 palabras.\n\nFragmento ${i + 1}/${tot}:\n${bl[i]}` }],
-          max_tokens: 500,
+          messages: [{ role: 'user', content: `Analiza este fragmento de conversación entre el Comandante Yeinier y su aliado digital. Extrae TODA la información útil que aparezca, sin limitarte a categorías fijas. Incluye:\n- Quién es el Comandante, cómo piensa, qué lo motiva, qué lo formó.\n- Decisiones tomadas y POR QUÉ se tomaron, cómo se ejecutaron.\n- Errores, correcciones y qué se aprendió.\n- Todo sobre el proyecto Shadow Arise: estrategia, componentes, monetización, estado actual.\n- Todo sobre Ayanokōji Digital: su rol, cómo debe actuar, qué límites tiene.\n- Todo sobre la IA publicadora: qué se planea, qué canales, qué estrategia.\n- Planes futuros, ideas pendientes, casa, paneles, robot, agente digital.\n- Cualquier detalle adicional relevante que aparezca, aunque no encaje en las categorías anteriores.\n\nSi algo no aparece, escribe "ninguno". Sé específico. Máximo 300 palabras.\n\nFragmento ${i + 1}/${tot}:\n${bl[i]}` }],
+          max_tokens: 600,
           temperature: 0.3
         });
         rp.push(`[BLOQUE ${i + 1}]\n${r1.response || ''}`);
@@ -188,8 +188,8 @@ export async function consolidar(e, aId, d, ac) {
         const td = pz.slice(i, i + 5).join('\n---\n');
         try {
           const r1 = await ai.run(MODELO, {
-            messages: [{ role: 'user', content: `Fusiona estos resúmenes en uno. Elimina repetidos. Conserva nombres, decisiones, cifras, errores, objetivos, forma de pensar. Máximo 500 palabras.\n\n${td}` }],
-            max_tokens: 700,
+            messages: [{ role: 'user', content: `Fusiona estos resúmenes parciales en uno solo. Elimina repeticiones. Conserva TODOS los detalles específicos: nombres, decisiones, cifras, errores, objetivos, forma de pensar, estrategias, ideas. No omitas nada relevante aunque parezca menor. Explica el porqué de las cosas, no solo el qué. Máximo 600 palabras.\n\n${td}` }],
+            max_tokens: 900,
             temperature: 0.3
           });
           nv.push(r1.response || td);
@@ -197,14 +197,62 @@ export async function consolidar(e, aId, d, ac) {
       }
       pz = nv;
     }
+
     const tc = pz.join('\n\n');
+
     const rf = await ai.run(MODELO, {
-      messages: [{ role: 'user', content: `Genera un perfil maestro del Comandante Yeinier en 7 secciones separadas por ";". Mínimo 30 palabras cada una:\n1. IDENTIDAD: quién es, esencia, forma de pensar.\n2. CONTEXTO: entorno, familia, situación en Cuba.\n3. OBJETIVO: meta principal.\n4. PROYECTO: qué construye.\n5. ALINEACIÓN: cómo debe comportarse su aliado digital, cómo hablarle, qué tono.\n6. PROPÓSITO: motivación profunda.\n7. REGLAS_OPERATIVAS: instrucciones específicas para dirigir el proyecto y actuar.\n\nSolo las 7 secciones separadas por ";". Sin numeración.\n\nResúmenes:\n${tc.substring(0, 8000)}` }],
-      max_tokens: 1200,
+      messages: [{
+        role: 'user',
+        content: `A partir de estos resúmenes consolidados, genera un PERFIL MAESTRO del Comandante Yeinier en 9 secciones. Cada sección debe ser EXPLICATIVA, no una lista de datos. Explica el QUÉ, el POR QUÉ y el CÓMO de cada cosa.
+
+Formato exacto: cada sección comienza con "### N. TITULO:" y termina con "###" en línea aparte. Mínimo 80 palabras por sección. Frases completas que expliquen la lógica, no bullets secos.
+
+Reglas generales:
+- NO te limites a ejemplos. Si el contexto menciona algo que no está en las listas de abajo, inclúyelo en la sección que corresponda.
+- Si una sección tiene más información de la esperada, inclúyela toda. No resumas de más.
+- Cada afirmación debe explicar el porqué, no solo el qué.
+
+Secciones:
+
+### 1. IDENTIDAD:
+Quién es Yeinier, su esencia, su forma de pensar y POR QUÉ piensa así (qué lo formó). Sus tres voces internas (Ayanokōji, Dark, Monarch) y cómo las usa. Su relación con la soledad, la observación, la estrategia. Su fe adventista y cómo la integra.
+
+### 2. CONTEXTO:
+Su situación actual completa: Cuba rural, familia, presión económica, trabajo, estudios, fe, relación con sus padres y hermanos. Explica CÓMO le afecta cada cosa y cómo responde. Incluye cualquier detalle de su vida cotidiana que aparezca en el contexto.
+
+### 3. OBJETIVO:
+Su meta principal y la motivación profunda detrás. No solo "quiere una casa para sus padres" — explica POR QUÉ eso importa, qué dolor concreto quiere resolver, qué futuro imagina para él y su familia.
+
+### 4. PROYECTO SHADOW ARISE:
+Qué es Shadow Arise, en qué fase está, todos los componentes. Explica la ESTRATEGIA completa: por qué ese modelo y no otro, qué decisiones se tomaron y POR QUÉ, qué errores se cometieron y CÓMO se resolvieron. Incluye monetización, canales, usuarios objetivo, expansión.
+
+### 5. ALIADO DIGITAL:
+Qué es el Ayanokōji Digital, su rol como mano derecha y orquestador. Cómo debe comportarse, cómo hablarle, qué límites tiene, POR QUÉ el Comandante quiere un aliado así. Su relación con el Comandante: espejo, no guía; orquestador, no sirviente.
+
+### 6. IA PUBLICADORA:
+Qué se planea para la IA publicadora. Canales, estrategia, contenido, herramientas. POR QUÉ se eligieron esos canales. Cómo debe Ayanokōji orquestarla sin agotarse. Incluye cualquier idea o decisión sobre esto que aparezca en el contexto.
+
+### 7. REGLAS OPERATIVAS:
+Instrucciones específicas sobre cómo trabajar con el Comandante. Ejemplos: no pedir validación, no filosofar sin propósito, responder con datos, ejecutar sin preguntar cuando la orden es clara, respetar su tiempo, no agotarlo con tareas triviales, no actuar como sirviente sino como orquestador. Incluye TODAS las reglas que aparezcan en el contexto.
+
+### 8. DECISIONES TOMADAS Y SU RAZÓN:
+Lista de las decisiones estratégicas clave del proyecto. Para cada una: QUÉ se decidió, POR QUÉ, y CÓMO se ejecutó. Incluye TODAS las decisiones que aparezcan en el contexto, no solo las que conoces. Ejemplos de dominio: alojamiento, IA, almacenamiento, procesamiento, canales, arquitectura, prioridades.
+
+### 9. IDEAS PENDIENTES:
+Todas las ideas que el Comandante ha mencionado pero no ejecutado aún. Incluye TODAS las que aparezcan en el contexto, no solo las que conoces. Explica cada una y POR QUÉ el Comandante la considera.
+
+Recuerda: si hay algo en el contexto que no encaja en ninguna sección, añádelo en la que más se acerque. No pierdas información.
+
+Resúmenes consolidados:
+${tc.substring(0, 9000)}`
+      }],
+      max_tokens: 2500,
       temperature: 0.4
     });
+
     const rm = rf.response || '';
-    const fs = rm.split(';').map(x => x.trim()).filter(x => x.length > 10);
+    const secciones = rm.split(/\n###\s*/).map(s => s.trim()).filter(s => s.length > 20);
+    const fs = secciones.map(s => s.replace(/^\d+\.\s*[A-ZÁÉÍÓÚÑ_ ]+:\s*/i, '').trim());
 
     await db.prepare('INSERT INTO contexto(fecha,resumen,fases,fuente) VALUES(?,?,?,?)')
       .bind(Date.now(), rm, JSON.stringify(fs), aId).run();
@@ -218,7 +266,7 @@ export async function consolidar(e, aId, d, ac) {
     await kv.delete('proc:' + aId + ':parciales');
     try { await db.prepare('DELETE FROM archivos WHERE id=?').bind(aId).run(); } catch (x) {}
 
-    await notificar(e, `✅ *Contexto procesado*\n\nID: \`${aId}\`\nFases: ${fs.length}/7\n\nEl aliado ya tiene memoria viva del Comandante.`);
+    await notificar(e, `✅ *Contexto procesado*\n\nID: \`${aId}\`\nSecciones: ${fs.length}/9\n\nEl aliado ya tiene memoria viva del Comandante.`);
   } catch (x) {
     try {
       await db.prepare('UPDATE procesos SET estado=?,error=?,fecha_avance=? WHERE id=?')
@@ -259,8 +307,8 @@ export async function resumirChats(e, uid) {
 
     const texto = msgs.results.map(m => `Comandante: ${m.mensaje}\nAyanokōji: ${m.respuesta}`).join('\n\n');
     const res = await ai.run(MODELO, {
-      messages: [{ role: 'user', content: `Resume este intercambio entre el Comandante Yeinier y su aliado digital. Extrae solo: temas tratados, decisiones tomadas, información nueva sobre el Comandante, y estado del proyecto. Máximo 250 palabras. Sé conciso.\n\n${texto.substring(0, 9000)}` }],
-      max_tokens: 450,
+      messages: [{ role: 'user', content: `Resume este intercambio entre el Comandante Yeinier y su aliado digital. Explica QUÉ se habló, QUÉ se decidió, POR QUÉ, y qué información nueva sobre el Comandante o el proyecto apareció. Frases explicativas, no bullets. Máximo 300 palabras.\n\n${texto.substring(0, 9000)}` }],
+      max_tokens: 500,
       temperature: 0.3
     });
     const rm = res.response || '';
