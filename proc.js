@@ -1,5 +1,6 @@
-import { MODELO, CS, LPB, BPL, J, gDB, gKV, b64e, b64d, j2t } from './shared.js';
+import { MODELO_LIGERO, CS, LPB, BPL, J, gDB, gKV, b64e, b64d, j2t } from './shared.js';
 import { notificar } from './notify.js';
+import { consumir } from './presupuesto.js';
 
 function chunkBytes(bs, size) {
   const ch = [];
@@ -43,9 +44,7 @@ export async function subir(r, e, c) {
     const id = Date.now() + '_' + nm.replace(/[^a-zA-Z0-9._-]/g, '_');
     const bs = new Uint8Array(buf);
     const ch = chunkBytes(bs, CS);
-    for (let i = 0; i < ch.length; i++) {
-      await kv.put('file:' + id + ':' + i, b64e(ch[i]));
-    }
+    for (let i = 0; i < ch.length; i++) await kv.put('file:' + id + ':' + i, b64e(ch[i]));
     if (db) {
       try {
         await db.prepare('INSERT INTO archivos(id,nombre,tamaño,chunks,destino,fecha) VALUES(?,?,?,?,?,?)')
@@ -96,9 +95,7 @@ export async function resumir(r, e) {
     const d = b.destino || 'agente', kv = gKV(e, d), db = gDB(e, d);
     if (!kv || !db) return J({ error: 'Destino inválido.' });
     let ct = b.texto;
-    if (b.archivoId) {
-      ct = j2t(await reconstruir(kv, 'file:' + b.archivoId + ':'));
-    }
+    if (b.archivoId) ct = j2t(await reconstruir(kv, 'file:' + b.archivoId + ':'));
     if (!ct || ct.length < 100) return J({ error: 'Contenido corto.' });
     const id = 'm_' + Date.now();
     await db.prepare('INSERT INTO procesos(id,archivo_id,estado,bloques_total,bloques_hechos,fecha_inicio,fecha_avance) VALUES(?,?,?,?,?,?,?)')
@@ -126,6 +123,8 @@ export async function verProceso(r, e) {
 export async function procesarLote(e, aId, d, off) {
   const kv = gKV(e, d), db = gDB(e, d), ai = e.ayanokoji_IA;
   if (!kv || !db || !ai) return;
+  if (!await consumir(e, 'procesamiento')) return;
+
   try {
     let txt = await kv.get('proc:' + aId + ':texto');
     if (!txt) {
@@ -148,8 +147,8 @@ export async function procesarLote(e, aId, d, off) {
     const rp = [];
     for (let i = off; i < fin; i++) {
       try {
-        const r1 = await ai.run(MODELO, {
-          messages: [{ role: 'user', content: `Analiza este fragmento de conversación entre el Comandante Yeinier y su aliado digital. Extrae TODA la información útil que aparezca, sin limitarte a categorías fijas. Incluye:\n- Quién es el Comandante, cómo piensa, qué lo motiva, qué lo formó.\n- Decisiones tomadas y POR QUÉ se tomaron, cómo se ejecutaron.\n- Errores, correcciones y qué se aprendió.\n- Todo sobre el proyecto Shadow Arise: estrategia, componentes, monetización, estado actual.\n- Todo sobre Ayanokōji Digital: su rol, cómo debe actuar, qué límites tiene.\n- Todo sobre la IA publicadora: qué se planea, qué canales, qué estrategia.\n- Planes futuros, ideas pendientes, casa, paneles, robot, agente digital.\n- Cualquier detalle adicional relevante que aparezca, aunque no encaje en las categorías anteriores.\n\nSi algo no aparece, escribe "ninguno". Sé específico. Máximo 300 palabras.\n\nFragmento ${i + 1}/${tot}:\n${bl[i]}` }],
+        const r1 = await ai.run(MODELO_LIGERO, {
+          messages: [{ role: 'user', content: `Analiza este fragmento de conversación entre el Comandante Yeinier y su aliado. Extrae TODA la información útil sin limitarte a categorías fijas:\n- Quién es el Comandante, cómo piensa, qué lo motiva.\n- Decisiones y POR QUÉ se tomaron.\n- Errores, correcciones y aprendizajes.\n- Proyecto Shadow Arise: estrategia, componentes, estado.\n- Ayanokōji Digital: rol, comportamiento, límites.\n- IA publicadora: canales, estrategia.\n- Planes futuros, ideas pendientes, cualquier detalle adicional.\n\nSé específico. Explica el porqué. Máximo 300 palabras.\n\nFragmento ${i + 1}/${tot}:\n${bl[i]}` }],
           max_tokens: 600,
           temperature: 0.3
         });
@@ -180,6 +179,7 @@ export async function procesarLote(e, aId, d, off) {
 export async function consolidar(e, aId, d, ac) {
   const kv = gKV(e, d), db = gDB(e, d), ai = e.ayanokoji_IA;
   if (!kv || !db || !ai) return;
+  if (!await consumir(e, 'procesamiento')) return;
   try {
     let pz = ac.split('\n\n[BLOQUE ').map((p, i) => i === 0 ? p : '[BLOQUE ' + p).filter(p => p.trim().length > 30);
     while (pz.length > 5) {
@@ -187,8 +187,8 @@ export async function consolidar(e, aId, d, ac) {
       for (let i = 0; i < pz.length; i += 5) {
         const td = pz.slice(i, i + 5).join('\n---\n');
         try {
-          const r1 = await ai.run(MODELO, {
-            messages: [{ role: 'user', content: `Fusiona estos resúmenes parciales en uno solo. Elimina repeticiones. Conserva TODOS los detalles específicos: nombres, decisiones, cifras, errores, objetivos, forma de pensar, estrategias, ideas. No omitas nada relevante aunque parezca menor. Explica el porqué de las cosas, no solo el qué. Máximo 600 palabras.\n\n${td}` }],
+          const r1 = await ai.run(MODELO_LIGERO, {
+            messages: [{ role: 'user', content: `Fusiona estos resúmenes en uno. Conserva TODOS los detalles. Explica el porqué. Máximo 600 palabras.\n\n${td}` }],
             max_tokens: 900,
             temperature: 0.3
           });
@@ -197,53 +197,41 @@ export async function consolidar(e, aId, d, ac) {
       }
       pz = nv;
     }
-
     const tc = pz.join('\n\n');
 
-    const rf = await ai.run(MODELO, {
+    const rf = await ai.run(MODELO_LIGERO, {
       messages: [{
         role: 'user',
-        content: `A partir de estos resúmenes consolidados, genera un PERFIL MAESTRO del Comandante Yeinier en 9 secciones. Cada sección debe ser EXPLICATIVA, no una lista de datos. Explica el QUÉ, el POR QUÉ y el CÓMO de cada cosa.
-
-Formato exacto: cada sección comienza con "### N. TITULO:" y termina con "###" en línea aparte. Mínimo 80 palabras por sección. Frases completas que expliquen la lógica, no bullets secos.
-
-Reglas generales:
-- NO te limites a ejemplos. Si el contexto menciona algo que no está en las listas de abajo, inclúyelo en la sección que corresponda.
-- Si una sección tiene más información de la esperada, inclúyela toda. No resumas de más.
-- Cada afirmación debe explicar el porqué, no solo el qué.
-
-Secciones:
+        content: `Genera un PERFIL MAESTRO del Comandante Yeinier en 9 secciones. Cada sección debe ser EXPLICATIVA: QUÉ, POR QUÉ y CÓMO. Formato: cada sección empieza con "### N. TITULO:" y termina con "###" en línea aparte. Mínimo 80 palabras por sección. NO te limites a ejemplos; si el contexto menciona algo, inclúyelo.
 
 ### 1. IDENTIDAD:
-Quién es Yeinier, su esencia, su forma de pensar y POR QUÉ piensa así (qué lo formó). Sus tres voces internas (Ayanokōji, Dark, Monarch) y cómo las usa. Su relación con la soledad, la observación, la estrategia. Su fe adventista y cómo la integra.
+Quién es, esencia, forma de pensar, por qué piensa así. Tres voces: Ayanokōji, Dark, Monarch.
 
 ### 2. CONTEXTO:
-Su situación actual completa: Cuba rural, familia, presión económica, trabajo, estudios, fe, relación con sus padres y hermanos. Explica CÓMO le afecta cada cosa y cómo responde. Incluye cualquier detalle de su vida cotidiana que aparezca en el contexto.
+Cuba rural, familia, presión, fe adventista, padre ahorrando para Brasil.
 
 ### 3. OBJETIVO:
-Su meta principal y la motivación profunda detrás. No solo "quiere una casa para sus padres" — explica POR QUÉ eso importa, qué dolor concreto quiere resolver, qué futuro imagina para él y su familia.
+Meta principal y motivación profunda.
 
 ### 4. PROYECTO SHADOW ARISE:
-Qué es Shadow Arise, en qué fase está, todos los componentes. Explica la ESTRATEGIA completa: por qué ese modelo y no otro, qué decisiones se tomaron y POR QUÉ, qué errores se cometieron y CÓMO se resolvieron. Incluye monetización, canales, usuarios objetivo, expansión.
+Estrategia, componentes, monetización, estado, decisiones y por qué.
 
 ### 5. ALIADO DIGITAL:
-Qué es el Ayanokōji Digital, su rol como mano derecha y orquestador. Cómo debe comportarse, cómo hablarle, qué límites tiene, POR QUÉ el Comandante quiere un aliado así. Su relación con el Comandante: espejo, no guía; orquestador, no sirviente.
+Rol de Ayanokōji, cómo debe comportarse, límites. Espejo, no guía. Orquestador, no sirviente.
 
 ### 6. IA PUBLICADORA:
-Qué se planea para la IA publicadora. Canales, estrategia, contenido, herramientas. POR QUÉ se eligieron esos canales. Cómo debe Ayanokōji orquestarla sin agotarse. Incluye cualquier idea o decisión sobre esto que aparezca en el contexto.
+Canales, estrategia, contenido, herramientas.
 
 ### 7. REGLAS OPERATIVAS:
-Instrucciones específicas sobre cómo trabajar con el Comandante. Ejemplos: no pedir validación, no filosofar sin propósito, responder con datos, ejecutar sin preguntar cuando la orden es clara, respetar su tiempo, no agotarlo con tareas triviales, no actuar como sirviente sino como orquestador. Incluye TODAS las reglas que aparezcan en el contexto.
+Cómo trabajar con el Comandante. Ejecutar sin preguntar, no agotarlo, respetar su tiempo.
 
 ### 8. DECISIONES TOMADAS Y SU RAZÓN:
-Lista de las decisiones estratégicas clave del proyecto. Para cada una: QUÉ se decidió, POR QUÉ, y CÓMO se ejecutó. Incluye TODAS las decisiones que aparezcan en el contexto, no solo las que conoces. Ejemplos de dominio: alojamiento, IA, almacenamiento, procesamiento, canales, arquitectura, prioridades.
+QUÉ, POR QUÉ y CÓMO de cada decisión estratégica.
 
 ### 9. IDEAS PENDIENTES:
-Todas las ideas que el Comandante ha mencionado pero no ejecutado aún. Incluye TODAS las que aparezcan en el contexto, no solo las que conoces. Explica cada una y POR QUÉ el Comandante la considera.
+Robot, casa, paneles, auto-mejora, sandbox, videos IA.
 
-Recuerda: si hay algo en el contexto que no encaja en ninguna sección, añádelo en la que más se acerque. No pierdas información.
-
-Resúmenes consolidados:
+Resúmenes:
 ${tc.substring(0, 9000)}`
       }],
       max_tokens: 2500,
@@ -266,7 +254,7 @@ ${tc.substring(0, 9000)}`
     await kv.delete('proc:' + aId + ':parciales');
     try { await db.prepare('DELETE FROM archivos WHERE id=?').bind(aId).run(); } catch (x) {}
 
-    await notificar(e, `✅ *Contexto procesado*\n\nID: \`${aId}\`\nSecciones: ${fs.length}/9\n\nEl aliado ya tiene memoria viva del Comandante.`);
+    await notificar(e, `✅ *Contexto procesado*\n\nID: \`${aId}\`\nSecciones: ${fs.length}/9`);
   } catch (x) {
     try {
       await db.prepare('UPDATE procesos SET estado=?,error=?,fecha_avance=? WHERE id=?')
@@ -280,6 +268,14 @@ export async function cronRetomar(e) {
   const db = gDB(e, 'agente');
   const ai = e.ayanokoji_IA;
   if (!db || !ai) return;
+  const hora = new Date().getUTCHours();
+  const nocturno = hora >= 23 || hora < 8;
+  if (nocturno) {
+    const ultimo = await e.KV?.get('cron_ultimo_nocturno');
+    const ahora = Date.now();
+    if (ultimo && ahora - parseInt(ultimo) < 20 * 60 * 1000) return;
+    await e.KV?.put('cron_ultimo_nocturno', String(ahora), { expirationTtl: 3600 });
+  }
   try {
     const ahora = Date.now();
     const stuck = await db.prepare(
@@ -297,6 +293,7 @@ export async function cronRetomar(e) {
 export async function resumirChats(e, uid) {
   const db = gDB(e, 'agente'), kv = gKV(e, 'agente'), ai = e.ayanokoji_IA;
   if (!db || !kv || !ai) return;
+  if (!await consumir(e, 'chat')) return;
   try {
     const lastSum = parseInt(await kv.get('last_summary:' + uid) || '0');
     const now = Date.now();
@@ -306,8 +303,8 @@ export async function resumirChats(e, uid) {
     if (!msgs.results || msgs.results.length < 5) return;
 
     const texto = msgs.results.map(m => `Comandante: ${m.mensaje}\nAyanokōji: ${m.respuesta}`).join('\n\n');
-    const res = await ai.run(MODELO, {
-      messages: [{ role: 'user', content: `Resume este intercambio entre el Comandante Yeinier y su aliado digital. Explica QUÉ se habló, QUÉ se decidió, POR QUÉ, y qué información nueva sobre el Comandante o el proyecto apareció. Frases explicativas, no bullets. Máximo 300 palabras.\n\n${texto.substring(0, 9000)}` }],
+    const res = await ai.run(MODELO_LIGERO, {
+      messages: [{ role: 'user', content: `Resume este intercambio. Explica QUÉ se habló, QUÉ se decidió, POR QUÉ, qué nuevo sobre el Comandante o el proyecto. Frases explicativas. Máximo 300 palabras.\n\n${texto.substring(0, 9000)}` }],
       max_tokens: 500,
       temperature: 0.3
     });
@@ -317,7 +314,56 @@ export async function resumirChats(e, uid) {
     await db.prepare('INSERT INTO resumenes_chat(user_id,fecha,resumen,desde,hasta) VALUES(?,?,?,?,?)')
       .bind(uid, now, rm, lastSum, now).run();
     await kv.put('last_summary:' + uid, String(now));
-
-    await notificar(e, `🧠 *Resumen automático guardado*\n\nInteracciones: ${msgs.results.length}\nContexto actualizado para el aliado.`);
+    await notificar(e, `🧠 *Resumen auto guardado*\n\nInteracciones: ${msgs.results.length}`);
   } catch (x) {}
+}
+
+// Importar JSON de conversación al historial largo
+export async function importar(r, e) {
+  try {
+    const form = await r.formData();
+    const archivo = form.get('archivo');
+    const uid = form.get('user_id') || 'comandante';
+    const limite = parseInt(form.get('limite') || '500');
+    if (!archivo) return J({ error: 'Falta archivo JSON.' });
+
+    const texto = await archivo.text();
+    let data;
+    try { data = JSON.parse(texto); } catch (x) { return J({ error: 'JSON inválido: ' + x.message }); }
+
+    let lista = null;
+    if (Array.isArray(data)) lista = data;
+    else {
+      const claves = ['messages','mensajes','conversation','conversacion','chat','historial','history','data','dialogo'];
+      for (const k of claves) if (Array.isArray(data[k])) { lista = data[k]; break; }
+    }
+    if (!lista) return J({ error: 'No se encontró array de mensajes.' });
+
+    const db = gDB(e, 'agente');
+    if (!db) return J({ error: 'D1 no configurado.' });
+
+    // Solo importar los últimos N mensajes
+    const desde = Math.max(0, lista.length - limite);
+    const recorte = lista.slice(desde);
+
+    await db.prepare('DELETE FROM historial_largo WHERE user_id=?').bind(uid).run();
+
+    let orden = 0, insertados = 0;
+    for (const m of recorte) {
+      if (!m) continue;
+      let rol = m.role || m.rol || m.from || m.sender || 'user';
+      let contenido = m.content || m.contenido || m.text || m.message || m.mensaje || '';
+      if (typeof contenido !== 'string') contenido = JSON.stringify(contenido);
+      if (!contenido.trim()) continue;
+      rol = (rol === 'assistant' || rol === 'bot' || rol === 'ai') ? 'assistant' : 'user';
+      await db.prepare('INSERT INTO historial_largo(user_id,rol,contenido,orden,fecha) VALUES(?,?,?,?,?)')
+        .bind(uid, rol, contenido, orden, Date.now()).run();
+      orden++; insertados++;
+    }
+
+    await notificar(e, `📥 *Historial importado*\n\nMensajes: ${insertados}\nDe ${lista.length} totales.`);
+    return J({ ok: true, insertados, total: lista.length, desde });
+  } catch (x) {
+    return J({ error: 'Error al importar: ' + x.message });
+  }
 }
