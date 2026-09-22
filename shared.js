@@ -1,7 +1,10 @@
 export const MODELO = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+export const MODELO_LIGERO = '@cf/meta/llama-3.1-8b-instruct';
+export const MODELO_VISION = '@cf/meta/llama-3.2-11b-vision-instruct';
 export const CS = 500 * 1024;
 export const LPB = 120;
 export const BPL = 5;
+export const VENTANA = 80;
 
 export const CORS = {
   'Access-Control-Allow-Origin': '*',
