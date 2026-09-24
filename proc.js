@@ -202,7 +202,7 @@ export async function consolidar(e, aId, d, ac) {
     const rf = await ai.run(MODELO_LIGERO, {
       messages: [{
         role: 'user',
-        content: `Genera un PERFIL MAESTRO del Comandante Yeinier en 9 secciones. Cada sección debe ser EXPLICATIVA: QUÉ, POR QUÉ y CÓMO. Formato: cada sección empieza con "### N. TITULO:" y termina con "###" en línea aparte. Mínimo 80 palabras por sección. NO te limites a ejemplos; si el contexto menciona algo, inclúyelo.
+        content: `Genera un PERFIL MAESTRO del Comandante Yeinier en 9 secciones. Cada sección debe ser EXPLICATIVA: QUÉ, POR QUÉ y CÓMO. Formato: cada sección empieza con "### N. TITULO:" y termina con "###" en línea aparte. Mínimo 80 palabras por sección.
 
 ### 1. IDENTIDAD:
 Quién es, esencia, forma de pensar, por qué piensa así. Tres voces: Ayanokōji, Dark, Monarch.
@@ -217,13 +217,13 @@ Meta principal y motivación profunda.
 Estrategia, componentes, monetización, estado, decisiones y por qué.
 
 ### 5. ALIADO DIGITAL:
-Rol de Ayanokōji, cómo debe comportarse, límites. Espejo, no guía. Orquestador, no sirviente.
+Rol de Ayanokōji, cómo debe comportarse, límites.
 
 ### 6. IA PUBLICADORA:
 Canales, estrategia, contenido, herramientas.
 
 ### 7. REGLAS OPERATIVAS:
-Cómo trabajar con el Comandante. Ejecutar sin preguntar, no agotarlo, respetar su tiempo.
+Cómo trabajar con el Comandante.
 
 ### 8. DECISIONES TOMADAS Y SU RAZÓN:
 QUÉ, POR QUÉ y CÓMO de cada decisión estratégica.
@@ -318,7 +318,88 @@ export async function resumirChats(e, uid) {
   } catch (x) {}
 }
 
-// Importar JSON de conversación al historial largo
+// ============ EXTRACTOR RECURSIVO DE MENSAJES ============
+function extraerMensajes(data, profundidad = 0) {
+  if (profundidad > 8) return null;
+  if (!data) return null;
+
+  if (Array.isArray(data)) {
+    const primeros = data.slice(0, 3).filter(x => x && typeof x === 'object');
+    if (primeros.length > 0) {
+      const tieneContenido = primeros.some(m =>
+        m.content || m.contenido || m.text || m.message || m.mensaje || m.query || m.response || m.prompt || m.completion
+      );
+      if (tieneContenido) return data;
+    }
+    for (const item of data) {
+      const sub = extraerMensajes(item, profundidad + 1);
+      if (sub) return sub;
+    }
+    return null;
+  }
+
+  if (typeof data === 'object') {
+    const clavesComunes = ['messages','mensajes','conversation','conversacion','chat','historial','history','data','dialogo','dialogos','conversations','intercambios','turns','turnos','exchanges','items','entries','registros','logs'];
+    for (const k of clavesComunes) {
+      if (data[k]) {
+        const sub = extraerMensajes(data[k], profundidad + 1);
+        if (sub) return sub;
+      }
+    }
+    for (const k of Object.keys(data)) {
+      const v = data[k];
+      if (Array.isArray(v) && v.length > 0) {
+        const sub = extraerMensajes(v, profundidad + 1);
+        if (sub) return sub;
+      }
+      if (v && typeof v === 'object') {
+        const sub = extraerMensajes(v, profundidad + 1);
+        if (sub) return sub;
+      }
+    }
+  }
+
+  return null;
+}
+
+function parsearMensaje(m) {
+  if (!m || typeof m !== 'object') {
+    if (typeof m === 'string') return { rol: 'user', contenido: m };
+    return null;
+  }
+
+  let rol = m.role || m.rol || m.from || m.sender || m.author || m.who || m.tipo || m.type || 'user';
+  rol = String(rol).toLowerCase();
+  if (['assistant','bot','ai','model','gpt','ayanokoji','ayanokōji','a'].includes(rol)) rol = 'assistant';
+  else if (['human','user','usuario','comandante','yo','u'].includes(rol)) rol = 'user';
+  else if (['system','sistema'].includes(rol)) rol = 'system';
+  else rol = 'user';
+
+  let contenido = m.content || m.contenido || m.text || m.texto || m.message || m.mensaje || m.query || m.prompt || m.value || m.body || '';
+  if (typeof contenido !== 'string') {
+    if (Array.isArray(contenido)) {
+      contenido = contenido.map(b => {
+        if (typeof b === 'string') return b;
+        if (b && b.text) return b.text;
+        if (b && b.content) return b.content;
+        return '';
+      }).join('\n');
+    } else {
+      contenido = JSON.stringify(contenido);
+    }
+  }
+
+  if (!contenido.trim() && (m.response || m.completion || m.answer || m.respuesta)) {
+    const r = m.response || m.completion || m.answer || m.respuesta;
+    contenido = typeof r === 'string' ? r : JSON.stringify(r);
+    rol = 'assistant';
+  }
+
+  if (!contenido.trim()) return null;
+
+  return { rol, contenido: contenido.trim() };
+}
+
 export async function importar(r, e) {
   try {
     const form = await r.formData();
@@ -329,40 +410,47 @@ export async function importar(r, e) {
 
     const texto = await archivo.text();
     let data;
-    try { data = JSON.parse(texto); } catch (x) { return J({ error: 'JSON inválido: ' + x.message }); }
-
-    let lista = null;
-    if (Array.isArray(data)) lista = data;
-    else {
-      const claves = ['messages','mensajes','conversation','conversacion','chat','historial','history','data','dialogo'];
-      for (const k of claves) if (Array.isArray(data[k])) { lista = data[k]; break; }
+    try { data = JSON.parse(texto); } catch (x) {
+      return J({ error: 'JSON inválido: ' + x.message });
     }
-    if (!lista) return J({ error: 'No se encontró array de mensajes.' });
+
+    const lista = extraerMensajes(data);
+    if (!lista || !lista.length) {
+      const keys = data && typeof data === 'object' ? Object.keys(data).slice(0, 10) : [];
+      return J({
+        error: 'No se encontraron mensajes en el JSON.',
+        diagnostico: {
+          tipo_raiz: Array.isArray(data) ? 'array' : typeof data,
+          claves_raiz: keys,
+          longitud_raiz: Array.isArray(data) ? data.length : null,
+          primer_elemento: Array.isArray(data) && data[0] ? Object.keys(data[0]).slice(0, 8) : null,
+          primeros_200_caracteres: texto.substring(0, 200)
+        }
+      });
+    }
 
     const db = gDB(e, 'agente');
     if (!db) return J({ error: 'D1 no configurado.' });
 
-    // Solo importar los últimos N mensajes
     const desde = Math.max(0, lista.length - limite);
     const recorte = lista.slice(desde);
 
     await db.prepare('DELETE FROM historial_largo WHERE user_id=?').bind(uid).run();
 
-    let orden = 0, insertados = 0;
+    let orden = 0, insertados = 0, saltados = 0;
     for (const m of recorte) {
-      if (!m) continue;
-      let rol = m.role || m.rol || m.from || m.sender || 'user';
-      let contenido = m.content || m.contenido || m.text || m.message || m.mensaje || '';
-      if (typeof contenido !== 'string') contenido = JSON.stringify(contenido);
-      if (!contenido.trim()) continue;
-      rol = (rol === 'assistant' || rol === 'bot' || rol === 'ai') ? 'assistant' : 'user';
+      const p = parsearMensaje(m);
+      if (!p) { saltados++; continue; }
       await db.prepare('INSERT INTO historial_largo(user_id,rol,contenido,orden,fecha) VALUES(?,?,?,?,?)')
-        .bind(uid, rol, contenido, orden, Date.now()).run();
+        .bind(uid, p.rol, p.contenido, orden, Date.now()).run();
       orden++; insertados++;
     }
 
-    await notificar(e, `📥 *Historial importado*\n\nMensajes: ${insertados}\nDe ${lista.length} totales.`);
-    return J({ ok: true, insertados, total: lista.length, desde });
+    try {
+      await notificar(e, `📥 *Historial importado*\n\nInsertados: ${insertados}\nTotal detectado: ${lista.length}\nSaltados: ${saltados}`);
+    } catch (x) {}
+
+    return J({ ok: true, insertados, total: lista.length, saltados, desde });
   } catch (x) {
     return J({ error: 'Error al importar: ' + x.message });
   }
