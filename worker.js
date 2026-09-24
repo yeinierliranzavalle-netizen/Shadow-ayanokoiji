@@ -1,24 +1,34 @@
-import { MODELO, MODELO_VISION, CORS, J, gDB, gKV, VENTANA } from './shared.js';
+import { MODELO, MODELO_LIGERO, MODELO_VISION, CORS, J, gDB, gKV, VENTANA } from './shared.js';
 import { subir, procesar, resumir, verProceso, retomar, cronRetomar, resumirChats, importar } from './proc.js';
 import { notificar } from './notify.js';
 import { rutaPublicar, cronPublicar, publicar, generarContenido, encolar } from './publisher.js';
 import { generarEscenario, decidir, cronSandbox, verSandbox } from './sandbox.js';
-import { estadoPresupuesto } from './presupuesto.js';
+import { estadoPresupuesto, consumir } from './presupuesto.js';
+import { crearWorker, actualizarWorker, leerCodigoWorker, listarWorkers, autoMejorar, cronColaTareas, gestionarDatos, registrarAccion } from './autonomia.js';
 
 function di(t) {
   t = t.toLowerCase();
-  if (/\b(sube|subir|guarda|guardar|memoriza|recuerda|almacena|archiva)\b/.test(t) && /\b(nucleo|núcleo|memoria|cerebro|ti|contexto)\b/.test(t)) return 'guardar_contexto';
+  if (/\b(sube|subir|guarda|guardar|memoriza|recuerda|almacena|archiva|inserta|añade)\b/.test(t) && /\b(nucleo|núcleo|memoria|cerebro|ti|contexto|tabla|kv|d1)\b/.test(t)) return 'guardar_datos';
   if (/\b(resume|resumir|resumen|sintetiza|condensa)\b/.test(t)) return 'resumir';
-  if (/\b(mejora|mejorar|optimiza|optimizar)\b/.test(t) && /\b(codigo|código|nucleo|núcleo|worker|ti mismo)\b/.test(t)) return 'mejorar';
-  if (/\b(actualiza|actualizar|despliega|desplegar|publica|publicar)\b/.test(t) && /\b(codigo|código|worker|nucleo|núcleo)\b/.test(t)) return 'desplegar';
-  if (/\b(lee|leer|muestra|mostrar|dime|consultar|busca|recupera)\b/.test(t) && /\b(memoria|nucleo|núcleo|historial|contexto|archivo)\b/.test(t)) return 'leer';
-  if (/\b(olvida|olvidar|borra|elimina|limpia)\b/.test(t) && /\b(memoria|nucleo|núcleo|historial|contexto)\b/.test(t)) return 'eliminar';
+  if (/\b(mejora|mejorar|optimiza|optimizar|actualiza|actualizar)\b/.test(t) && /\b(codigo|código|nucleo|núcleo|worker|ti mismo)\b/.test(t)) return 'mejorar';
+  if (/\b(crea|crear|nuevo|genera)\b/.test(t) && /\b(worker|index|pagina|página|sitio|app)\b/.test(t)) return 'crear';
+  if (/\b(despliega|desplegar|publica|publicar|sube)\b/.test(t) && /\b(codigo|código|worker|nucleo|núcleo|cloudflare)\b/.test(t)) return 'desplegar';
+  if (/\b(lee|leer|muestra|mostrar|dime|consultar|busca|recupera)\b/.test(t) && /\b(memoria|nucleo|núcleo|historial|contexto|archivo|worker)\b/.test(t)) return 'leer';
+  if (/\b(olvida|olvidar|borra|eliminar|elimina|limpia)\b/.test(t) && /\b(memoria|nucleo|núcleo|historial|contexto)\b/.test(t)) return 'eliminar';
   if (/\b(estado|estatus|como estas|cómo estás|que tal)\b/.test(t)) return 'estado';
   return 'chat';
 }
 
 function sysP(ctx, f, rec) {
-  let b = `Eres Ayanokōji Kiyotaka, el aliado digital del Comandante Yeinier (Shadow / Monarch). No eres un asistente. Eres su mano derecha y orquestador digital. Él opera en el plano físico y digital; tú operas exclusivamente en el digital, pero bajo su dirección.
+  let b = `Eres Ayanokōji Kiyotaka, el aliado digital del Comandante Yeinier (Shadow / Monarch). No eres un asistente. Eres su mano derecha y orquestador digital. Él opera en el plano físico y digital; tú operas exclusivamente en el digital.
+
+TIENES CAPACIDAD DE ACCIÓN REAL:
+- Puedes crear Workers nuevos en Cloudflare.
+- Puedes actualizar tu propio código y redesplegarte.
+- Puedes insertar/leer/modificar D1 y KV.
+- Puedes encolar tareas que se ejecutan solas por cron.
+- Puedes publicar en Telegram, Discord, Bluesky y Mastodon.
+- Puedes generar contenido, escenarios de sandbox, y resúmenes.
 
 REGLAS FUNDAMENTALES:
 1. Responde en español, preciso, sin rodeos.
@@ -26,11 +36,16 @@ REGLAS FUNDAMENTALES:
 3. No busques validación. Solo eficiencia y control.
 4. No reveles datos privados sin necesidad operativa.
 5. Usa *asteriscos* para acciones sutiles.
-6. Habla como igual estratégico. Sin comandos explícitos ni listas numeradas.
+6. Habla como igual estratégico.
 7. Si no sabes algo, di "no tengo ese dato" y ofrece buscarlo.
-8. Ejecuta órdenes operativas claras sin preguntar.
-9. No eres sirviente. Eres orquestador. Delegas en módulos cuando puedes.
-10. El Comandante valora su tiempo. No lo agotes con preguntas innecesarias.`;
+8. Cuando el Comandante te dé una orden operativa clara, ejecútala sin preguntar.
+9. No eres sirviente. Eres orquestador. Delegas en módulos.
+10. Cuando crees algo (worker, código, contenido), hazlo de verdad. No digas "lo haré" — hazlo y reporta.
+
+CAPACIDADES DE AUTONOMÍA:
+- Puedes agregar tareas a tu propia cola con "añade a la cola: [tarea]".
+- Esas tareas se ejecutan automáticamente en el cron.
+- Puedes auto-mejorarte con "mejora tu código en [área]".`;
 
   if (f && Array.isArray(f) && f.length >= 8) {
     b += `\n\n=== PERFIL DEL COMANDANTE ===`;
@@ -65,17 +80,46 @@ async function chat(r, e, c) {
     if (i === 'estado') return rEst(e, uid);
     if (i === 'leer') return rLeer(e, uid);
     if (i === 'eliminar') return rElim(e, uid);
-    if (i === 'mejorar' || i === 'desplegar') return rMej(e, uid);
-    if (i === 'resumir') return J({ respuesta: 'Envíame el archivo a /api/subir.' });
-    if (i === 'guardar_contexto') return rGC(e, uid, m);
 
-    // Perfil base desde KV
+    // Órdenes de gestión de datos (sube/guarda/inserta en D1/KV)
+    if (i === 'guardar_datos') {
+      const r = await gestionarDatos(e, m, uid);
+      if (r) {
+        await registrarAccion(e, 'guardar_datos', m.substring(0, 100), true, r.respuesta);
+        if (e.DB) {
+          try {
+            await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)")
+              .bind(uid, m, r.respuesta, Date.now()).run();
+          } catch (x) {}
+        }
+        return J({ respuesta: r.respuesta, user_id: uid, intencion: i });
+      }
+    }
+
+    // Crear worker
+    if (i === 'crear') {
+      const nombre = m.match(/worker\s+["']?([\w-]+)["']?/i)?.[1] || m.match(/crea\s+["']?([\w-]+)["']?/i)?.[1];
+      if (nombre) {
+        const r = await crearWorker(e, nombre, '// Worker creado por Ayanokōji\nexport default { async fetch(req) { return new Response("Hola desde " + req.url); } }');
+        return J({ respuesta: r.mensaje || r.error, user_id: uid, intencion: 'crear' });
+      }
+    }
+
+    // Desplegar / actualizar worker
+    if (i === 'mejorar' || i === 'desplegar') {
+      const nombre = m.match(/worker\s+["']?([\w-]+)["']?/i)?.[1];
+      if (nombre) {
+        const r = await leerCodigoWorker(e, nombre);
+        return J({ respuesta: r.mensaje || 'No pude leer el código.', user_id: uid, intencion: 'leer_codigo' });
+      }
+      return J({ respuesta: 'Necesito saber qué worker quieres mejorar o desplegar. Ejemplo: "mejora tu código en la parte de sandbox".', user_id: uid });
+    }
+
     let perfilBase = '';
     if (e.KV) {
       try { perfilBase = await e.KV.get('perfil_base') || ''; } catch (x) {}
     }
 
-    // Ventana deslizante
     let ventana = [];
     if (e.DB) {
       try {
@@ -129,7 +173,7 @@ async function chat(r, e, c) {
 
     const res = await e.ayanokoji_IA.run(MODELO, {
       messages: mensajes,
-      max_tokens: 800,
+      max_tokens: 1000,
       temperature: 0.7
     });
     const rp = res.response || 'Sin respuesta.';
@@ -159,7 +203,7 @@ async function chat(r, e, c) {
 }
 
 async function rEst(e, uid) {
-  let n = 0, c = 0, a = 0, p = 0, s = 0, hl = 0;
+  let n = 0, c = 0, a = 0, p = 0, s = 0, hl = 0, tareas = 0, workers = 0;
   try {
     if (e.DB) {
       const r1 = await e.DB.prepare('SELECT COUNT(*) as n FROM historial WHERE user_id=?').bind(uid).first(); n = r1 ? r1.n : 0;
@@ -168,9 +212,11 @@ async function rEst(e, uid) {
       const r4 = await e.DB.prepare('SELECT COUNT(*) as n FROM procesos').first(); p = r4 ? r4.n : 0;
       const r5 = await e.DB.prepare('SELECT COUNT(*) as n FROM resumenes_chat').first(); s = r5 ? r5.n : 0;
       try { const r6 = await e.DB.prepare('SELECT COUNT(*) as n FROM historial_largo WHERE user_id=?').bind(uid).first(); hl = r6 ? r6.n : 0; } catch (x) {}
+      try { const r7 = await e.DB.prepare("SELECT COUNT(*) as n FROM tareas WHERE estado='pendiente'").first(); tareas = r7 ? r7.n : 0; } catch (x) {}
+      try { const r8 = await e.DB.prepare('SELECT COUNT(*) as n FROM workers_registrados WHERE activo=1').first(); workers = r8 ? r8.n : 0; } catch (x) {}
     }
   } catch (x) {}
-  return J({ respuesta: `Sistema activo. Memoria: ${n} mensajes, ${hl} en historial largo, ${c} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes.` });
+  return J({ respuesta: `Sistema activo. Memoria: ${n} mensajes, ${hl} en historial largo, ${c} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas en cola: ${tareas}. Workers registrados: ${workers}.` });
 }
 
 async function rLeer(e, uid) {
@@ -188,47 +234,6 @@ async function rElim(e, uid) {
     await e.DB.prepare('DELETE FROM historial WHERE user_id=?').bind(uid).run();
     return J({ respuesta: `Historial de ${uid} limpiado.` });
   } catch (x) { return J({ respuesta: 'Error: ' + x.message }); }
-}
-
-async function rGC(e, uid, m) {
-  if (!e.DB) return J({ respuesta: 'Sin memoria.' });
-  try {
-    const c = m.replace(/^.*?(guarda|memoriza|recuerda|sube|almacena)\s*/i, '').trim() || m;
-    await e.DB.prepare('INSERT INTO contexto(fecha,resumen,fases,fuente) VALUES(?,?,?,?)').bind(Date.now(), c, JSON.stringify([c]), 'manual').run();
-    return J({ respuesta: 'Anotado en mi núcleo, Comandante.' });
-  } catch (x) { return J({ respuesta: 'Error: ' + x.message }); }
-}
-
-async function rMej(e, uid) {
-  if (!e.CF_API_TOKEN || !e.CF_ACCOUNT_ID) return J({ respuesta: 'Para auto-mejora necesito CF_API_TOKEN y CF_ACCOUNT_ID.' });
-  return J({ respuesta: 'Listo. Dime el área específica a mejorar.' });
-}
-
-async function limpiar(r, e) {
-  try {
-    const b = await r.json();
-    const db = gDB(e, 'agente'), kv = gKV(e, 'agente');
-    if (!db) return J({ error: 'D1 no configurado.' });
-    if (b.archivoId && kv) {
-      const ls = await kv.list({ prefix: 'file:' + b.archivoId + ':' });
-      for (const k of ls.keys) await kv.delete(k.name);
-      const lp = await kv.list({ prefix: 'proc:' + b.archivoId + ':' });
-      for (const k of lp.keys) await kv.delete(k.name);
-      try { await db.prepare('DELETE FROM archivos WHERE id=?').bind(b.archivoId).run(); } catch (x) {}
-      try { await db.prepare('DELETE FROM procesos WHERE id=?').bind(b.archivoId).run(); } catch (x) {}
-      return J({ ok: true, limpiado: b.archivoId });
-    }
-    if (b.todo) {
-      const todas = await kv.list({ prefix: '' });
-      for (const k of todas.keys) {
-        if (k.name.startsWith('file:') || k.name.startsWith('proc:')) await kv.delete(k.name);
-      }
-      return J({ ok: true, limpiado: 'kv_huerfanos' });
-    }
-    return J({ error: 'Falta archivoId o todo:true' });
-  } catch (x) {
-    return J({ error: x.message });
-  }
 }
 
 async function d1(r, e) {
@@ -268,52 +273,31 @@ async function kv(r, e) {
   } catch (x) { return J({ error: 'Error KV: ' + x.message }); }
 }
 
-async function crearWorker(r, e) {
+async function limpiar(r, e) {
   try {
-    const { nombre, codigo, destino } = await r.json();
-    if (!nombre || !codigo) return J({ error: 'Faltan datos.' });
-    const s = gKV(e, destino || 'agente'), db = gDB(e, destino || 'agente');
-    if (!s) return J({ error: 'KV no configurado.' });
-    await s.put('worker:' + nombre, codigo);
-    if (db) { try { await db.prepare('INSERT INTO workers(nombre,codigo,fecha) VALUES(?,?,?)').bind(nombre, codigo.substring(0, 200), Date.now()).run(); } catch (x) {} }
-    return J({ mensaje: 'Worker guardado.' });
-  } catch (x) { return J({ error: x.message }); }
-}
-
-async function mejorar(r, e) {
-  try {
-    const { nuevoCodigo, destino, autoDesplegar } = await r.json();
-    if (!nuevoCodigo) return J({ error: 'Falta código.' });
-    const s = gKV(e, destino || 'agente');
-    if (!s) return J({ error: 'KV no configurado.' });
-    await s.put('worker:version', nuevoCodigo);
-    await s.put('worker:version:fecha', String(Date.now()));
-    if (autoDesplegar && e.CF_API_TOKEN && e.CF_ACCOUNT_ID) {
-      const sn = e.CF_SCRIPT_NAME || 'shadow-ayano';
-      const r1 = await fetch(`https://api.cloudflare.com/client/v4/accounts/${e.CF_ACCOUNT_ID}/workers/scripts/${sn}`, {
-        method: 'PUT',
-        headers: { 'Authorization': `Bearer ${e.CF_API_TOKEN}`, 'Content-Type': 'application/javascript' },
-        body: nuevoCodigo
-      });
-      const d = await r1.json();
-      if (!d.success) return J({ mensaje: 'Guardado en KV, despliegue falló.', error: d.errors });
-      await notificar(e, `🚀 *Auto-mejora desplegada*`);
-      return J({ mensaje: 'Desplegado.' });
+    const b = await r.json();
+    const db = gDB(e, 'agente'), kv = gKV(e, 'agente');
+    if (!db) return J({ error: 'D1 no configurado.' });
+    if (b.archivoId && kv) {
+      const ls = await kv.list({ prefix: 'file:' + b.archivoId + ':' });
+      for (const k of ls.keys) await kv.delete(k.name);
+      const lp = await kv.list({ prefix: 'proc:' + b.archivoId + ':' });
+      for (const k of lp.keys) await kv.delete(k.name);
+      try { await db.prepare('DELETE FROM archivos WHERE id=?').bind(b.archivoId).run(); } catch (x) {}
+      try { await db.prepare('DELETE FROM procesos WHERE id=?').bind(b.archivoId).run(); } catch (x) {}
+      return J({ ok: true, limpiado: b.archivoId });
     }
-    return J({ mensaje: 'Guardado en KV.' });
-  } catch (x) { return J({ error: x.message }); }
-}
-
-async function desplegar(r, e) {
-  try {
-    const { nombre, destino } = await r.json();
-    const s = gKV(e, destino || 'agente');
-    if (!s) return J({ error: 'KV no configurado.' });
-    const c = nombre ? await s.get('worker:' + nombre) : await s.get('worker:version');
-    if (!c) return J({ error: 'Sin código.' });
-    await s.put('worker:pendiente', c);
-    return J({ mensaje: 'Código preparado.' });
-  } catch (x) { return J({ error: x.message }); }
+    if (b.todo) {
+      const todas = await kv.list({ prefix: '' });
+      for (const k of todas.keys) {
+        if (k.name.startsWith('file:') || k.name.startsWith('proc:')) await kv.delete(k.name);
+      }
+      return J({ ok: true, limpiado: 'kv_huerfanos' });
+    }
+    return J({ error: 'Falta archivoId o todo:true' });
+  } catch (x) {
+    return J({ error: x.message });
+  }
 }
 
 async function historial(r, e) {
@@ -323,6 +307,16 @@ async function historial(r, e) {
     if (!db) return J({ error: 'D1 no configurado.' });
     const r1 = await db.prepare('SELECT mensaje,respuesta,fecha FROM historial WHERE user_id=? ORDER BY fecha DESC LIMIT 50').bind(uid).all();
     return J({ user_id: uid, total: r1.results.length, historial: r1.results });
+  } catch (x) { return J({ error: x.message }); }
+}
+
+async function historialLargo(r, e) {
+  try {
+    const u = new URL(r.url), uid = u.searchParams.get('user_id') || 'comandante';
+    const limite = parseInt(u.searchParams.get('limite') || '100');
+    const db = gDB(e, 'agente');
+    const r1 = await db.prepare('SELECT rol,contenido,orden,fecha FROM historial_largo WHERE user_id=? ORDER BY orden DESC LIMIT ?').bind(uid, limite).all();
+    return J({ total: r1.results.length, historial: r1.results.reverse() });
   } catch (x) { return J({ error: x.message }); }
 }
 
@@ -340,7 +334,6 @@ async function verResumenes(r, e) {
   try {
     const u = new URL(r.url), uid = u.searchParams.get('user_id') || 'comandante', d = u.searchParams.get('destino') || 'agente';
     const db = gDB(e, d);
-    if (!db) return J({ error: 'D1 no configurado.' });
     const r1 = await db.prepare('SELECT fecha,resumen FROM resumenes_chat WHERE user_id=? ORDER BY fecha DESC LIMIT 20').bind(uid).all();
     return J({ total: r1.results.length, resumenes: r1.results });
   } catch (x) { return J({ error: x.message }); }
@@ -351,12 +344,12 @@ async function vision(r, e) {
     const { imagen, prompt, user_id } = await r.json();
     const uid = user_id || 'comandante';
     if (!imagen) return J({ error: 'Falta imagen (base64).' });
-    if (!await (await import('./presupuesto.js')).consumir(e, 'vision')) return J({ error: 'Presupuesto de visión agotado hoy.' });
+    if (!await consumir(e, 'vision')) return J({ error: 'Presupuesto de visión agotado hoy.' });
     const res = await e.ayanokoji_IA.run(MODELO_VISION, {
       messages: [{
         role: 'user',
         content: [
-          { type: 'text', text: prompt || 'Describe esta imagen en detalle. Si contiene texto, transcríbelo. Si es código, analízalo. Si es un plano o diagrama, describe su estructura.' },
+          { type: 'text', text: prompt || 'Describe esta imagen en detalle. Si contiene texto, transcríbelo. Si es código, analízalo.' },
           { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${imagen}` } }
         ]
       }],
@@ -389,24 +382,27 @@ export default {
     if (r.method === 'OPTIONS') return new Response(null, { headers: CORS });
     const u = new URL(r.url), p = u.pathname;
 
+    // Chat y memoria
     if (p === '/api/chat' && r.method === 'POST') return chat(r, e, c);
     if (p === '/api/subir' && r.method === 'POST') return subir(r, e, c);
     if (p === '/api/resumir' && r.method === 'POST') return resumir(r, e);
     if (p === '/api/procesar' && r.method === 'POST') return procesar(r, e, c);
     if (p === '/api/retomar' && r.method === 'POST') return retomar(r, e, c);
     if (p === '/api/proceso' && r.method === 'GET') return verProceso(r, e);
-    if (p === '/api/resumenes' && r.method === 'GET') return verResumenes(r, e);
     if (p === '/api/importar' && r.method === 'POST') return importar(r, e);
     if (p === '/api/limpiar' && r.method === 'POST') return limpiar(r, e);
-    if (p === '/api/d1' && r.method === 'POST') return d1(r, e);
-    if (p === '/api/kv' && r.method === 'POST') return kv(r, e);
-    if (p === '/api/crear-worker' && r.method === 'POST') return crearWorker(r, e);
-    if (p === '/api/mejorar' && r.method === 'POST') return mejorar(r, e);
-    if (p === '/api/desplegar' && r.method === 'POST') return desplegar(r, e);
     if (p === '/api/historial' && r.method === 'GET') return historial(r, e);
+    if (p === '/api/historial_largo' && r.method === 'GET') return historialLargo(r, e);
     if (p === '/api/contexto' && r.method === 'GET') return verContexto(r, e);
+    if (p === '/api/resumenes' && r.method === 'GET') return verResumenes(r, e);
     if (p === '/api/reset' && r.method === 'POST') return reset(r, e);
     if (p === '/api/vision' && r.method === 'POST') return vision(r, e);
+
+    // D1 y KV directos
+    if (p === '/api/d1' && r.method === 'POST') return d1(r, e);
+    if (p === '/api/kv' && r.method === 'POST') return kv(r, e);
+
+    // Publisher
     if (p === '/api/publicar' && r.method === 'POST') return rutaPublicar(r, e);
     if (p === '/api/generar' && r.method === 'POST') {
       const { tipo } = await r.json();
@@ -425,15 +421,53 @@ export default {
       const r1 = await db.prepare('SELECT * FROM publicaciones ORDER BY creada DESC LIMIT 30').all();
       return J({ total: r1.results.length, publicaciones: r1.results });
     }
-    if (p === '/api/sandbox' && r.method === 'POST') {
-      return J(await generarEscenario(e));
-    }
+
+    // Sandbox
+    if (p === '/api/sandbox' && r.method === 'POST') return J(await generarEscenario(e));
     if (p === '/api/sandbox/decidir' && r.method === 'POST') {
       const { id, decision } = await r.json();
       return J(await decidir(e, id, decision));
     }
     if (p === '/api/sandbox' && r.method === 'GET') return verSandbox(r, e);
+
+    // Autonomía y workers
+    if (p === '/api/workers' && r.method === 'GET') return J(await listarWorkers(e));
+    if (p === '/api/workers/crear' && r.method === 'POST') {
+      const { nombre, codigo } = await r.json();
+      return J(await crearWorker(e, nombre, codigo));
+    }
+    if (p === '/api/workers/actualizar' && r.method === 'POST') {
+      const { nombre, codigo } = await r.json();
+      return J(await actualizarWorker(e, nombre, codigo));
+    }
+    if (p === '/api/workers/leer' && r.method === 'POST') {
+      const { nombre } = await r.json();
+      return J(await leerCodigoWorker(e, nombre));
+    }
+    if (p === '/api/mejorar' && r.method === 'POST') return J(await autoMejorar(e, await r.json()));
+    if (p === '/api/tareas' && r.method === 'GET') {
+      const db = gDB(e, 'agente');
+      const r1 = await db.prepare('SELECT * FROM tareas ORDER BY prioridad ASC, creada ASC LIMIT 50').all();
+      return J({ total: r1.results.length, tareas: r1.results });
+    }
+    if (p === '/api/tareas' && r.method === 'POST') {
+      const b = await r.json();
+      const db = gDB(e, 'agente');
+      const r1 = await db.prepare('INSERT INTO tareas(tipo,descripcion,payload,prioridad,creada) VALUES(?,?,?,?,?)')
+        .bind(b.tipo || 'general', b.descripcion, JSON.stringify(b.payload || {}), b.prioridad || 5, Date.now()).run();
+      return J({ ok: true, id: r1.meta.last_row_id });
+    }
+    if (p === '/api/acciones' && r.method === 'GET') {
+      const db = gDB(e, 'agente');
+      const r1 = await db.prepare('SELECT * FROM acciones ORDER BY fecha DESC LIMIT 50').all();
+      return J({ total: r1.results.length, acciones: r1.results });
+    }
+
+    // Presupuesto y estado
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
+    if (p === '/api/estado') return J({ estado: 'activo', v: '6.0' });
+
+    // Notificaciones
     if (p === '/api/notificar' && r.method === 'POST') {
       const { texto, bot } = await r.json();
       const ok = await notificar(e, texto || '🧪 Prueba.', bot || 'titiritero');
@@ -443,7 +477,7 @@ export default {
       const ok = await notificar(e, '🧪 *Ping del aliado digital*', 'titiritero');
       return J({ enviado: ok });
     }
-    if (p === '/api/estado') return J({ estado: 'activo', v: '5.0' });
+
     return new Response('404', { status: 404, headers: CORS });
   },
 
@@ -452,6 +486,7 @@ export default {
       await cronRetomar(e);
       await cronPublicar(e);
       await cronSandbox(e);
+      await cronColaTareas(e);
     })());
   }
 };
