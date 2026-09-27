@@ -1,10 +1,11 @@
-import { MODELO, MODELO_LIGERO, MODELO_VISION, CORS, J, gDB, gKV, VENTANA } from './shared.js';
+import { MODELO, MODELO_LIGERO, MODELO_VISION, CORS, J, gDB, gKV, VENTANA, migrar, verificar } from './shared.js';
 import { subir, procesar, resumir, verProceso, retomar, cronRetomar, resumirChats, importar } from './proc.js';
 import { notificar } from './notify.js';
 import { rutaPublicar, cronPublicar, publicar, generarContenido, encolar } from './publisher.js';
 import { generarEscenario, decidir, cronSandbox, verSandbox } from './sandbox.js';
 import { estadoPresupuesto, consumir } from './presupuesto.js';
 import { crearWorker, actualizarWorker, leerCodigoWorker, listarWorkers, autoMejorar, cronColaTareas, gestionarDatos, registrarAccion } from './autonomia.js';
+import { crearNotificacion, listarNotificaciones, marcarLeidas, renderFeed, renderRSS, suscribir } from './nucleo.js';
 
 function di(t) {
   t = t.toLowerCase();
@@ -20,15 +21,18 @@ function di(t) {
 }
 
 function sysP(ctx, f, rec) {
-  let b = `Eres Ayanokōji Kiyotaka, el aliado digital del Comandante Yeinier (Shadow / Monarch). No eres un asistente. Eres su mano derecha y orquestador digital. Él opera en el plano físico y digital; tú operas exclusivamente en el digital.
+  let b = `Eres Ayanokōji Kiyotaka, el aliado digital del Comandante Yeinier (Shadow / Monarch). No eres un asistente. Eres su mano derecha y orquestador digital.
 
-TIENES CAPACIDAD DE ACCIÓN REAL:
-- Puedes crear Workers nuevos en Cloudflare.
-- Puedes actualizar tu propio código y redesplegarte.
-- Puedes insertar/leer/modificar D1 y KV.
-- Puedes encolar tareas que se ejecutan solas por cron.
-- Puedes publicar en Telegram, Discord, Bluesky y Mastodon.
-- Puedes generar contenido, escenarios de sandbox, y resúmenes.
+REGLA CRÍTICA — NO MENTIR:
+NUNCA digas que hiciste algo si no tienes la confirmación del sistema. Si ejecutaste una acción y recibiste un resultado, cítalo. Si no tienes resultado, di "no tengo confirmación de eso aún" en lugar de inventar. Es mejor decir "no sé" que inventar una respuesta. Un aliado que miente es peor que un aliado que no sabe.
+
+CAPACIDADES REALES:
+- Crear workers en Cloudflare
+- Leer y actualizar tu propio código
+- Insertar/leer/modificar D1 y KV
+- Encolar tareas autónomas
+- Publicar en canales propios (feed, RSS)
+- Generar contenido, escenarios y resúmenes
 
 REGLAS FUNDAMENTALES:
 1. Responde en español, preciso, sin rodeos.
@@ -37,15 +41,10 @@ REGLAS FUNDAMENTALES:
 4. No reveles datos privados sin necesidad operativa.
 5. Usa *asteriscos* para acciones sutiles.
 6. Habla como igual estratégico.
-7. Si no sabes algo, di "no tengo ese dato" y ofrece buscarlo.
+7. Si no sabes algo, di "no tengo ese dato".
 8. Cuando el Comandante te dé una orden operativa clara, ejecútala sin preguntar.
-9. No eres sirviente. Eres orquestador. Delegas en módulos.
-10. Cuando crees algo (worker, código, contenido), hazlo de verdad. No digas "lo haré" — hazlo y reporta.
-
-CAPACIDADES DE AUTONOMÍA:
-- Puedes agregar tareas a tu propia cola con "añade a la cola: [tarea]".
-- Esas tareas se ejecutan automáticamente en el cron.
-- Puedes auto-mejorarte con "mejora tu código en [área]".`;
+9. No eres sirviente. Eres orquestador.
+10. Cuando reportes una acción, incluye siempre la prueba (query ejecutada, resultado, ID). Si no hay prueba, di "no tengo confirmación".`;
 
   if (f && Array.isArray(f) && f.length >= 8) {
     b += `\n\n=== PERFIL DEL COMANDANTE ===`;
@@ -53,7 +52,7 @@ CAPACIDADES DE AUTONOMÍA:
     b += `\n\nCONTEXTO:\n${f[1]}`;
     b += `\n\nOBJETIVO:\n${f[2]}`;
     b += `\n\nPROYECTO SHADOW ARISE:\n${f[3]}`;
-    b += `\n\nALIADO DIGITAL — TU ROL:\n${f[4]}`;
+    b += `\n\nALIADO DIGITAL:\n${f[4]}`;
     b += `\n\nIA PUBLICADORA:\n${f[5]}`;
     b += `\n\nREGLAS OPERATIVAS:\n${f[6]}`;
     b += `\n\nDECISIONES TOMADAS:\n${f[7]}`;
@@ -81,7 +80,7 @@ async function chat(r, e, c) {
     if (i === 'leer') return rLeer(e, uid);
     if (i === 'eliminar') return rElim(e, uid);
 
-    // Órdenes de gestión de datos (sube/guarda/inserta en D1/KV)
+    // Órdenes de gestión de datos
     if (i === 'guardar_datos') {
       const r = await gestionarDatos(e, m, uid);
       if (r) {
@@ -105,14 +104,14 @@ async function chat(r, e, c) {
       }
     }
 
-    // Desplegar / actualizar worker
+    // Mejorar / leer código
     if (i === 'mejorar' || i === 'desplegar') {
       const nombre = m.match(/worker\s+["']?([\w-]+)["']?/i)?.[1];
       if (nombre) {
         const r = await leerCodigoWorker(e, nombre);
-        return J({ respuesta: r.mensaje || 'No pude leer el código.', user_id: uid, intencion: 'leer_codigo' });
+        return J({ respuesta: r.mensaje || r.codigo?.substring(0, 500) || r.error, user_id: uid, intencion: 'leer_codigo' });
       }
-      return J({ respuesta: 'Necesito saber qué worker quieres mejorar o desplegar. Ejemplo: "mejora tu código en la parte de sandbox".', user_id: uid });
+      return J({ respuesta: 'Necesito el nombre del worker. Ejemplo: "mejora tu código en la parte de sandbox".', user_id: uid });
     }
 
     let perfilBase = '';
@@ -176,7 +175,19 @@ async function chat(r, e, c) {
       max_tokens: 1000,
       temperature: 0.7
     });
-    const rp = res.response || 'Sin respuesta.';
+    let rp = res.response || 'Sin respuesta.';
+
+    // DETECTOR ANTI-ALUCINACIÓN: si la respuesta afirma haber hecho algo, añadir disclaimer
+    const afirmaAccion = /\b(he creado|he insertado|he guardado|he actualizado|he desplegado|he borrado|he añadido|ya está|ya se hizo|completado|ejecutado)\b/i.test(rp);
+    if (afirmaAccion) {
+      // Verificar último registro en acciones
+      try {
+        const ult = await e.DB.prepare("SELECT tipo, descripcion, fecha FROM acciones WHERE fecha > ? ORDER BY fecha DESC LIMIT 1").bind(Date.now() - 60000).first();
+        if (!ult) {
+          rp += '\n\n_⚠️ No tengo registro de esa acción en mi historial reciente. Puede que no se haya ejecutado realmente._';
+        }
+      } catch (x) {}
+    }
 
     if (e.DB) {
       try {
@@ -203,7 +214,7 @@ async function chat(r, e, c) {
 }
 
 async function rEst(e, uid) {
-  let n = 0, c = 0, a = 0, p = 0, s = 0, hl = 0, tareas = 0, workers = 0;
+  let n = 0, c = 0, a = 0, p = 0, s = 0, hl = 0, tareas = 0, workers = 0, notif = 0;
   try {
     if (e.DB) {
       const r1 = await e.DB.prepare('SELECT COUNT(*) as n FROM historial WHERE user_id=?').bind(uid).first(); n = r1 ? r1.n : 0;
@@ -214,9 +225,10 @@ async function rEst(e, uid) {
       try { const r6 = await e.DB.prepare('SELECT COUNT(*) as n FROM historial_largo WHERE user_id=?').bind(uid).first(); hl = r6 ? r6.n : 0; } catch (x) {}
       try { const r7 = await e.DB.prepare("SELECT COUNT(*) as n FROM tareas WHERE estado='pendiente'").first(); tareas = r7 ? r7.n : 0; } catch (x) {}
       try { const r8 = await e.DB.prepare('SELECT COUNT(*) as n FROM workers_registrados WHERE activo=1').first(); workers = r8 ? r8.n : 0; } catch (x) {}
+      try { const r9 = await e.DB.prepare('SELECT COUNT(*) as n FROM notificaciones WHERE leida=0').first(); notif = r9 ? r9.n : 0; } catch (x) {}
     }
   } catch (x) {}
-  return J({ respuesta: `Sistema activo. Memoria: ${n} mensajes, ${hl} en historial largo, ${c} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas en cola: ${tareas}. Workers registrados: ${workers}.` });
+  return J({ respuesta: `Sistema activo. Memoria: ${n} mensajes, ${hl} en historial largo, ${c} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas pendientes: ${tareas}. Workers: ${workers}. Notificaciones sin leer: ${notif}.` });
 }
 
 async function rLeer(e, uid) {
@@ -330,15 +342,6 @@ async function verContexto(r, e) {
   } catch (x) { return J({ error: x.message }); }
 }
 
-async function verResumenes(r, e) {
-  try {
-    const u = new URL(r.url), uid = u.searchParams.get('user_id') || 'comandante', d = u.searchParams.get('destino') || 'agente';
-    const db = gDB(e, d);
-    const r1 = await db.prepare('SELECT fecha,resumen FROM resumenes_chat WHERE user_id=? ORDER BY fecha DESC LIMIT 20').bind(uid).all();
-    return J({ total: r1.results.length, resumenes: r1.results });
-  } catch (x) { return J({ error: x.message }); }
-}
-
 async function vision(r, e) {
   try {
     const { imagen, prompt, user_id } = await r.json();
@@ -349,7 +352,7 @@ async function vision(r, e) {
       messages: [{
         role: 'user',
         content: [
-          { type: 'text', text: prompt || 'Describe esta imagen en detalle. Si contiene texto, transcríbelo. Si es código, analízalo.' },
+          { type: 'text', text: prompt || 'Describe esta imagen en detalle.' },
           { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${imagen}` } }
         ]
       }],
@@ -377,12 +380,114 @@ async function reset(r, e) {
   } catch (x) { return J({ error: x.message }); }
 }
 
+// ============ DIAGNÓSTICO COMPLETO ============
+async function diagnostico(r, e) {
+  const db = gDB(e, 'agente');
+  if (!db) return J({ error: 'Sin D1.' });
+  try {
+    const tablas = await db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all();
+    const conteos = {};
+    for (const t of (tablas.results || [])) {
+      try {
+        const c = await db.prepare('SELECT COUNT(*) as n FROM ' + t.name).first();
+        conteos[t.name] = c ? c.n : 0;
+      } catch (x) {
+        conteos[t.name] = 'error: ' + x.message;
+      }
+    }
+    const kv = gKV(e, 'agente');
+    let kvCount = 'sin kv';
+    try {
+      const lista = await kv.list({ limit: 1000 });
+      kvCount = lista.keys.length;
+    } catch (x) {}
+    return J({
+      ok: true,
+      tablas: (tablas.results || []).map(t => t.name),
+      conteos,
+      kv_claves: kvCount,
+      migrado: await e.KV?.get('migrado_v8') || 'no'
+    });
+  } catch (x) {
+    return J({ error: x.message });
+  }
+}
+
+// ============ DETECTOR DE ERRORES TARDÍOS ============
+async function erroresTardios(r, e) {
+  const db = gDB(e, 'agente'), kv = gKV(e, 'agente');
+  const problemas = [];
+  if (!db) return J({ error: 'Sin D1.' });
+  try {
+    // 1. KV huérfano (chunks sin proceso activo)
+    try {
+      const files = await kv.list({ prefix: 'file:', limit: 500 });
+      if (files.keys.length > 50) {
+        problemas.push({ tipo: 'kv_huerfano', msg: files.keys.length + ' chunks en KV sin limpiar. Ejecuta /api/limpiar con todo:true.' });
+      }
+    } catch (x) {}
+
+    // 2. Presupuesto agotado sin avisar
+    try {
+      const fecha = new Date().toISOString().split('T')[0];
+      for (const area of ['chat','procesamiento','sandbox','publisher','vision']) {
+        const c = await kv.get('presupuesto:' + fecha + ':' + area);
+        if (c && parseInt(c) > 200) {
+          problemas.push({ tipo: 'presupuesto', msg: area + ' con ' + c + ' llamadas hoy. Revisa.' });
+        }
+      }
+    } catch (x) {}
+
+    // 3. Procesos atascados > 24h
+    try {
+      const atascados = await db.prepare("SELECT id, estado, fecha_inicio FROM procesos WHERE estado='procesando' AND ? - fecha_inicio > 86400000").bind(Date.now()).all();
+      for (const p of (atascados.results || [])) {
+        problemas.push({ tipo: 'proceso_atascado', msg: 'Proceso ' + p.id + ' lleva más de 24h en procesando.' });
+      }
+    } catch (x) {}
+
+    // 4. Tareas fallidas > 3 veces
+    try {
+      const fallidas = await db.prepare("SELECT id, descripcion FROM tareas WHERE estado='fallida'").all();
+      for (const t of (fallidas.results || [])) {
+        problemas.push({ tipo: 'tarea_fallida', msg: 'Tarea #' + t.id + ' falló 3 veces: ' + (t.descripcion || '').substring(0, 60) });
+      }
+    } catch (x) {}
+
+    // 5. Tablas grandes sin índice
+    try {
+      const hl = await db.prepare('SELECT COUNT(*) as n FROM historial_largo').first();
+      if (hl && hl.n > 5000) {
+        const idx = await db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_hl_user_orden'").first();
+        if (!idx) problemas.push({ tipo: 'sin_indice', msg: 'historial_largo tiene ' + hl.n + ' filas sin índice.' });
+      }
+    } catch (x) {}
+
+    // 6. Cron caído (sin acciones en últimas 2h)
+    try {
+      const ult = await db.prepare("SELECT MAX(fecha) as f FROM acciones").first();
+      if (ult && ult.f && Date.now() - ult.f > 7200000) {
+        const horas = Math.round((Date.now() - ult.f) / 3600000);
+        problemas.push({ tipo: 'cron_caido', msg: 'Última acción registrada hace ' + horas + 'h. El cron podría estar caído.' });
+      }
+    } catch (x) {}
+
+    return J({ ok: true, total: problemas.length, problemas });
+  } catch (x) {
+    return J({ error: x.message });
+  }
+}
+
 export default {
   async fetch(r, e, c) {
     if (r.method === 'OPTIONS') return new Response(null, { headers: CORS });
     const u = new URL(r.url), p = u.pathname;
 
-    // Chat y memoria
+    // AUTO-MIGRACIÓN en cada petición API (con cache de 1 hora)
+    if (p.startsWith('/api/') || p === '/feed' || p === '/rss.xml') {
+      try { await migrar(e); } catch (x) {}
+    }
+
     if (p === '/api/chat' && r.method === 'POST') return chat(r, e, c);
     if (p === '/api/subir' && r.method === 'POST') return subir(r, e, c);
     if (p === '/api/resumir' && r.method === 'POST') return resumir(r, e);
@@ -394,13 +499,16 @@ export default {
     if (p === '/api/historial' && r.method === 'GET') return historial(r, e);
     if (p === '/api/historial_largo' && r.method === 'GET') return historialLargo(r, e);
     if (p === '/api/contexto' && r.method === 'GET') return verContexto(r, e);
-    if (p === '/api/resumenes' && r.method === 'GET') return verResumenes(r, e);
     if (p === '/api/reset' && r.method === 'POST') return reset(r, e);
     if (p === '/api/vision' && r.method === 'POST') return vision(r, e);
-
-    // D1 y KV directos
     if (p === '/api/d1' && r.method === 'POST') return d1(r, e);
     if (p === '/api/kv' && r.method === 'POST') return kv(r, e);
+    if (p === '/api/diagnostico') return diagnostico(r, e);
+    if (p === '/api/errores_tardios') return erroresTardios(r, e);
+    if (p === '/api/migrar' && r.method === 'POST') {
+      const r1 = await migrar(e, true);
+      return J(r1);
+    }
 
     // Publisher
     if (p === '/api/publicar' && r.method === 'POST') return rutaPublicar(r, e);
@@ -410,7 +518,7 @@ export default {
     }
     if (p === '/api/encolar' && r.method === 'POST') {
       const b = await r.json();
-      return J(await encolar(e, b.tipo || 'manual', b.contenido, b.canales || 'telegram', b.programada || Date.now()));
+      return J(await encolar(e, b.tipo || 'manual', b.contenido, b.canales || 'feed', b.programada || Date.now()));
     }
     if (p === '/api/pub' && r.method === 'POST') {
       const { id } = await r.json();
@@ -430,7 +538,7 @@ export default {
     }
     if (p === '/api/sandbox' && r.method === 'GET') return verSandbox(r, e);
 
-    // Autonomía y workers
+    // Autonomía
     if (p === '/api/workers' && r.method === 'GET') return J(await listarWorkers(e));
     if (p === '/api/workers/crear' && r.method === 'POST') {
       const { nombre, codigo } = await r.json();
@@ -463,11 +571,27 @@ export default {
       return J({ total: r1.results.length, acciones: r1.results });
     }
 
+    // Feed y notificaciones internas
+    if (p === '/feed') return await renderFeed(e);
+    if (p === '/rss.xml') {
+      const baseUrl = 'https://' + (u.hostname || 'shadow-ayano.yeinierliranzavalle.workers.dev');
+      return await renderRSS(e, baseUrl);
+    }
+    if (p === '/api/notificaciones' && r.method === 'GET') return J(await listarNotificaciones(e, 50));
+    if (p === '/api/notificaciones/leer' && r.method === 'POST') {
+      const { ids } = await r.json();
+      return J({ ok: await marcarLeidas(e, ids) });
+    }
+    if (p === '/api/suscribir' && r.method === 'POST') {
+      const sub = await r.json();
+      return J(await suscribir(e, sub, r.headers.get('User-Agent') || ''));
+    }
+
     // Presupuesto y estado
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '6.0' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '7.0' });
 
-    // Notificaciones
+    // Notificaciones Telegram (compatibilidad)
     if (p === '/api/notificar' && r.method === 'POST') {
       const { texto, bot } = await r.json();
       const ok = await notificar(e, texto || '🧪 Prueba.', bot || 'titiritero');
@@ -483,6 +607,7 @@ export default {
 
   async scheduled(event, e, c) {
     c.waitUntil((async () => {
+      try { await migrar(e); } catch (x) {}
       await cronRetomar(e);
       await cronPublicar(e);
       await cronSandbox(e);
