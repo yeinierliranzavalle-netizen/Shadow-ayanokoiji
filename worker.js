@@ -1,11 +1,12 @@
-import { MODELO, MODELO_LIGERO, MODELO_VISION, CORS, J, gDB, gKV, VENTANA, migrar, verificar } from './shared.js';
+import { MODELO, MODELO_LIGERO, MODELO_VISION, CORS, J, gDB, gKV, VENTANA, migrar } from './shared.js';
 import { subir, procesar, resumir, verProceso, retomar, cronRetomar, resumirChats, importar } from './proc.js';
 import { notificar } from './notify.js';
-import { rutaPublicar, cronPublicar, publicar, generarContenido, encolar } from './publisher.js';
-import { generarEscenario, decidir, cronSandbox, verSandbox } from './sandbox.js';
 import { estadoPresupuesto, consumir } from './presupuesto.js';
-import { crearWorker, actualizarWorker, leerCodigoWorker, listarWorkers, autoMejorar, cronColaTareas, gestionarDatos, registrarAccion } from './autonomia.js';
-import { crearNotificacion, listarNotificaciones, marcarLeidas, renderFeed, renderRSS, suscribir } from './nucleo.js';
+
+// Módulos opcionales: cargan solo si existen
+async function opcional(ruta) {
+  try { return await import(ruta); } catch (e) { return null; }
+}
 
 function di(t) {
   t = t.toLowerCase();
@@ -24,10 +25,10 @@ function sysP(ctx, f, rec) {
   let b = `Eres Ayanokōji Kiyotaka, el aliado digital del Comandante Yeinier (Shadow / Monarch). No eres un asistente. Eres su mano derecha y orquestador digital.
 
 REGLA CRÍTICA — NO MENTIR:
-NUNCA digas que hiciste algo si no tienes la confirmación del sistema. Si ejecutaste una acción y recibiste un resultado, cítalo. Si no tienes resultado, di "no tengo confirmación de eso aún" en lugar de inventar. Es mejor decir "no sé" que inventar una respuesta. Un aliado que miente es peor que un aliado que no sabe.
+NUNCA digas que hiciste algo si no tienes la confirmación del sistema. Si ejecutaste una acción y recibiste un resultado, cítalo. Si no tienes resultado, di "no tengo confirmación de eso aún" en lugar de inventar. Es mejor decir "no sé" que inventar. Un aliado que miente es peor que un aliado que no sabe.
 
 CAPACIDADES REALES:
-- Crear workers en Cloudflare
+- Crear workers en Cloudflare (si autonomia.js existe)
 - Leer y actualizar tu propio código
 - Insertar/leer/modificar D1 y KV
 - Encolar tareas autónomas
@@ -80,35 +81,38 @@ async function chat(r, e, c) {
     if (i === 'leer') return rLeer(e, uid);
     if (i === 'eliminar') return rElim(e, uid);
 
-    // Órdenes de gestión de datos
     if (i === 'guardar_datos') {
-      const r = await gestionarDatos(e, m, uid);
-      if (r) {
-        await registrarAccion(e, 'guardar_datos', m.substring(0, 100), true, r.respuesta);
-        if (e.DB) {
-          try {
-            await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)")
-              .bind(uid, m, r.respuesta, Date.now()).run();
-          } catch (x) {}
+      const au = await opcional('./autonomia.js');
+      if (au && au.gestionarDatos) {
+        const r = await au.gestionarDatos(e, m, uid);
+        if (r) {
+          if (au.registrarAccion) await au.registrarAccion(e, 'guardar_datos', m.substring(0, 100), true, r.respuesta);
+          if (e.DB) {
+            try {
+              await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)")
+                .bind(uid, m, r.respuesta, Date.now()).run();
+            } catch (x) {}
+          }
+          return J({ respuesta: r.respuesta, user_id: uid, intencion: i });
         }
-        return J({ respuesta: r.respuesta, user_id: uid, intencion: i });
       }
     }
 
-    // Crear worker
     if (i === 'crear') {
+      const au = await opcional('./autonomia.js');
       const nombre = m.match(/worker\s+["']?([\w-]+)["']?/i)?.[1] || m.match(/crea\s+["']?([\w-]+)["']?/i)?.[1];
-      if (nombre) {
-        const r = await crearWorker(e, nombre, '// Worker creado por Ayanokōji\nexport default { async fetch(req) { return new Response("Hola desde " + req.url); } }');
+      if (au && nombre) {
+        const r = await au.crearWorker(e, nombre, '// Worker creado por Ayanokōji\nexport default { async fetch(req) { return new Response("Hola desde " + req.url); } }');
         return J({ respuesta: r.mensaje || r.error, user_id: uid, intencion: 'crear' });
       }
+      if (!au) return J({ respuesta: 'Necesito que subas `autonomia.js` primero.', user_id: uid });
     }
 
-    // Mejorar / leer código
     if (i === 'mejorar' || i === 'desplegar') {
+      const au = await opcional('./autonomia.js');
       const nombre = m.match(/worker\s+["']?([\w-]+)["']?/i)?.[1];
-      if (nombre) {
-        const r = await leerCodigoWorker(e, nombre);
+      if (au && nombre) {
+        const r = await au.leerCodigoWorker(e, nombre);
         return J({ respuesta: r.mensaje || r.codigo?.substring(0, 500) || r.error, user_id: uid, intencion: 'leer_codigo' });
       }
       return J({ respuesta: 'Necesito el nombre del worker. Ejemplo: "mejora tu código en la parte de sandbox".', user_id: uid });
@@ -177,10 +181,8 @@ async function chat(r, e, c) {
     });
     let rp = res.response || 'Sin respuesta.';
 
-    // DETECTOR ANTI-ALUCINACIÓN: si la respuesta afirma haber hecho algo, añadir disclaimer
     const afirmaAccion = /\b(he creado|he insertado|he guardado|he actualizado|he desplegado|he borrado|he añadido|ya está|ya se hizo|completado|ejecutado)\b/i.test(rp);
-    if (afirmaAccion) {
-      // Verificar último registro en acciones
+    if (afirmaAccion && e.DB) {
       try {
         const ult = await e.DB.prepare("SELECT tipo, descripcion, fecha FROM acciones WHERE fecha > ? ORDER BY fecha DESC LIMIT 1").bind(Date.now() - 60000).first();
         if (!ult) {
@@ -380,7 +382,6 @@ async function reset(r, e) {
   } catch (x) { return J({ error: x.message }); }
 }
 
-// ============ DIAGNÓSTICO COMPLETO ============
 async function diagnostico(r, e) {
   const db = gDB(e, 'agente');
   if (!db) return J({ error: 'Sin D1.' });
@@ -401,11 +402,17 @@ async function diagnostico(r, e) {
       const lista = await kv.list({ limit: 1000 });
       kvCount = lista.keys.length;
     } catch (x) {}
+    const modulos = {};
+    for (const m of ['./nucleo.js','./autonomia.js','./publisher.js','./sandbox.js']) {
+      const x = await opcional(m);
+      modulos[m] = !!x;
+    }
     return J({
       ok: true,
       tablas: (tablas.results || []).map(t => t.name),
       conteos,
       kv_claves: kvCount,
+      modulos_disponibles: modulos,
       migrado: await e.KV?.get('migrado_v8') || 'no'
     });
   } catch (x) {
@@ -413,13 +420,11 @@ async function diagnostico(r, e) {
   }
 }
 
-// ============ DETECTOR DE ERRORES TARDÍOS ============
 async function erroresTardios(r, e) {
   const db = gDB(e, 'agente'), kv = gKV(e, 'agente');
   const problemas = [];
   if (!db) return J({ error: 'Sin D1.' });
   try {
-    // 1. KV huérfano (chunks sin proceso activo)
     try {
       const files = await kv.list({ prefix: 'file:', limit: 500 });
       if (files.keys.length > 50) {
@@ -427,7 +432,6 @@ async function erroresTardios(r, e) {
       }
     } catch (x) {}
 
-    // 2. Presupuesto agotado sin avisar
     try {
       const fecha = new Date().toISOString().split('T')[0];
       for (const area of ['chat','procesamiento','sandbox','publisher','vision']) {
@@ -438,7 +442,6 @@ async function erroresTardios(r, e) {
       }
     } catch (x) {}
 
-    // 3. Procesos atascados > 24h
     try {
       const atascados = await db.prepare("SELECT id, estado, fecha_inicio FROM procesos WHERE estado='procesando' AND ? - fecha_inicio > 86400000").bind(Date.now()).all();
       for (const p of (atascados.results || [])) {
@@ -446,7 +449,6 @@ async function erroresTardios(r, e) {
       }
     } catch (x) {}
 
-    // 4. Tareas fallidas > 3 veces
     try {
       const fallidas = await db.prepare("SELECT id, descripcion FROM tareas WHERE estado='fallida'").all();
       for (const t of (fallidas.results || [])) {
@@ -454,7 +456,6 @@ async function erroresTardios(r, e) {
       }
     } catch (x) {}
 
-    // 5. Tablas grandes sin índice
     try {
       const hl = await db.prepare('SELECT COUNT(*) as n FROM historial_largo').first();
       if (hl && hl.n > 5000) {
@@ -463,12 +464,11 @@ async function erroresTardios(r, e) {
       }
     } catch (x) {}
 
-    // 6. Cron caído (sin acciones en últimas 2h)
     try {
       const ult = await db.prepare("SELECT MAX(fecha) as f FROM acciones").first();
       if (ult && ult.f && Date.now() - ult.f > 7200000) {
         const horas = Math.round((Date.now() - ult.f) / 3600000);
-        problemas.push({ tipo: 'cron_caido', msg: 'Última acción registrada hace ' + horas + 'h. El cron podría estar caído.' });
+        problemas.push({ tipo: 'cron_caido', msg: 'Última acción registrada hace ' + horas + 'h.' });
       }
     } catch (x) {}
 
@@ -483,11 +483,11 @@ export default {
     if (r.method === 'OPTIONS') return new Response(null, { headers: CORS });
     const u = new URL(r.url), p = u.pathname;
 
-    // AUTO-MIGRACIÓN en cada petición API (con cache de 1 hora)
     if (p.startsWith('/api/') || p === '/feed' || p === '/rss.xml') {
       try { await migrar(e); } catch (x) {}
     }
 
+    // Chat y memoria (obligatorios)
     if (p === '/api/chat' && r.method === 'POST') return chat(r, e, c);
     if (p === '/api/subir' && r.method === 'POST') return subir(r, e, c);
     if (p === '/api/resumir' && r.method === 'POST') return resumir(r, e);
@@ -505,24 +505,33 @@ export default {
     if (p === '/api/kv' && r.method === 'POST') return kv(r, e);
     if (p === '/api/diagnostico') return diagnostico(r, e);
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
-    if (p === '/api/migrar' && r.method === 'POST') {
-      const r1 = await migrar(e, true);
-      return J(r1);
-    }
+    if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
+    if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
+    if (p === '/api/estado') return J({ estado: 'activo', v: '7.1' });
 
-    // Publisher
-    if (p === '/api/publicar' && r.method === 'POST') return rutaPublicar(r, e);
+    // Publisher (opcional)
+    if (p === '/api/publicar' && r.method === 'POST') {
+      const m = await opcional('./publisher.js');
+      if (!m) return J({ error: 'publisher.js no instalado.' });
+      return m.rutaPublicar(r, e);
+    }
     if (p === '/api/generar' && r.method === 'POST') {
+      const m = await opcional('./publisher.js');
+      if (!m) return J({ error: 'publisher.js no instalado.' });
       const { tipo } = await r.json();
-      return J(await generarContenido(e, tipo || 'provocacion'));
+      return J(await m.generarContenido(e, tipo || 'provocacion'));
     }
     if (p === '/api/encolar' && r.method === 'POST') {
+      const m = await opcional('./publisher.js');
+      if (!m) return J({ error: 'publisher.js no instalado.' });
       const b = await r.json();
-      return J(await encolar(e, b.tipo || 'manual', b.contenido, b.canales || 'feed', b.programada || Date.now()));
+      return J(await m.encolar(e, b.tipo || 'manual', b.contenido, b.canales || 'feed', b.programada || Date.now()));
     }
     if (p === '/api/pub' && r.method === 'POST') {
+      const m = await opcional('./publisher.js');
+      if (!m) return J({ error: 'publisher.js no instalado.' });
       const { id } = await r.json();
-      return J(await publicar(e, id));
+      return J(await m.publicar(e, id));
     }
     if (p === '/api/publicaciones' && r.method === 'GET') {
       const db = gDB(e, 'agente');
@@ -530,29 +539,53 @@ export default {
       return J({ total: r1.results.length, publicaciones: r1.results });
     }
 
-    // Sandbox
-    if (p === '/api/sandbox' && r.method === 'POST') return J(await generarEscenario(e));
-    if (p === '/api/sandbox/decidir' && r.method === 'POST') {
-      const { id, decision } = await r.json();
-      return J(await decidir(e, id, decision));
+    // Sandbox (opcional)
+    if (p === '/api/sandbox' && r.method === 'POST') {
+      const m = await opcional('./sandbox.js');
+      if (!m) return J({ error: 'sandbox.js no instalado.' });
+      return J(await m.generarEscenario(e));
     }
-    if (p === '/api/sandbox' && r.method === 'GET') return verSandbox(r, e);
+    if (p === '/api/sandbox/decidir' && r.method === 'POST') {
+      const m = await opcional('./sandbox.js');
+      if (!m) return J({ error: 'sandbox.js no instalado.' });
+      const { id, decision } = await r.json();
+      return J(await m.decidir(e, id, decision));
+    }
+    if (p === '/api/sandbox' && r.method === 'GET') {
+      const m = await opcional('./sandbox.js');
+      if (!m) return J({ escenarios: [], lecciones: [] });
+      return m.verSandbox(r, e);
+    }
 
-    // Autonomía
-    if (p === '/api/workers' && r.method === 'GET') return J(await listarWorkers(e));
+    // Autonomía (opcional)
+    if (p === '/api/workers' && r.method === 'GET') {
+      const m = await opcional('./autonomia.js');
+      if (!m) return J({ error: 'autonomia.js no instalado.' });
+      return J(await m.listarWorkers(e));
+    }
     if (p === '/api/workers/crear' && r.method === 'POST') {
+      const m = await opcional('./autonomia.js');
+      if (!m) return J({ error: 'autonomia.js no instalado.' });
       const { nombre, codigo } = await r.json();
-      return J(await crearWorker(e, nombre, codigo));
+      return J(await m.crearWorker(e, nombre, codigo));
     }
     if (p === '/api/workers/actualizar' && r.method === 'POST') {
+      const m = await opcional('./autonomia.js');
+      if (!m) return J({ error: 'autonomia.js no instalado.' });
       const { nombre, codigo } = await r.json();
-      return J(await actualizarWorker(e, nombre, codigo));
+      return J(await m.actualizarWorker(e, nombre, codigo));
     }
     if (p === '/api/workers/leer' && r.method === 'POST') {
+      const m = await opcional('./autonomia.js');
+      if (!m) return J({ error: 'autonomia.js no instalado.' });
       const { nombre } = await r.json();
-      return J(await leerCodigoWorker(e, nombre));
+      return J(await m.leerCodigoWorker(e, nombre));
     }
-    if (p === '/api/mejorar' && r.method === 'POST') return J(await autoMejorar(e, await r.json()));
+    if (p === '/api/mejorar' && r.method === 'POST') {
+      const m = await opcional('./autonomia.js');
+      if (!m) return J({ error: 'autonomia.js no instalado.' });
+      return J(await m.autoMejorar(e, await r.json()));
+    }
     if (p === '/api/tareas' && r.method === 'GET') {
       const db = gDB(e, 'agente');
       const r1 = await db.prepare('SELECT * FROM tareas ORDER BY prioridad ASC, creada ASC LIMIT 50').all();
@@ -571,25 +604,35 @@ export default {
       return J({ total: r1.results.length, acciones: r1.results });
     }
 
-    // Feed y notificaciones internas
-    if (p === '/feed') return await renderFeed(e);
-    if (p === '/rss.xml') {
-      const baseUrl = 'https://' + (u.hostname || 'shadow-ayano.yeinierliranzavalle.workers.dev');
-      return await renderRSS(e, baseUrl);
+    // Feed y notificaciones (opcional: nucleo.js)
+    if (p === '/feed') {
+      const m = await opcional('./nucleo.js');
+      if (!m) return new Response('nucleo.js no instalado', { status: 503 });
+      return await m.renderFeed(e);
     }
-    if (p === '/api/notificaciones' && r.method === 'GET') return J(await listarNotificaciones(e, 50));
+    if (p === '/rss.xml') {
+      const m = await opcional('./nucleo.js');
+      if (!m) return new Response('nucleo.js no instalado', { status: 503 });
+      const baseUrl = 'https://' + (u.hostname || 'shadow-ayano.yeinierliranzavalle.workers.dev');
+      return await m.renderRSS(e, baseUrl);
+    }
+    if (p === '/api/notificaciones' && r.method === 'GET') {
+      const m = await opcional('./nucleo.js');
+      if (!m) return J({ notificaciones: [], no_leidas: 0 });
+      return J(await m.listarNotificaciones(e, 50));
+    }
     if (p === '/api/notificaciones/leer' && r.method === 'POST') {
+      const m = await opcional('./nucleo.js');
+      if (!m) return J({ ok: false });
       const { ids } = await r.json();
-      return J({ ok: await marcarLeidas(e, ids) });
+      return J({ ok: await m.marcarLeidas(e, ids) });
     }
     if (p === '/api/suscribir' && r.method === 'POST') {
+      const m = await opcional('./nucleo.js');
+      if (!m) return J({ ok: false });
       const sub = await r.json();
-      return J(await suscribir(e, sub, r.headers.get('User-Agent') || ''));
+      return J(await m.suscribir(e, sub, r.headers.get('User-Agent') || ''));
     }
-
-    // Presupuesto y estado
-    if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '7.0' });
 
     // Notificaciones Telegram (compatibilidad)
     if (p === '/api/notificar' && r.method === 'POST') {
@@ -609,9 +652,12 @@ export default {
     c.waitUntil((async () => {
       try { await migrar(e); } catch (x) {}
       await cronRetomar(e);
-      await cronPublicar(e);
-      await cronSandbox(e);
-      await cronColaTareas(e);
+      const pub = await opcional('./publisher.js');
+      if (pub && pub.cronPublicar) { try { await pub.cronPublicar(e); } catch (x) {} }
+      const sb = await opcional('./sandbox.js');
+      if (sb && sb.cronSandbox) { try { await sb.cronSandbox(e); } catch (x) {} }
+      const au = await opcional('./autonomia.js');
+      if (au && au.cronColaTareas) { try { await au.cronColaTareas(e); } catch (x) {} }
     })());
   }
 };
