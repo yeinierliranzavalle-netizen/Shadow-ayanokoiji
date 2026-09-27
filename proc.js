@@ -148,7 +148,7 @@ export async function procesarLote(e, aId, d, off) {
     for (let i = off; i < fin; i++) {
       try {
         const r1 = await ai.run(MODELO_LIGERO, {
-          messages: [{ role: 'user', content: `Analiza este fragmento de conversación entre el Comandante Yeinier y su aliado. Extrae TODA la información útil sin limitarte a categorías fijas:\n- Quién es el Comandante, cómo piensa, qué lo motiva.\n- Decisiones y POR QUÉ se tomaron.\n- Errores, correcciones y aprendizajes.\n- Proyecto Shadow Arise: estrategia, componentes, estado.\n- Ayanokōji Digital: rol, comportamiento, límites.\n- IA publicadora: canales, estrategia.\n- Planes futuros, ideas pendientes, cualquier detalle adicional.\n\nSé específico. Explica el porqué. Máximo 300 palabras.\n\nFragmento ${i + 1}/${tot}:\n${bl[i]}` }],
+          messages: [{ role: 'user', content: `Analiza este fragmento de conversación entre el Comandante Yeinier y su aliado. Extrae TODA la información útil:\n- Quién es el Comandante, cómo piensa, qué lo motiva.\n- Decisiones y POR QUÉ se tomaron.\n- Errores, correcciones y aprendizajes.\n- Proyecto Shadow Arise: estrategia, componentes, estado.\n- Ayanokōji Digital: rol, comportamiento, límites.\n- IA publicadora: canales, estrategia.\n- Planes futuros, ideas pendientes, cualquier detalle adicional.\n\nSé específico. Explica el porqué. Máximo 300 palabras.\n\nFragmento ${i + 1}/${tot}:\n${bl[i]}` }],
           max_tokens: 600,
           temperature: 0.3
         });
@@ -205,31 +205,31 @@ export async function consolidar(e, aId, d, ac) {
         content: `Genera un PERFIL MAESTRO del Comandante Yeinier en 9 secciones. Cada sección debe ser EXPLICATIVA: QUÉ, POR QUÉ y CÓMO. Formato: cada sección empieza con "### N. TITULO:" y termina con "###" en línea aparte. Mínimo 80 palabras por sección.
 
 ### 1. IDENTIDAD:
-Quién es, esencia, forma de pensar, por qué piensa así. Tres voces: Ayanokōji, Dark, Monarch.
+Quién es, esencia, forma de pensar.
 
 ### 2. CONTEXTO:
-Cuba rural, familia, presión, fe adventista, padre ahorrando para Brasil.
+Cuba rural, familia, presión, fe adventista.
 
 ### 3. OBJETIVO:
 Meta principal y motivación profunda.
 
 ### 4. PROYECTO SHADOW ARISE:
-Estrategia, componentes, monetización, estado, decisiones y por qué.
+Estrategia, componentes, monetización, estado.
 
 ### 5. ALIADO DIGITAL:
 Rol de Ayanokōji, cómo debe comportarse, límites.
 
 ### 6. IA PUBLICADORA:
-Canales, estrategia, contenido, herramientas.
+Canales, estrategia, contenido.
 
 ### 7. REGLAS OPERATIVAS:
 Cómo trabajar con el Comandante.
 
 ### 8. DECISIONES TOMADAS Y SU RAZÓN:
-QUÉ, POR QUÉ y CÓMO de cada decisión estratégica.
+QUÉ, POR QUÉ y CÓMO.
 
 ### 9. IDEAS PENDIENTES:
-Robot, casa, paneles, auto-mejora, sandbox, videos IA.
+Robot, casa, paneles, auto-mejora, sandbox.
 
 Resúmenes:
 ${tc.substring(0, 9000)}`
@@ -319,52 +319,95 @@ export async function resumirChats(e, uid) {
 }
 
 // ============================================================
-// EXTRACTOR PARA FORMATO MAPPING (ChatGPT/DeepSeek export)
+// EXTRACTOR DE CONTENIDO — AGRESIVO, PRUEBA TODAS LAS RUTAS
 // ============================================================
+function extraerTextoDeContent(content) {
+  if (!content) return '';
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map(c => extraerTextoDeContent(c)).filter(Boolean).join('\n');
+  }
+  if (typeof content === 'object') {
+    // Parts como array (OpenAI/DeepSeek)
+    if (Array.isArray(content.parts)) {
+      return content.parts.map(p => extraerTextoDeContent(p)).filter(Boolean).join('\n');
+    }
+    // Texto directo
+    if (typeof content.text === 'string') return content.text;
+    if (typeof content.content === 'string') return content.content;
+    if (typeof content.value === 'string') return content.value;
+    if (typeof content.body === 'string') return content.body;
+    // Si es array de bloques
+    if (Array.isArray(content.content)) {
+      return content.content.map(c => extraerTextoDeContent(c)).filter(Boolean).join('\n');
+    }
+  }
+  return '';
+}
+
 function extraerMensajesDeMapping(mapping) {
-  const nodos = Object.values(mapping).filter(n => n && n.message);
-  if (!nodos.length) return null;
+  const keys = Object.keys(mapping);
+  if (!keys.length) return null;
 
-  nodos.sort((a, b) => {
-    const ta = a.message?.create_time || 0;
-    const tb = b.message?.create_time || 0;
-    if (ta && tb) return ta - tb;
-    return 0;
-  });
+  // Recolectar todos los nodos con message
+  const nodos = [];
+  let sinMessage = 0, sinContenido = 0;
+  const ejemplos = [];
 
-  const mensajes = [];
-  for (const n of nodos) {
+  for (const k of keys) {
+    const n = mapping[k];
+    if (!n || typeof n !== 'object') continue;
+    if (!n.message) { sinMessage++; continue; }
+
     const msg = n.message;
-    if (!msg) continue;
-
-    let rol = msg.author?.role || msg.role || 'user';
-    if (rol === 'assistant') rol = 'assistant';
-    else if (rol === 'system' || rol === 'tool') continue;
+    let rol = msg.author?.role || msg.role || msg.sender || 'user';
+    rol = String(rol).toLowerCase();
+    if (rol === 'assistant' || rol === 'bot' || rol === 'ai' || rol === 'model') rol = 'assistant';
+    else if (rol === 'system' || rol === 'tool' || rol === 'function') { sinContenido++; continue; }
     else rol = 'user';
 
-    let contenido = '';
-    if (typeof msg.content === 'string') {
-      contenido = msg.content;
-    } else if (msg.content && typeof msg.content === 'object') {
-      if (Array.isArray(msg.content.parts)) {
-        contenido = msg.content.parts.filter(p => typeof p === 'string').join('\n');
-      } else if (typeof msg.content.text === 'string') {
-        contenido = msg.content.text;
-      } else if (typeof msg.content.content === 'string') {
-        contenido = msg.content.content;
-      }
-    }
-    if (!contenido.trim()) continue;
-    if (contenido.length < 2) continue;
+    const contenido = extraerTextoDeContent(msg.content);
 
-    mensajes.push({ role: rol, content: contenido.trim() });
+    if (!contenido || !contenido.trim() || contenido.trim().length < 1) {
+      sinContenido++;
+      if (ejemplos.length < 3) {
+        ejemplos.push({
+          key: k,
+          msg_keys: Object.keys(msg),
+          content_type: typeof msg.content,
+          content_keys: msg.content && typeof msg.content === 'object' ? Object.keys(msg.content) : null,
+          content_preview: JSON.stringify(msg.content).substring(0, 200)
+        });
+      }
+      continue;
+    }
+
+    nodos.push({
+      orden: msg.create_time || parseFloat(k) || 0,
+      rol,
+      contenido: contenido.trim()
+    });
   }
 
-  return mensajes.length ? mensajes : null;
+  // Ordenar por tiempo o por clave numérica
+  nodos.sort((a, b) => a.orden - b.orden);
+
+  const mensajes = nodos.map(n => ({ role: n.rol, content: n.contenido }));
+
+  return {
+    mensajes,
+    stats: {
+      total_nodos: keys.length,
+      con_message: keys.length - sinMessage,
+      sin_contenido: sinContenido,
+      validos: mensajes.length,
+      ejemplos_vacios: ejemplos
+    }
+  };
 }
 
 // ============================================================
-// EXTRACTOR RECURSIVO GENERAL (con soporte para mapping)
+// EXTRACTOR RECURSIVO GENERAL
 // ============================================================
 function extraerMensajes(data, profundidad = 0) {
   if (profundidad > 10) return null;
@@ -376,7 +419,7 @@ function extraerMensajes(data, profundidad = 0) {
       const tieneContenido = primeros.some(m =>
         m.content || m.contenido || m.text || m.message || m.mensaje || m.query || m.response || m.prompt || m.completion
       );
-      if (tieneContenido) return data;
+      if (tieneContenido) return { mensajes: data, stats: { origen: 'array_directo' } };
     }
     for (const item of data) {
       const sub = extraerMensajes(item, profundidad + 1);
@@ -388,7 +431,8 @@ function extraerMensajes(data, profundidad = 0) {
   if (typeof data === 'object') {
     if (data.mapping && typeof data.mapping === 'object' && !Array.isArray(data.mapping)) {
       const r = extraerMensajesDeMapping(data.mapping);
-      if (r) return r;
+      if (r && r.mensajes.length) return { mensajes: r.mensajes, stats: r.stats };
+      if (r) return { mensajes: [], stats: r.stats };
     }
 
     const clavesComunes = ['messages','mensajes','conversation','conversacion','chat','historial','history','data','dialogo','dialogos','conversations','intercambios','turns','turnos','exchanges','items','entries','registros','logs'];
@@ -428,18 +472,10 @@ function parsearMensaje(m) {
   else if (['system','sistema'].includes(rol)) rol = 'system';
   else rol = 'user';
 
-  let contenido = m.content || m.contenido || m.text || m.texto || m.message || m.mensaje || m.query || m.prompt || m.value || m.body || '';
-  if (typeof contenido !== 'string') {
-    if (Array.isArray(contenido)) {
-      contenido = contenido.map(b => {
-        if (typeof b === 'string') return b;
-        if (b && b.text) return b.text;
-        if (b && b.content) return b.content;
-        return '';
-      }).join('\n');
-    } else {
-      contenido = JSON.stringify(contenido);
-    }
+  let contenido = extraerTextoDeContent(m);
+  if (!contenido || !contenido.trim()) {
+    contenido = m.content || m.contenido || m.text || m.texto || m.message || m.mensaje || m.query || m.prompt || m.value || m.body || '';
+    if (typeof contenido !== 'string') contenido = JSON.stringify(contenido);
   }
 
   if (!contenido.trim() && (m.response || m.completion || m.answer || m.respuesta)) {
@@ -464,20 +500,22 @@ export async function importar(r, e) {
     const texto = await archivo.text();
     let data;
     try { data = JSON.parse(texto); } catch (x) {
-      return J({ error: 'JSON inválido: ' + x.message });
+      return J({ error: 'JSON inválido: ' + x.message, primeros_200: texto.substring(0, 200) });
     }
 
-    const lista = extraerMensajes(data);
+    const resultado = extraerMensajes(data);
+    const lista = resultado ? resultado.mensajes : null;
+    const stats = resultado ? resultado.stats : {};
+
     if (!lista || !lista.length) {
-      const keys = data && typeof data === 'object' ? Object.keys(data).slice(0, 10) : [];
+      const keys = data && typeof data === 'object' ? Object.keys(data).slice(0, 15) : [];
       return J({
         error: 'No se encontraron mensajes en el JSON.',
         diagnostico: {
           tipo_raiz: Array.isArray(data) ? 'array' : typeof data,
           claves_raiz: keys,
-          longitud_raiz: Array.isArray(data) ? data.length : null,
-          primer_elemento: Array.isArray(data) && data[0] ? Object.keys(data[0]).slice(0, 8) : null,
-          primeros_200_caracteres: texto.substring(0, 200)
+          stats_extractor: stats,
+          primeros_300_caracteres: texto.substring(0, 300)
         }
       });
     }
@@ -501,10 +539,17 @@ export async function importar(r, e) {
     }
 
     try {
-      await notificar(e, `📥 *Historial importado*\n\nInsertados: ${insertados}\nTotal detectado: ${lista.length}\nSaltados: ${saltados}`);
+      await notificar(e, `📥 *Importación*\n\nInsertados: ${insertados}\nTotal: ${lista.length}`);
     } catch (x) {}
 
-    return J({ ok: true, insertados, total: lista.length, saltados, desde });
+    return J({
+      ok: true,
+      insertados,
+      total: lista.length,
+      saltados,
+      desde,
+      stats_extractor: stats
+    });
   } catch (x) {
     return J({ error: 'Error al importar: ' + x.message });
   }
