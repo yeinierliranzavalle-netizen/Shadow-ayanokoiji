@@ -318,9 +318,56 @@ export async function resumirChats(e, uid) {
   } catch (x) {}
 }
 
-// ============ EXTRACTOR RECURSIVO DE MENSAJES ============
+// ============================================================
+// EXTRACTOR PARA FORMATO MAPPING (ChatGPT/DeepSeek export)
+// ============================================================
+function extraerMensajesDeMapping(mapping) {
+  const nodos = Object.values(mapping).filter(n => n && n.message);
+  if (!nodos.length) return null;
+
+  nodos.sort((a, b) => {
+    const ta = a.message?.create_time || 0;
+    const tb = b.message?.create_time || 0;
+    if (ta && tb) return ta - tb;
+    return 0;
+  });
+
+  const mensajes = [];
+  for (const n of nodos) {
+    const msg = n.message;
+    if (!msg) continue;
+
+    let rol = msg.author?.role || msg.role || 'user';
+    if (rol === 'assistant') rol = 'assistant';
+    else if (rol === 'system' || rol === 'tool') continue;
+    else rol = 'user';
+
+    let contenido = '';
+    if (typeof msg.content === 'string') {
+      contenido = msg.content;
+    } else if (msg.content && typeof msg.content === 'object') {
+      if (Array.isArray(msg.content.parts)) {
+        contenido = msg.content.parts.filter(p => typeof p === 'string').join('\n');
+      } else if (typeof msg.content.text === 'string') {
+        contenido = msg.content.text;
+      } else if (typeof msg.content.content === 'string') {
+        contenido = msg.content.content;
+      }
+    }
+    if (!contenido.trim()) continue;
+    if (contenido.length < 2) continue;
+
+    mensajes.push({ role: rol, content: contenido.trim() });
+  }
+
+  return mensajes.length ? mensajes : null;
+}
+
+// ============================================================
+// EXTRACTOR RECURSIVO GENERAL (con soporte para mapping)
+// ============================================================
 function extraerMensajes(data, profundidad = 0) {
-  if (profundidad > 8) return null;
+  if (profundidad > 10) return null;
   if (!data) return null;
 
   if (Array.isArray(data)) {
@@ -339,6 +386,11 @@ function extraerMensajes(data, profundidad = 0) {
   }
 
   if (typeof data === 'object') {
+    if (data.mapping && typeof data.mapping === 'object' && !Array.isArray(data.mapping)) {
+      const r = extraerMensajesDeMapping(data.mapping);
+      if (r) return r;
+    }
+
     const clavesComunes = ['messages','mensajes','conversation','conversacion','chat','historial','history','data','dialogo','dialogos','conversations','intercambios','turns','turnos','exchanges','items','entries','registros','logs'];
     for (const k of clavesComunes) {
       if (data[k]) {
@@ -346,6 +398,7 @@ function extraerMensajes(data, profundidad = 0) {
         if (sub) return sub;
       }
     }
+
     for (const k of Object.keys(data)) {
       const v = data[k];
       if (Array.isArray(v) && v.length > 0) {
@@ -441,6 +494,7 @@ export async function importar(r, e) {
     for (const m of recorte) {
       const p = parsearMensaje(m);
       if (!p) { saltados++; continue; }
+      if (p.rol === 'system') { saltados++; continue; }
       await db.prepare('INSERT INTO historial_largo(user_id,rol,contenido,orden,fecha) VALUES(?,?,?,?,?)')
         .bind(uid, p.rol, p.contenido, orden, Date.now()).run();
       orden++; insertados++;
