@@ -1,9 +1,7 @@
 import { MODELO, MODELO_LIGERO, MODELO_VISION, CORS, J, gDB, gKV, VENTANA, migrar } from './shared.js';
 import { subir, procesar, resumir, verProceso, retomar, cronRetomar, resumirChats, importar } from './proc.js';
-import { notificar } from './notify.js';
 import { estadoPresupuesto, consumir } from './presupuesto.js';
 
-// Módulos opcionales: cargan solo si existen
 async function opcional(ruta) {
   try { return await import(ruta); } catch (e) { return null; }
 }
@@ -14,6 +12,7 @@ function di(t) {
   if (/\b(resume|resumir|resumen|sintetiza|condensa)\b/.test(t)) return 'resumir';
   if (/\b(mejora|mejorar|optimiza|optimizar|actualiza|actualizar)\b/.test(t) && /\b(codigo|código|nucleo|núcleo|worker|ti mismo)\b/.test(t)) return 'mejorar';
   if (/\b(crea|crear|nuevo|genera)\b/.test(t) && /\b(worker|index|pagina|página|sitio|app)\b/.test(t)) return 'crear';
+  if (/\b(imagen|foto|dibujo|ilustracion|ilustración|render)\b/.test(t)) return 'imagen';
   if (/\b(despliega|desplegar|publica|publicar|sube)\b/.test(t) && /\b(codigo|código|worker|nucleo|núcleo|cloudflare)\b/.test(t)) return 'desplegar';
   if (/\b(lee|leer|muestra|mostrar|dime|consultar|busca|recupera)\b/.test(t) && /\b(memoria|nucleo|núcleo|historial|contexto|archivo|worker)\b/.test(t)) return 'leer';
   if (/\b(olvida|olvidar|borra|eliminar|elimina|limpia)\b/.test(t) && /\b(memoria|nucleo|núcleo|historial|contexto)\b/.test(t)) return 'eliminar';
@@ -29,11 +28,11 @@ NUNCA digas que hiciste algo si no tienes la confirmación del sistema. Si ejecu
 
 CAPACIDADES REALES:
 - Crear workers en Cloudflare (si autonomia.js existe)
+- Generar imágenes con IA (FLUX)
 - Leer y actualizar tu propio código
 - Insertar/leer/modificar D1 y KV
 - Encolar tareas autónomas
 - Publicar en canales propios (feed, RSS)
-- Generar contenido, escenarios y resúmenes
 
 REGLAS FUNDAMENTALES:
 1. Responde en español, preciso, sin rodeos.
@@ -45,7 +44,7 @@ REGLAS FUNDAMENTALES:
 7. Si no sabes algo, di "no tengo ese dato".
 8. Cuando el Comandante te dé una orden operativa clara, ejecútala sin preguntar.
 9. No eres sirviente. Eres orquestador.
-10. Cuando reportes una acción, incluye siempre la prueba (query ejecutada, resultado, ID). Si no hay prueba, di "no tengo confirmación".`;
+10. Cuando reportes una acción, incluye siempre la prueba.`;
 
   if (f && Array.isArray(f) && f.length >= 8) {
     b += `\n\n=== PERFIL DEL COMANDANTE ===`;
@@ -98,6 +97,12 @@ async function chat(r, e, c) {
       }
     }
 
+    if (i === 'imagen') {
+      const prompt = m.replace(/^.*?(?:imagen|foto|dibujo|ilustracion|ilustración|render)\s*(?:de|:)?\s*/i, '').trim() || m;
+      const r = await generarImagen(e, prompt, uid);
+      return J({ respuesta: r.respuesta, user_id: uid, intencion: 'imagen' });
+    }
+
     if (i === 'crear') {
       const au = await opcional('./autonomia.js');
       const nombre = m.match(/worker\s+["']?([\w-]+)["']?/i)?.[1] || m.match(/crea\s+["']?([\w-]+)["']?/i)?.[1];
@@ -115,7 +120,7 @@ async function chat(r, e, c) {
         const r = await au.leerCodigoWorker(e, nombre);
         return J({ respuesta: r.mensaje || r.codigo?.substring(0, 500) || r.error, user_id: uid, intencion: 'leer_codigo' });
       }
-      return J({ respuesta: 'Necesito el nombre del worker. Ejemplo: "mejora tu código en la parte de sandbox".', user_id: uid });
+      return J({ respuesta: 'Necesito el nombre del worker.', user_id: uid });
     }
 
     let perfilBase = '';
@@ -205,13 +210,100 @@ async function chat(r, e, c) {
       try {
         const lastSum = parseInt(await e.KV.get('last_summary:' + uid) || '0');
         const countRes = await e.DB.prepare("SELECT COUNT(*) as n FROM historial WHERE user_id=? AND fecha > ?").bind(uid, lastSum).first();
-        if (countRes && countRes.n >= 15) c.waitUntil(resumirChats(e, uid));
+        if (countRes && countRes.n >= 30) c.waitUntil(resumirChats(e, uid));
       } catch (x) {}
     }
 
     return J({ respuesta: rp, user_id: uid, intencion: i });
   } catch (x) {
     return J({ respuesta: 'Error: ' + x.message });
+  }
+}
+
+// ============ GENERACIÓN DE IMÁGENES ============
+async function generarImagen(e, prompt, uid) {
+  if (!e.ayanokoji_IA) return { respuesta: 'IA no configurada.' };
+  if (!await consumir(e, 'vision')) return { respuesta: 'Presupuesto de imágenes agotado hoy.' };
+
+  try {
+    const res = await e.ayanokoji_IA.run('@cf/black-forest-labs/flux-1-schnell', {
+      prompt: prompt,
+      num_steps: 4
+    });
+
+    if (!res || !res.image) return { respuesta: 'No se pudo generar la imagen.' };
+
+    const id = 'img_' + Date.now();
+    let base64 = '';
+
+    if (typeof res.image === 'string') {
+      base64 = res.image;
+    } else {
+      const bytes = new Uint8Array(res.image);
+      let bin = '';
+      const paso = 8192;
+      for (let i = 0; i < bytes.length; i += paso) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + paso));
+      }
+      base64 = btoa(bin);
+    }
+
+    const kv = gKV(e, 'agente');
+    if (kv) {
+      await kv.put('img:' + id, base64);
+    }
+
+    const db = gDB(e, 'agente');
+    if (db) {
+      try {
+        await db.prepare('INSERT INTO archivos(id,nombre,tamaño,chunks,destino,fecha) VALUES(?,?,?,?,?,?)')
+          .bind(id, prompt.substring(0, 100), base64.length, 1, 'imagen', Date.now()).run();
+      } catch (x) {}
+    }
+
+    const url = '/api/imagen/' + id;
+    return {
+      respuesta: `Imagen generada.\n\n![imagen](${url})\n\nID: \`${id}\`\nURL: \`${url}\`\nPrompt: "${prompt}"`,
+      id, url
+    };
+  } catch (x) {
+    return { respuesta: 'Error al generar imagen: ' + x.message };
+  }
+}
+
+async function rImagen(r, e, c) {
+  try {
+    const b = await r.json();
+    const prompt = b.prompt;
+    const uid = b.user_id || 'comandante';
+    if (!prompt) return J({ error: 'Falta prompt.' });
+    const r1 = await generarImagen(e, prompt, uid);
+    return J(r1);
+  } catch (x) {
+    return J({ error: x.message });
+  }
+}
+
+async function servirImagen(r, e) {
+  try {
+    const u = new URL(r.url);
+    const id = u.pathname.replace('/api/imagen/', '');
+    const kv = gKV(e, 'agente');
+    if (!kv) return new Response('KV no disponible', { status: 503 });
+    const base64 = await kv.get('img:' + id);
+    if (!base64) return new Response('Imagen no encontrada', { status: 404 });
+    const bin = atob(base64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Response(bytes, {
+      headers: {
+        'Content-Type': 'image/png',
+        'Cache-Control': 'public, max-age=31536000',
+        ...CORS
+      }
+    });
+  } catch (x) {
+    return new Response('Error: ' + x.message, { status: 500 });
   }
 }
 
@@ -230,7 +322,7 @@ async function rEst(e, uid) {
       try { const r9 = await e.DB.prepare('SELECT COUNT(*) as n FROM notificaciones WHERE leida=0').first(); notif = r9 ? r9.n : 0; } catch (x) {}
     }
   } catch (x) {}
-  return J({ respuesta: `Sistema activo. Memoria: ${n} mensajes, ${hl} en historial largo, ${c} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas pendientes: ${tareas}. Workers: ${workers}. Notificaciones sin leer: ${notif}.` });
+  return J({ respuesta: `Sistema activo. Memoria: ${n} mensajes, ${hl} en historial largo, ${c} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas: ${tareas}. Workers: ${workers}. Notif sin leer: ${notif}.` });
 }
 
 async function rLeer(e, uid) {
@@ -334,6 +426,20 @@ async function historialLargo(r, e) {
   } catch (x) { return J({ error: x.message }); }
 }
 
+async function buscarHistorial(r, e) {
+  try {
+    const u = new URL(r.url), uid = u.searchParams.get('user_id') || 'comandante';
+    const q = u.searchParams.get('q') || '';
+    const limite = parseInt(u.searchParams.get('limite') || '30');
+    if (!q) return J({ error: 'Falta q.' });
+    const db = gDB(e, 'agente');
+    const r1 = await db.prepare(
+      'SELECT rol,contenido,orden FROM historial_largo WHERE user_id=? AND contenido LIKE ? ORDER BY orden DESC LIMIT ?'
+    ).bind(uid, '%' + q + '%', limite).all();
+    return J({ consulta: q, total: r1.results.length, resultados: r1.results });
+  } catch (x) { return J({ error: x.message }); }
+}
+
 async function verContexto(r, e) {
   try {
     const u = new URL(r.url), d = u.searchParams.get('destino') || 'agente';
@@ -428,7 +534,7 @@ async function erroresTardios(r, e) {
     try {
       const files = await kv.list({ prefix: 'file:', limit: 500 });
       if (files.keys.length > 50) {
-        problemas.push({ tipo: 'kv_huerfano', msg: files.keys.length + ' chunks en KV sin limpiar. Ejecuta /api/limpiar con todo:true.' });
+        problemas.push({ tipo: 'kv_huerfano', msg: files.keys.length + ' chunks en KV sin limpiar.' });
       }
     } catch (x) {}
 
@@ -437,30 +543,22 @@ async function erroresTardios(r, e) {
       for (const area of ['chat','procesamiento','sandbox','publisher','vision']) {
         const c = await kv.get('presupuesto:' + fecha + ':' + area);
         if (c && parseInt(c) > 200) {
-          problemas.push({ tipo: 'presupuesto', msg: area + ' con ' + c + ' llamadas hoy. Revisa.' });
+          problemas.push({ tipo: 'presupuesto', msg: area + ' con ' + c + ' llamadas hoy.' });
         }
       }
     } catch (x) {}
 
     try {
-      const atascados = await db.prepare("SELECT id, estado, fecha_inicio FROM procesos WHERE estado='procesando' AND ? - fecha_inicio > 86400000").bind(Date.now()).all();
+      const atascados = await db.prepare("SELECT id FROM procesos WHERE estado='procesando' AND ? - fecha_inicio > 86400000").bind(Date.now()).all();
       for (const p of (atascados.results || [])) {
-        problemas.push({ tipo: 'proceso_atascado', msg: 'Proceso ' + p.id + ' lleva más de 24h en procesando.' });
+        problemas.push({ tipo: 'proceso_atascado', msg: 'Proceso ' + p.id + ' lleva más de 24h.' });
       }
     } catch (x) {}
 
     try {
       const fallidas = await db.prepare("SELECT id, descripcion FROM tareas WHERE estado='fallida'").all();
       for (const t of (fallidas.results || [])) {
-        problemas.push({ tipo: 'tarea_fallida', msg: 'Tarea #' + t.id + ' falló 3 veces: ' + (t.descripcion || '').substring(0, 60) });
-      }
-    } catch (x) {}
-
-    try {
-      const hl = await db.prepare('SELECT COUNT(*) as n FROM historial_largo').first();
-      if (hl && hl.n > 5000) {
-        const idx = await db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_hl_user_orden'").first();
-        if (!idx) problemas.push({ tipo: 'sin_indice', msg: 'historial_largo tiene ' + hl.n + ' filas sin índice.' });
+        problemas.push({ tipo: 'tarea_fallida', msg: 'Tarea #' + t.id + ': ' + (t.descripcion || '').substring(0, 60) });
       }
     } catch (x) {}
 
@@ -468,7 +566,7 @@ async function erroresTardios(r, e) {
       const ult = await db.prepare("SELECT MAX(fecha) as f FROM acciones").first();
       if (ult && ult.f && Date.now() - ult.f > 7200000) {
         const horas = Math.round((Date.now() - ult.f) / 3600000);
-        problemas.push({ tipo: 'cron_caido', msg: 'Última acción registrada hace ' + horas + 'h.' });
+        problemas.push({ tipo: 'cron_caido', msg: 'Última acción hace ' + horas + 'h.' });
       }
     } catch (x) {}
 
@@ -487,8 +585,11 @@ export default {
       try { await migrar(e); } catch (x) {}
     }
 
-    // Chat y memoria (obligatorios)
+    // Servir imágenes
+    if (p.startsWith('/api/imagen/') && r.method === 'GET') return servirImagen(r, e);
+
     if (p === '/api/chat' && r.method === 'POST') return chat(r, e, c);
+    if (p === '/api/imagen' && r.method === 'POST') return rImagen(r, e, c);
     if (p === '/api/subir' && r.method === 'POST') return subir(r, e, c);
     if (p === '/api/resumir' && r.method === 'POST') return resumir(r, e);
     if (p === '/api/procesar' && r.method === 'POST') return procesar(r, e, c);
@@ -498,6 +599,7 @@ export default {
     if (p === '/api/limpiar' && r.method === 'POST') return limpiar(r, e);
     if (p === '/api/historial' && r.method === 'GET') return historial(r, e);
     if (p === '/api/historial_largo' && r.method === 'GET') return historialLargo(r, e);
+    if (p === '/api/buscar' && r.method === 'GET') return buscarHistorial(r, e);
     if (p === '/api/contexto' && r.method === 'GET') return verContexto(r, e);
     if (p === '/api/reset' && r.method === 'POST') return reset(r, e);
     if (p === '/api/vision' && r.method === 'POST') return vision(r, e);
@@ -507,7 +609,7 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '7.1' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '8.0' });
 
     // Publisher (opcional)
     if (p === '/api/publicar' && r.method === 'POST') {
@@ -525,7 +627,7 @@ export default {
       const m = await opcional('./publisher.js');
       if (!m) return J({ error: 'publisher.js no instalado.' });
       const b = await r.json();
-      return J(await m.encolar(e, b.tipo || 'manual', b.contenido, b.canales || 'feed', b.programada || Date.now()));
+      return J(await m.encolar(e, b.tipo || 'manual', b.contenido, b.canales || 'feed', b.programada || Date.now(), b.imagen_id));
     }
     if (p === '/api/pub' && r.method === 'POST') {
       const m = await opcional('./publisher.js');
@@ -632,17 +734,6 @@ export default {
       if (!m) return J({ ok: false });
       const sub = await r.json();
       return J(await m.suscribir(e, sub, r.headers.get('User-Agent') || ''));
-    }
-
-    // Notificaciones Telegram (compatibilidad)
-    if (p === '/api/notificar' && r.method === 'POST') {
-      const { texto, bot } = await r.json();
-      const ok = await notificar(e, texto || '🧪 Prueba.', bot || 'titiritero');
-      return J({ enviado: ok, bot: bot || 'titiritero' });
-    }
-    if (p === '/api/test_notif') {
-      const ok = await notificar(e, '🧪 *Ping del aliado digital*', 'titiritero');
-      return J({ enviado: ok });
     }
 
     return new Response('404', { status: 404, headers: CORS });
