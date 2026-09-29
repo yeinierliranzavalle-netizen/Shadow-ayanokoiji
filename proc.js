@@ -328,16 +328,13 @@ function extraerTextoDeContent(content) {
     return content.map(c => extraerTextoDeContent(c)).filter(Boolean).join('\n');
   }
   if (typeof content === 'object') {
-    // Parts como array (OpenAI/DeepSeek)
     if (Array.isArray(content.parts)) {
       return content.parts.map(p => extraerTextoDeContent(p)).filter(Boolean).join('\n');
     }
-    // Texto directo
     if (typeof content.text === 'string') return content.text;
     if (typeof content.content === 'string') return content.content;
     if (typeof content.value === 'string') return content.value;
     if (typeof content.body === 'string') return content.body;
-    // Si es array de bloques
     if (Array.isArray(content.content)) {
       return content.content.map(c => extraerTextoDeContent(c)).filter(Boolean).join('\n');
     }
@@ -349,7 +346,6 @@ function extraerMensajesDeMapping(mapping) {
   const keys = Object.keys(mapping);
   if (!keys.length) return null;
 
-  // Recolectar todos los nodos con message
   const nodos = [];
   let sinMessage = 0, sinContenido = 0;
   const ejemplos = [];
@@ -371,12 +367,18 @@ function extraerMensajesDeMapping(mapping) {
     if (!contenido || !contenido.trim() || contenido.trim().length < 1) {
       sinContenido++;
       if (ejemplos.length < 3) {
+        let preview = '';
+        try {
+          preview = String(JSON.stringify(msg.content) || '').substring(0, 200);
+        } catch (e) {
+          preview = String(msg.content || '').substring(0, 200);
+        }
         ejemplos.push({
           key: k,
           msg_keys: Object.keys(msg),
           content_type: typeof msg.content,
           content_keys: msg.content && typeof msg.content === 'object' ? Object.keys(msg.content) : null,
-          content_preview: JSON.stringify(msg.content).substring(0, 200)
+          content_preview: preview
         });
       }
       continue;
@@ -389,7 +391,6 @@ function extraerMensajesDeMapping(mapping) {
     });
   }
 
-  // Ordenar por tiempo o por clave numérica
   nodos.sort((a, b) => a.orden - b.orden);
 
   const mensajes = nodos.map(n => ({ role: n.rol, content: n.contenido }));
@@ -500,7 +501,7 @@ export async function importar(r, e) {
     const texto = await archivo.text();
     let data;
     try { data = JSON.parse(texto); } catch (x) {
-      return J({ error: 'JSON inválido: ' + x.message, primeros_200: texto.substring(0, 200) });
+      return J({ error: 'JSON inválido: ' + x.message, primeros_200: String(texto || '').substring(0, 200) });
     }
 
     const resultado = extraerMensajes(data);
@@ -515,7 +516,7 @@ export async function importar(r, e) {
           tipo_raiz: Array.isArray(data) ? 'array' : typeof data,
           claves_raiz: keys,
           stats_extractor: stats,
-          primeros_300_caracteres: texto.substring(0, 300)
+          primeros_300_caracteres: String(texto || '').substring(0, 300)
         }
       });
     }
