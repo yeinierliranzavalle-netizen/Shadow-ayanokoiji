@@ -2,6 +2,8 @@ import { MODELO_LIGERO, CS, LPB, BPL, J, gDB, gKV, b64e, b64d, j2t } from './sha
 import { notificar } from './notify.js';
 import { consumir } from './presupuesto.js';
 
+const MAX_ARCHIVO = 20 * 1024 * 1024; // 20 MB
+
 function chunkBytes(bs, size) {
   const ch = [];
   let pos = 0;
@@ -37,7 +39,7 @@ export async function subir(r, e, c) {
     if (!ar) return J({ error: 'No hay archivo.' });
     const buf = await ar.arrayBuffer();
     const t = buf.byteLength;
-    if (t > 5 * 1024 * 1024) return J({ error: 'Supera 5MB.', tamaño: t });
+    if (t > MAX_ARCHIVO) return J({ error: 'Supera ' + (MAX_ARCHIVO / 1048576) + 'MB.', tamaño: t });
     const kv = gKV(e, d);
     if (!kv) return J({ error: 'KV inválido.' });
     const db = gDB(e, d);
@@ -270,7 +272,7 @@ export async function cronRetomar(e) {
   if (!db || !ai) return;
   const hora = new Date().getUTCHours();
   const nocturno = hora >= 23 || hora < 8;
-  if (nocturno) {
+  if (nocurno) {
     const ultimo = await e.KV?.get('cron_ultimo_nocturno');
     const ahora = Date.now();
     if (ultimo && ahora - parseInt(ultimo) < 20 * 60 * 1000) return;
@@ -319,7 +321,7 @@ export async function resumirChats(e, uid) {
 }
 
 // ============================================================
-// EXTRACTOR DE CONTENIDO — AGRESIVO, PRUEBA TODAS LAS RUTAS
+// EXTRACTOR DE TEXTO GENÉRICO
 // ============================================================
 function extraerTextoDeContent(content) {
   if (!content) return '';
@@ -342,6 +344,37 @@ function extraerTextoDeContent(content) {
   return '';
 }
 
+// ============================================================
+// EXTRACTOR PARA FRAGMENTS (formato DeepSeek export)
+// Cada mensaje tiene message.fragments[] con {type, content}
+// type: REQUEST (user) | RESPONSE (assistant) | THINKING (razonamiento interno, ignorar)
+// ============================================================
+function extraerDeFragments(fragments) {
+  if (!Array.isArray(fragments)) return [];
+  const mensajes = [];
+  for (const f of fragments) {
+    if (!f || typeof f !== 'object') continue;
+    const tipo = String(f.type || '').toUpperCase();
+    let rol = 'user';
+    if (tipo === 'RESPONSE') rol = 'assistant';
+    else if (tipo === 'REQUEST') rol = 'user';
+    else if (tipo === 'THINKING') continue; // razonamiento interno, no es conversación
+    else if (tipo === 'ERROR' || tipo === 'SEARCH') continue;
+    else rol = 'user';
+
+    let contenido = '';
+    if (typeof f.content === 'string') contenido = f.content;
+    else if (f.content && typeof f.content === 'object') contenido = extraerTextoDeContent(f.content);
+
+    if (!contenido || !contenido.trim()) continue;
+    mensajes.push({ rol, contenido: contenido.trim() });
+  }
+  return mensajes;
+}
+
+// ============================================================
+// EXTRACTOR PARA MAPPING (ChatGPT/DeepSeek export)
+// ============================================================
 function extraerMensajesDeMapping(mapping) {
   const keys = Object.keys(mapping);
   if (!keys.length) return null;
@@ -356,6 +389,44 @@ function extraerMensajesDeMapping(mapping) {
     if (!n.message) { sinMessage++; continue; }
 
     const msg = n.message;
+
+    // Ordenar por create_time o inserted_at o clave numérica
+    let tiempo = 0;
+    if (msg.create_time) tiempo = msg.create_time;
+    else if (msg.inserted_at) {
+      const t = Date.parse(msg.inserted_at);
+      if (!isNaN(t)) tiempo = t;
+    }
+    if (!tiempo) tiempo = parseFloat(k) || 0;
+
+    // CASO 1: fragments (formato DeepSeek export)
+    if (Array.isArray(msg.fragments) && msg.fragments.length) {
+      const fragMsgs = extraerDeFragments(msg.fragments);
+      if (fragMsgs.length) {
+        for (const fm of fragMsgs) {
+          nodos.push({
+            orden: tiempo,
+            rol: fm.rol,
+            contenido: fm.contenido
+          });
+        }
+        continue;
+      } else {
+        sinContenido++;
+        if (ejemplos.length < 3) {
+          ejemplos.push({
+            key: k,
+            tipo: 'fragments_vacios',
+            fragments_count: msg.fragments.length,
+            primer_fragment_type: msg.fragments[0]?.type,
+            primer_fragment_content_type: typeof msg.fragments[0]?.content
+          });
+        }
+        continue;
+      }
+    }
+
+    // CASO 2: content como string u objeto (formato ChatGPT)
     let rol = msg.author?.role || msg.role || msg.sender || 'user';
     rol = String(rol).toLowerCase();
     if (rol === 'assistant' || rol === 'bot' || rol === 'ai' || rol === 'model') rol = 'assistant';
@@ -364,7 +435,7 @@ function extraerMensajesDeMapping(mapping) {
 
     const contenido = extraerTextoDeContent(msg.content);
 
-    if (!contenido || !contenido.trim() || contenido.trim().length < 1) {
+    if (!contenido || !contenido.trim()) {
       sinContenido++;
       if (ejemplos.length < 3) {
         let preview = '';
@@ -377,7 +448,6 @@ function extraerMensajesDeMapping(mapping) {
           key: k,
           msg_keys: Object.keys(msg),
           content_type: typeof msg.content,
-          content_keys: msg.content && typeof msg.content === 'object' ? Object.keys(msg.content) : null,
           content_preview: preview
         });
       }
@@ -385,7 +455,7 @@ function extraerMensajesDeMapping(mapping) {
     }
 
     nodos.push({
-      orden: msg.create_time || parseFloat(k) || 0,
+      orden: tiempo,
       rol,
       contenido: contenido.trim()
     });
@@ -499,6 +569,9 @@ export async function importar(r, e) {
     if (!archivo) return J({ error: 'Falta archivo JSON.' });
 
     const texto = await archivo.text();
+    const tamaño = texto.length;
+    if (tamaño > MAX_ARCHIVO) return J({ error: 'Supera ' + (MAX_ARCHIVO / 1048576) + 'MB.', tamaño });
+
     let data;
     try { data = JSON.parse(texto); } catch (x) {
       return J({ error: 'JSON inválido: ' + x.message, primeros_200: String(texto || '').substring(0, 200) });
