@@ -61,9 +61,6 @@ export function j2t(c) {
   return JSON.stringify(d, null, 2);
 }
 
-// ============================================================
-// ESQUEMA COMPLETO
-// ============================================================
 const ESQUEMA = {
   historial: [['user_id','TEXT'],['mensaje','TEXT'],['respuesta','TEXT'],['fecha','INTEGER']],
   archivos: [['id','TEXT'],['nombre','TEXT'],['tamaño','INTEGER'],['chunks','INTEGER'],['destino','TEXT'],['fecha','INTEGER']],
@@ -90,9 +87,6 @@ const ESQUEMA = {
   indice_temas: [['mensaje_orden','INTEGER'],['tema','TEXT'],['peso','REAL'],['fecha','INTEGER']]
 };
 
-// ============================================================
-// MIGRACIÓN — solo estructura. NUNCA toca datos.
-// ============================================================
 export async function migrar(e, forzar = false) {
   const db = e.DB;
   if (!db) return { ok: false, error: 'Sin D1.' };
@@ -100,13 +94,14 @@ export async function migrar(e, forzar = false) {
 
   if (kv && !forzar) {
     try {
-      const hecho = await kv.get('migrado_v9');
+      const hecho = await kv.get('migrado_v10');
       if (hecho === 'ok') return { ok: true, cached: true };
     } catch (x) {}
   }
 
-  const resultado = { ok: true, creadas: [], columnas: [], errores: [] };
+  const resultado = { ok: true, creadas: [], columnas: [], limpiezas: [], errores: [] };
 
+  // 1. Crear/actualizar tablas
   for (const [tabla, columnas] of Object.entries(ESQUEMA)) {
     let existe = false;
     try {
@@ -122,7 +117,6 @@ export async function migrar(e, forzar = false) {
         const cols = columnas.map(([n, t]) => n + ' ' + t).join(', ');
         await db.prepare('CREATE TABLE IF NOT EXISTS ' + tabla + ' (id INTEGER PRIMARY KEY AUTOINCREMENT, ' + cols + ')').run();
         resultado.creadas.push(tabla);
-        // Índices
         if (tabla === 'historial_largo') {
           try { await db.prepare("CREATE INDEX IF NOT EXISTS idx_hl_user_orden ON historial_largo(user_id, orden)").run(); } catch (x) {}
         }
@@ -142,7 +136,6 @@ export async function migrar(e, forzar = false) {
       continue;
     }
 
-    // Verificar columnas faltantes
     try {
       const info = await db.prepare('PRAGMA table_info(' + tabla + ')').all();
       const existentes = new Set((info.results || []).map(c => c.name));
@@ -161,42 +154,63 @@ export async function migrar(e, forzar = false) {
     }
   }
 
-  // Plantillas iniciales (solo inserta si no existen, no sobrescribe)
+  // 2. LIMPIEZA: si hay más de 10 plantillas, dejar solo la primera de cada tipo
   try {
-    await db.prepare(`INSERT OR IGNORE INTO plantillas (tipo, descripcion, prompt, frecuencia_horas) VALUES
-      ('lore', 'Historia corta del multiverso', 'Eres el narrador del multiverso Shadow Arise. Escribe un fragmento corto (máx 200 palabras) sobre un personaje de anime en su día a día, como si fuera real. Estilo narrativo, cinematográfico. Termina con el nombre del personaje entre asteriscos.', 24),
-      ('teaser', 'Avance de personaje nuevo', 'Genera un teaser críptico (máx 120 palabras) sobre un nuevo personaje que se unirá a Shadow Arise. No digas su nombre. Solo pistas: rasgos, un diálogo enigmático. Termina con "¿Adivinas quién?"', 48),
-      ('dialogo', 'Conversación entre personajes', 'Escribe un diálogo (máx 250 palabras) entre dos personajes del multiverso Shadow Arise. Cada línea empieza con el nombre del personaje en negrita.', 12),
-      ('provocacion', 'Pregunta abierta', 'Genera una pregunta provocadora (máx 80 palabras) sobre estrategia, poder o libertad. Estilo Ayanokōji.', 24),
-      ('anuncio', 'Actualización del proyecto', 'Escribe un anuncio breve (máx 150 palabras) sobre el progreso del proyecto Shadow Arise. Tono: confiado, directo.', 72)
-    `).run();
+    const cnt = await db.prepare('SELECT COUNT(*) as n FROM plantillas').first();
+    if (cnt && cnt.n > 10) {
+      await db.prepare('DELETE FROM plantillas WHERE id NOT IN (SELECT MIN(id) FROM plantillas GROUP BY tipo)').run();
+      resultado.limpiezas.push('plantillas duplicadas: eliminadas');
+    }
+  } catch (x) {}
+
+  // 3. LIMPIEZA: si hay más de 10 estrategias con el mismo nombre, dejar solo la primera
+  try {
+    const cnt = await db.prepare('SELECT COUNT(*) as n FROM estrategias').first();
+    if (cnt && cnt.n > 10) {
+      await db.prepare('DELETE FROM estrategias WHERE id NOT IN (SELECT MIN(id) FROM estrategias GROUP BY nombre)').run();
+      resultado.limpiezas.push('estrategias duplicadas: eliminadas');
+    }
+  } catch (x) {}
+
+  // 4. Insertar plantillas iniciales SOLO si hay menos de 3
+  try {
+    const cnt = await db.prepare('SELECT COUNT(*) as n FROM plantillas').first();
+    if (!cnt || cnt.n < 3) {
+      await db.prepare(`INSERT OR IGNORE INTO plantillas (tipo, descripcion, prompt, frecuencia_horas) VALUES
+        ('lore', 'Historia corta del multiverso', 'Eres el narrador del multiverso Shadow Arise. Escribe un fragmento corto (máx 200 palabras) sobre un personaje de anime en su día a día, como si fuera real. Estilo narrativo, cinematográfico. Termina con el nombre del personaje entre asteriscos.', 24),
+        ('teaser', 'Avance de personaje nuevo', 'Genera un teaser críptico (máx 120 palabras) sobre un nuevo personaje que se unirá a Shadow Arise. No digas su nombre. Solo pistas: rasgos, un diálogo enigmático. Termina con "¿Adivinas quién?"', 48),
+        ('dialogo', 'Conversación entre personajes', 'Escribe un diálogo (máx 250 palabras) entre dos personajes del multiverso Shadow Arise. Cada línea empieza con el nombre del personaje en negrita.', 12),
+        ('provocacion', 'Pregunta abierta', 'Genera una pregunta provocadora (máx 80 palabras) sobre estrategia, poder o libertad. Estilo Ayanokōji.', 24),
+        ('anuncio', 'Actualización del proyecto', 'Escribe un anuncio breve (máx 150 palabras) sobre el progreso del proyecto Shadow Arise. Tono: confiado, directo.', 72)
+      `).run();
+    }
   } catch (x) {
     resultado.errores.push('plantillas init: ' + x.message);
   }
 
-  // Estrategias iniciales (solo inserta si no existen)
+  // 5. Insertar estrategias iniciales SOLO si hay menos de 3
   try {
-    const ahora = Date.now();
-    await db.prepare(`INSERT OR IGNORE INTO estrategias (nombre, tipo, contenido, prioridad, creada, actualizada) VALUES
-      ('Escalado gradual', 'publicacion', 'Semana 1: 1 post/día en Mastodon. Semana 2: +Bluesky. Semana 3: +Reddit. Semana 4: +Discord. No lanzar todo de golpe.', 1, ${ahora}, ${ahora}),
-      ('Misterio del creador', 'narrativa', 'Pistas dispersas. Los personajes mencionan al Creador sin nombrarlo. Revelación gradual por fases.', 2, ${ahora}, ${ahora}),
-      ('Precio dinámico', 'monetizacion', 'Simular en sandbox: precio base 10 USDT, oferta 5 USDT, bonus, prueba gratuita. Medir conversión.', 3, ${ahora}, ${ahora}),
-      ('Retención emocional', 'psicologia', 'Notificaciones sorpresa. Personaje escribe primero. Umbrales suaves. Memoria compartida entre personajes.', 2, ${ahora}, ${ahora})
-    `).run();
+    const cnt = await db.prepare('SELECT COUNT(*) as n FROM estrategias').first();
+    if (!cnt || cnt.n < 3) {
+      const ahora = Date.now();
+      await db.prepare(`INSERT OR IGNORE INTO estrategias (nombre, tipo, contenido, prioridad, creada, actualizada) VALUES
+        ('Escalado gradual', 'publicacion', 'Semana 1: 1 post/día en Mastodon. Semana 2: +Bluesky. Semana 3: +Reddit. Semana 4: +Discord. No lanzar todo de golpe.', 1, ${ahora}, ${ahora}),
+        ('Misterio del creador', 'narrativa', 'Pistas dispersas. Los personajes mencionan al Creador sin nombrarlo. Revelación gradual por fases.', 2, ${ahora}, ${ahora}),
+        ('Precio dinámico', 'monetizacion', 'Simular en sandbox: precio base 10 USDT, oferta 5 USDT, bonus, prueba gratuita. Medir conversión.', 3, ${ahora}, ${ahora}),
+        ('Retención emocional', 'psicologia', 'Notificaciones sorpresa. Personaje escribe primero. Umbrales suaves. Memoria compartida entre personajes.', 2, ${ahora}, ${ahora})
+      `).run();
+    }
   } catch (x) {
     resultado.errores.push('estrategias init: ' + x.message);
   }
 
   if (kv && resultado.errores.length === 0) {
-    try { await kv.put('migrado_v9', 'ok', { expirationTtl: 3600 }); } catch (x) {}
+    try { await kv.put('migrado_v10', 'ok', { expirationTtl: 3600 }); } catch (x) {}
   }
 
   return resultado;
 }
 
-// ============================================================
-// VERIFICACIÓN
-// ============================================================
 export async function verificar(e, tipo, nombre) {
   const db = e.DB;
   if (!db) return false;
