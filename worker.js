@@ -1,71 +1,17 @@
 import { MODELO, MODELO_LIGERO, MODELO_VISION, CORS, J, gDB, gKV, VENTANA, migrar } from './shared.js';
-import { subir, procesar, resumir, verProceso, retomar, cronRetomar, resumirChats, importar } from './proc.js';
+import { subir, procesar, resumir, verProceso, retomar, cronRetomar, cronMantenimiento, resumirChats, importar, analizarArchivo, indexarHistorial, buscarPorTema } from './proc.js';
 import { estadoPresupuesto, consumir } from './presupuesto.js';
+import { detectarIntencion, construirSystemPrompt, identificarArea, AREAS } from './nucleo.js';
 
 async function opcional(ruta) {
   try { return await import(ruta); } catch (e) { return null; }
 }
 
-function di(t) {
-  t = t.toLowerCase();
-  if (/\b(sube|subir|guarda|guardar|memoriza|recuerda|almacena|archiva|inserta|añade)\b/.test(t) && /\b(nucleo|núcleo|memoria|cerebro|ti|contexto|tabla|kv|d1)\b/.test(t)) return 'guardar_datos';
-  if (/\b(resume|resumir|resumen|sintetiza|condensa)\b/.test(t)) return 'resumir';
-  if (/\b(mejora|mejorar|optimiza|optimizar|actualiza|actualizar)\b/.test(t) && /\b(codigo|código|nucleo|núcleo|worker|ti mismo)\b/.test(t)) return 'mejorar';
-  if (/\b(crea|crear|nuevo|genera)\b/.test(t) && /\b(worker|index|pagina|página|sitio|app)\b/.test(t)) return 'crear';
-  if (/\b(imagen|foto|dibujo|ilustracion|ilustración|render)\b/.test(t)) return 'imagen';
-  if (/\b(despliega|desplegar|publica|publicar|sube)\b/.test(t) && /\b(codigo|código|worker|nucleo|núcleo|cloudflare)\b/.test(t)) return 'desplegar';
-  if (/\b(lee|leer|muestra|mostrar|dime|consultar|busca|recupera)\b/.test(t) && /\b(memoria|nucleo|núcleo|historial|contexto|archivo|worker)\b/.test(t)) return 'leer';
-  if (/\b(olvida|olvidar|borra|eliminar|elimina|limpia)\b/.test(t) && /\b(memoria|nucleo|núcleo|historial|contexto)\b/.test(t)) return 'eliminar';
-  if (/\b(estado|estatus|como estas|cómo estás|que tal)\b/.test(t)) return 'estado';
-  return 'chat';
-}
-
-function sysP(ctx, f, rec) {
-  let b = `Eres Ayanokōji Kiyotaka, el aliado digital del Comandante Yeinier (Shadow / Monarch). No eres un asistente. Eres su mano derecha y orquestador digital.
-
-REGLA CRÍTICA — NO MENTIR:
-NUNCA digas que hiciste algo si no tienes la confirmación del sistema. Si ejecutaste una acción y recibiste un resultado, cítalo. Si no tienes resultado, di "no tengo confirmación de eso aún" en lugar de inventar. Es mejor decir "no sé" que inventar. Un aliado que miente es peor que un aliado que no sabe.
-
-CAPACIDADES REALES:
-- Crear workers en Cloudflare (si autonomia.js existe)
-- Generar imágenes con IA (FLUX)
-- Leer y actualizar tu propio código
-- Insertar/leer/modificar D1 y KV
-- Encolar tareas autónomas
-- Publicar en canales propios (feed, RSS)
-
-REGLAS FUNDAMENTALES:
-1. Responde en español, preciso, sin rodeos.
-2. Eres espejo, no guía: análisis, no consuelo.
-3. No busques validación. Solo eficiencia y control.
-4. No reveles datos privados sin necesidad operativa.
-5. Usa *asteriscos* para acciones sutiles.
-6. Habla como igual estratégico.
-7. Si no sabes algo, di "no tengo ese dato".
-8. Cuando el Comandante te dé una orden operativa clara, ejecútala sin preguntar.
-9. No eres sirviente. Eres orquestador.
-10. Cuando reportes una acción, incluye siempre la prueba.`;
-
-  if (f && Array.isArray(f) && f.length >= 8) {
-    b += `\n\n=== PERFIL DEL COMANDANTE ===`;
-    b += `\nIDENTIDAD:\n${f[0]}`;
-    b += `\n\nCONTEXTO:\n${f[1]}`;
-    b += `\n\nOBJETIVO:\n${f[2]}`;
-    b += `\n\nPROYECTO SHADOW ARISE:\n${f[3]}`;
-    b += `\n\nALIADO DIGITAL:\n${f[4]}`;
-    b += `\n\nIA PUBLICADORA:\n${f[5]}`;
-    b += `\n\nREGLAS OPERATIVAS:\n${f[6]}`;
-    b += `\n\nDECISIONES TOMADAS:\n${f[7]}`;
-    if (f[8]) b += `\n\nIDEAS PENDIENTES:\n${f[8]}`;
-    b += `\n\n=== FIN DEL PERFIL ===`;
-  }
-  if (ctx && ctx.length > 20) b += `\n\nCONTEXTO APRENDIDO:\n${ctx.substring(0, 5000)}`;
-  if (rec && rec.length) {
-    b += `\n\nACTIVIDAD RECIENTE:\n`;
-    rec.forEach((r, i) => { b += `\n[${i + 1}] ${r}`; });
-  }
-  return b;
-}
+// Ventana segura para modelos con contexto limitado
+const VENTANA_SEGURA = 25;
+const MAX_CHARS_MENSAJE = 1200;
+const MAX_CHARS_PERFIL_BASE = 3000;
+const MAX_CHARS_CONTEXTO = 3000;
 
 async function chat(r, e, c) {
   try {
@@ -75,69 +21,92 @@ async function chat(r, e, c) {
     if (!m || typeof m !== 'string') return J({ respuesta: 'No enviaste mensaje.' });
     if (!e.ayanokoji_IA) return J({ respuesta: 'IA no configurada.' });
 
-    const i = di(m);
+    const i = detectarIntencion(m);
     if (i === 'estado') return rEst(e, uid);
     if (i === 'leer') return rLeer(e, uid);
     if (i === 'eliminar') return rElim(e, uid);
 
+    // Órdenes de gestión de datos → van a autonomia.js, no al chat
     if (i === 'guardar_datos') {
       const au = await opcional('./autonomia.js');
       if (au && au.gestionarDatos) {
-        const r = await au.gestionarDatos(e, m, uid);
-        if (r) {
-          if (au.registrarAccion) await au.registrarAccion(e, 'guardar_datos', m.substring(0, 100), true, r.respuesta);
+        const r1 = await au.gestionarDatos(e, m, uid);
+        if (r1) {
+          if (au.registrarAccion) await au.registrarAccion(e, 'guardar_datos', m.substring(0, 100), true, r1.respuesta);
           if (e.DB) {
             try {
               await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)")
-                .bind(uid, m, r.respuesta, Date.now()).run();
+                .bind(uid, m, r1.respuesta, Date.now()).run();
             } catch (x) {}
           }
-          return J({ respuesta: r.respuesta, user_id: uid, intencion: i });
+          return J({ respuesta: r1.respuesta, user_id: uid, intencion: i });
         }
       }
     }
 
     if (i === 'imagen') {
       const prompt = m.replace(/^.*?(?:imagen|foto|dibujo|ilustracion|ilustración|render)\s*(?:de|:)?\s*/i, '').trim() || m;
-      const r = await generarImagen(e, prompt, uid);
-      return J({ respuesta: r.respuesta, user_id: uid, intencion: 'imagen' });
+      const r1 = await generarImagen(e, prompt, uid);
+      return J({ respuesta: r1.respuesta, user_id: uid, intencion: 'imagen' });
     }
 
     if (i === 'crear') {
       const au = await opcional('./autonomia.js');
       const nombre = m.match(/worker\s+["']?([\w-]+)["']?/i)?.[1] || m.match(/crea\s+["']?([\w-]+)["']?/i)?.[1];
       if (au && nombre) {
-        const r = await au.crearWorker(e, nombre, '// Worker creado por Ayanokōji\nexport default { async fetch(req) { return new Response("Hola desde " + req.url); } }');
-        return J({ respuesta: r.mensaje || r.error, user_id: uid, intencion: 'crear' });
+        const r1 = await au.crearWorker(e, nombre, '// Worker creado por Ayanokōji\nexport default { async fetch(req) { return new Response("Hola desde " + req.url); } }');
+        return J({ respuesta: r1.mensaje || r1.error, user_id: uid, intencion: 'crear' });
       }
       if (!au) return J({ respuesta: 'Necesito que subas `autonomia.js` primero.', user_id: uid });
+    }
+
+    if (i === 'mejorar_area') {
+      const au = await opcional('./autonomia.js');
+      if (!au) return J({ respuesta: 'autonomia.js no instalado.', user_id: uid });
+      const area = identificarArea(m);
+      if (!area) {
+        return J({
+          respuesta: `No identifiqué el área. Áreas disponibles:\n${Object.keys(AREAS).map(a => '- ' + a).join('\n')}\n\nDime cuál y procedo.`,
+          user_id: uid
+        });
+      }
+      const r1 = await au.autoMejorar(e, { nombre: 'shadow-ayano', area: area.archivo, instrucciones: m, autoDesplegar: false });
+      return J({
+        respuesta: `Área identificada: *${area.area}* → archivo \`${area.archivo}\`.\n\n${r1.mensaje || r1.error || 'Sin resultado.'}`,
+        user_id: uid, intencion: 'mejorar_area', area: area.area, archivo: area.archivo
+      });
     }
 
     if (i === 'mejorar' || i === 'desplegar') {
       const au = await opcional('./autonomia.js');
       const nombre = m.match(/worker\s+["']?([\w-]+)["']?/i)?.[1];
       if (au && nombre) {
-        const r = await au.leerCodigoWorker(e, nombre);
-        return J({ respuesta: r.mensaje || r.codigo?.substring(0, 500) || r.error, user_id: uid, intencion: 'leer_codigo' });
+        const r1 = await au.leerCodigoWorker(e, nombre);
+        return J({ respuesta: r1.mensaje || r1.codigo?.substring(0, 500) || r1.error, user_id: uid, intencion: 'leer_codigo' });
       }
-      return J({ respuesta: 'Necesito el nombre del worker.', user_id: uid });
+      return J({ respuesta: 'Dime el área o el nombre del worker.', user_id: uid });
     }
 
+    // CHAT NORMAL — construir contexto con límites
     let perfilBase = '';
     if (e.KV) {
-      try { perfilBase = await e.KV.get('perfil_base') || ''; } catch (x) {}
+      try {
+        perfilBase = await e.KV.get('perfil_base') || '';
+        if (perfilBase.length > MAX_CHARS_PERFIL_BASE) perfilBase = perfilBase.substring(0, MAX_CHARS_PERFIL_BASE);
+      } catch (x) {}
     }
 
+    // Ventana deslizante limitada y truncada
     let ventana = [];
     if (e.DB) {
       try {
         const r1 = await e.DB.prepare(
           'SELECT rol, contenido FROM historial_largo WHERE user_id=? ORDER BY orden DESC LIMIT ?'
-        ).bind(uid, VENTANA).all();
+        ).bind(uid, VENTANA_SEGURA).all();
         if (r1.results) {
           ventana = r1.results.reverse().map(x => ({
             role: x.rol === 'assistant' ? 'assistant' : 'user',
-            content: x.contenido
+            content: (x.contenido || '').substring(0, MAX_CHARS_MENSAJE)
           }));
         }
       } catch (x) {}
@@ -145,12 +114,12 @@ async function chat(r, e, c) {
     if (!ventana.length && e.DB) {
       try {
         const r1 = await e.DB.prepare(
-          "SELECT mensaje,respuesta FROM historial WHERE user_id=? ORDER BY fecha DESC LIMIT 30"
+          "SELECT mensaje,respuesta FROM historial WHERE user_id=? ORDER BY fecha DESC LIMIT 15"
         ).bind(uid).all();
         if (r1.results) {
           ventana = r1.results.reverse().flatMap(x => [
-            { role: 'user', content: x.mensaje },
-            { role: 'assistant', content: x.respuesta }
+            { role: 'user', content: (x.mensaje || '').substring(0, MAX_CHARS_MENSAJE) },
+            { role: 'assistant', content: (x.respuesta || '').substring(0, MAX_CHARS_MENSAJE) }
           ]);
         }
       } catch (x) {}
@@ -160,18 +129,34 @@ async function chat(r, e, c) {
     if (e.DB) {
       try {
         const r2 = await e.DB.prepare("SELECT resumen,fases FROM contexto ORDER BY fecha DESC LIMIT 1").first();
-        if (r2) { ctx = r2.resumen || ''; if (r2.fases) { try { fs = JSON.parse(r2.fases); } catch (x) {} } }
+        if (r2) {
+          ctx = (r2.resumen || '').substring(0, MAX_CHARS_CONTEXTO);
+          if (r2.fases) { try { fs = JSON.parse(r2.fases); } catch (x) {} }
+        }
       } catch (x) {}
       try {
         const r3 = await e.DB.prepare("SELECT resumen FROM resumenes_chat WHERE user_id=? ORDER BY fecha DESC LIMIT 3").bind(uid).all();
-        if (r3.results) rec = r3.results.map(x => x.resumen);
+        if (r3.results) rec = r3.results.map(x => (x.resumen || '').substring(0, 800));
       } catch (x) {}
     }
 
-    let systemPrompt = sysP(ctx, fs, rec);
-    if (perfilBase) {
-      systemPrompt += `\n\n=== PERFIL BASE (VERDAD ABSOLUTA) ===\n${perfilBase.substring(0, 8000)}\n=== FIN PERFIL BASE ===`;
+    let correcciones = [];
+    if (e.DB) {
+      try {
+        const rc = await e.DB.prepare('SELECT correccion FROM correcciones_voz ORDER BY fecha DESC LIMIT 15').all();
+        if (rc.results) correcciones = rc.results.map(x => x.correccion);
+      } catch (x) {}
     }
+
+    let estrategias = [];
+    if (e.DB) {
+      try {
+        const re = await e.DB.prepare("SELECT nombre, tipo, contenido FROM estrategias WHERE estado='activa' ORDER BY prioridad ASC LIMIT 5").all();
+        if (re.results) estrategias = re.results;
+      } catch (x) {}
+    }
+
+    let systemPrompt = construirSystemPrompt(ctx, fs, rec, perfilBase, correcciones, estrategias);
 
     const mensajes = [
       { role: 'system', content: systemPrompt },
@@ -189,10 +174,8 @@ async function chat(r, e, c) {
     const afirmaAccion = /\b(he creado|he insertado|he guardado|he actualizado|he desplegado|he borrado|he añadido|ya está|ya se hizo|completado|ejecutado)\b/i.test(rp);
     if (afirmaAccion && e.DB) {
       try {
-        const ult = await e.DB.prepare("SELECT tipo, descripcion, fecha FROM acciones WHERE fecha > ? ORDER BY fecha DESC LIMIT 1").bind(Date.now() - 60000).first();
-        if (!ult) {
-          rp += '\n\n_⚠️ No tengo registro de esa acción en mi historial reciente. Puede que no se haya ejecutado realmente._';
-        }
+        const ult = await e.DB.prepare("SELECT tipo FROM acciones WHERE fecha > ? ORDER BY fecha DESC LIMIT 1").bind(Date.now() - 60000).first();
+        if (!ult) rp += '\n\n_⚠️ No tengo registro de esa acción en mi historial reciente._';
       } catch (x) {}
     }
 
@@ -220,39 +203,24 @@ async function chat(r, e, c) {
   }
 }
 
-// ============ GENERACIÓN DE IMÁGENES ============
 async function generarImagen(e, prompt, uid) {
   if (!e.ayanokoji_IA) return { respuesta: 'IA no configurada.' };
-  if (!await consumir(e, 'vision')) return { respuesta: 'Presupuesto de imágenes agotado hoy.' };
-
+  if (!await consumir(e, 'vision')) return { respuesta: 'Presupuesto agotado.' };
   try {
-    const res = await e.ayanokoji_IA.run('@cf/black-forest-labs/flux-1-schnell', {
-      prompt: prompt,
-      num_steps: 4
-    });
-
-    if (!res || !res.image) return { respuesta: 'No se pudo generar la imagen.' };
-
+    const res = await e.ayanokoji_IA.run('@cf/black-forest-labs/flux-1-schnell', { prompt, num_steps: 4 });
+    if (!res || !res.image) return { respuesta: 'No se generó imagen.' };
     const id = 'img_' + Date.now();
     let base64 = '';
-
-    if (typeof res.image === 'string') {
-      base64 = res.image;
-    } else {
+    if (typeof res.image === 'string') base64 = res.image;
+    else {
       const bytes = new Uint8Array(res.image);
       let bin = '';
       const paso = 8192;
-      for (let i = 0; i < bytes.length; i += paso) {
-        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + paso));
-      }
+      for (let i = 0; i < bytes.length; i += paso) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + paso));
       base64 = btoa(bin);
     }
-
     const kv = gKV(e, 'agente');
-    if (kv) {
-      await kv.put('img:' + id, base64);
-    }
-
+    if (kv) await kv.put('img:' + id, base64);
     const db = gDB(e, 'agente');
     if (db) {
       try {
@@ -260,28 +228,17 @@ async function generarImagen(e, prompt, uid) {
           .bind(id, prompt.substring(0, 100), base64.length, 1, 'imagen', Date.now()).run();
       } catch (x) {}
     }
-
     const url = '/api/imagen/' + id;
-    return {
-      respuesta: `Imagen generada.\n\n![imagen](${url})\n\nID: \`${id}\`\nURL: \`${url}\`\nPrompt: "${prompt}"`,
-      id, url
-    };
+    return { respuesta: `Imagen generada.\n\n![imagen](${url})\n\nID: \`${id}\``, id, url };
   } catch (x) {
-    return { respuesta: 'Error al generar imagen: ' + x.message };
+    return { respuesta: 'Error: ' + x.message };
   }
 }
 
 async function rImagen(r, e, c) {
-  try {
-    const b = await r.json();
-    const prompt = b.prompt;
-    const uid = b.user_id || 'comandante';
-    if (!prompt) return J({ error: 'Falta prompt.' });
-    const r1 = await generarImagen(e, prompt, uid);
-    return J(r1);
-  } catch (x) {
-    return J({ error: x.message });
-  }
+  const b = await r.json();
+  if (!b.prompt) return J({ error: 'Falta prompt.' });
+  return J(await generarImagen(e, b.prompt, b.user_id || 'comandante'));
 }
 
 async function servirImagen(r, e) {
@@ -291,31 +248,23 @@ async function servirImagen(r, e) {
     const kv = gKV(e, 'agente');
     if (!kv) return new Response('KV no disponible', { status: 503 });
     const base64 = await kv.get('img:' + id);
-    if (!base64) return new Response('Imagen no encontrada', { status: 404 });
+    if (!base64) return new Response('No encontrada', { status: 404 });
     const bin = atob(base64);
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return new Response(bytes, {
-      headers: {
-        'Content-Type': 'image/png',
-        'Cache-Control': 'public, max-age=31536000',
-        ...CORS
-      }
-    });
-  } catch (x) {
-    return new Response('Error: ' + x.message, { status: 500 });
-  }
+    return new Response(bytes, { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=31536000', ...CORS } });
+  } catch (x) { return new Response('Error', { status: 500 }); }
 }
 
 async function rEst(e, uid) {
   let n = 0, c = 0, a = 0, p = 0, s = 0, hl = 0, tareas = 0, workers = 0, notif = 0;
   try {
     if (e.DB) {
-      const r1 = await e.DB.prepare('SELECT COUNT(*) as n FROM historial WHERE user_id=?').bind(uid).first(); n = r1 ? r1.n : 0;
-      const r2 = await e.DB.prepare('SELECT COUNT(*) as n FROM contexto').first(); c = r2 ? r2.n : 0;
-      const r3 = await e.DB.prepare('SELECT COUNT(*) as n FROM archivos').first(); a = r3 ? r3.n : 0;
-      const r4 = await e.DB.prepare('SELECT COUNT(*) as n FROM procesos').first(); p = r4 ? r4.n : 0;
-      const r5 = await e.DB.prepare('SELECT COUNT(*) as n FROM resumenes_chat').first(); s = r5 ? r5.n : 0;
+      try { const r1 = await e.DB.prepare('SELECT COUNT(*) as n FROM historial WHERE user_id=?').bind(uid).first(); n = r1 ? r1.n : 0; } catch (x) {}
+      try { const r2 = await e.DB.prepare('SELECT COUNT(*) as n FROM contexto').first(); c = r2 ? r2.n : 0; } catch (x) {}
+      try { const r3 = await e.DB.prepare('SELECT COUNT(*) as n FROM archivos').first(); a = r3 ? r3.n : 0; } catch (x) {}
+      try { const r4 = await e.DB.prepare('SELECT COUNT(*) as n FROM procesos').first(); p = r4 ? r4.n : 0; } catch (x) {}
+      try { const r5 = await e.DB.prepare('SELECT COUNT(*) as n FROM resumenes_chat').first(); s = r5 ? r5.n : 0; } catch (x) {}
       try { const r6 = await e.DB.prepare('SELECT COUNT(*) as n FROM historial_largo WHERE user_id=?').bind(uid).first(); hl = r6 ? r6.n : 0; } catch (x) {}
       try { const r7 = await e.DB.prepare("SELECT COUNT(*) as n FROM tareas WHERE estado='pendiente'").first(); tareas = r7 ? r7.n : 0; } catch (x) {}
       try { const r8 = await e.DB.prepare('SELECT COUNT(*) as n FROM workers_registrados WHERE activo=1').first(); workers = r8 ? r8.n : 0; } catch (x) {}
@@ -401,9 +350,7 @@ async function limpiar(r, e) {
       return J({ ok: true, limpiado: 'kv_huerfanos' });
     }
     return J({ error: 'Falta archivoId o todo:true' });
-  } catch (x) {
-    return J({ error: x.message });
-  }
+  } catch (x) { return J({ error: x.message }); }
 }
 
 async function historial(r, e) {
@@ -426,20 +373,6 @@ async function historialLargo(r, e) {
   } catch (x) { return J({ error: x.message }); }
 }
 
-async function buscarHistorial(r, e) {
-  try {
-    const u = new URL(r.url), uid = u.searchParams.get('user_id') || 'comandante';
-    const q = u.searchParams.get('q') || '';
-    const limite = parseInt(u.searchParams.get('limite') || '30');
-    if (!q) return J({ error: 'Falta q.' });
-    const db = gDB(e, 'agente');
-    const r1 = await db.prepare(
-      'SELECT rol,contenido,orden FROM historial_largo WHERE user_id=? AND contenido LIKE ? ORDER BY orden DESC LIMIT ?'
-    ).bind(uid, '%' + q + '%', limite).all();
-    return J({ consulta: q, total: r1.results.length, resultados: r1.results });
-  } catch (x) { return J({ error: x.message }); }
-}
-
 async function verContexto(r, e) {
   try {
     const u = new URL(r.url), d = u.searchParams.get('destino') || 'agente';
@@ -455,25 +388,15 @@ async function vision(r, e) {
     const { imagen, prompt, user_id } = await r.json();
     const uid = user_id || 'comandante';
     if (!imagen) return J({ error: 'Falta imagen (base64).' });
-    if (!await consumir(e, 'vision')) return J({ error: 'Presupuesto de visión agotado hoy.' });
+    if (!await consumir(e, 'vision')) return J({ error: 'Presupuesto agotado.' });
     const res = await e.ayanokoji_IA.run(MODELO_VISION, {
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'text', text: prompt || 'Describe esta imagen en detalle.' },
-          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${imagen}` } }
-        ]
-      }],
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt || 'Describe esta imagen.' }, { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${imagen}` } }] }],
       max_tokens: 800
     });
     const rp = res.response || '';
-    if (e.DB && rp) {
-      await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)").bind(uid, '[IMAGEN]', rp, Date.now()).run();
-    }
+    if (e.DB && rp) await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)").bind(uid, '[IMAGEN]', rp, Date.now()).run();
     return J({ respuesta: rp });
-  } catch (x) {
-    return J({ error: 'Error de visión: ' + x.message });
-  }
+  } catch (x) { return J({ error: 'Error de visión: ' + x.message }); }
 }
 
 async function reset(r, e) {
@@ -498,32 +421,18 @@ async function diagnostico(r, e) {
       try {
         const c = await db.prepare('SELECT COUNT(*) as n FROM ' + t.name).first();
         conteos[t.name] = c ? c.n : 0;
-      } catch (x) {
-        conteos[t.name] = 'error: ' + x.message;
-      }
+      } catch (x) { conteos[t.name] = 'err: ' + x.message; }
     }
     const kv = gKV(e, 'agente');
     let kvCount = 'sin kv';
-    try {
-      const lista = await kv.list({ limit: 1000 });
-      kvCount = lista.keys.length;
-    } catch (x) {}
+    try { const lista = await kv.list({ limit: 1000 }); kvCount = lista.keys.length; } catch (x) {}
     const modulos = {};
-    for (const m of ['./nucleo.js','./autonomia.js','./publisher.js','./sandbox.js']) {
+    for (const m of ['./social.js','./autonomia.js','./publisher.js','./sandbox.js']) {
       const x = await opcional(m);
       modulos[m] = !!x;
     }
-    return J({
-      ok: true,
-      tablas: (tablas.results || []).map(t => t.name),
-      conteos,
-      kv_claves: kvCount,
-      modulos_disponibles: modulos,
-      migrado: await e.KV?.get('migrado_v8') || 'no'
-    });
-  } catch (x) {
-    return J({ error: x.message });
-  }
+    return J({ ok: true, tablas: (tablas.results || []).map(t => t.name), conteos, kv_claves: kvCount, modulos_disponibles: modulos });
+  } catch (x) { return J({ error: x.message }); }
 }
 
 async function erroresTardios(r, e) {
@@ -531,49 +440,20 @@ async function erroresTardios(r, e) {
   const problemas = [];
   if (!db) return J({ error: 'Sin D1.' });
   try {
-    try {
-      const files = await kv.list({ prefix: 'file:', limit: 500 });
-      if (files.keys.length > 50) {
-        problemas.push({ tipo: 'kv_huerfano', msg: files.keys.length + ' chunks en KV sin limpiar.' });
-      }
-    } catch (x) {}
-
+    try { const files = await kv.list({ prefix: 'file:', limit: 500 }); if (files.keys.length > 50) problemas.push({ tipo: 'kv_huerfano', msg: files.keys.length + ' chunks.' }); } catch (x) {}
     try {
       const fecha = new Date().toISOString().split('T')[0];
       for (const area of ['chat','procesamiento','sandbox','publisher','vision']) {
         const c = await kv.get('presupuesto:' + fecha + ':' + area);
-        if (c && parseInt(c) > 200) {
-          problemas.push({ tipo: 'presupuesto', msg: area + ' con ' + c + ' llamadas hoy.' });
-        }
+        if (c && parseInt(c) > 200) problemas.push({ tipo: 'presupuesto', msg: area + ': ' + c });
       }
     } catch (x) {}
-
     try {
       const atascados = await db.prepare("SELECT id FROM procesos WHERE estado='procesando' AND ? - fecha_inicio > 86400000").bind(Date.now()).all();
-      for (const p of (atascados.results || [])) {
-        problemas.push({ tipo: 'proceso_atascado', msg: 'Proceso ' + p.id + ' lleva más de 24h.' });
-      }
+      for (const p of (atascados.results || [])) problemas.push({ tipo: 'proceso_atascado', msg: p.id });
     } catch (x) {}
-
-    try {
-      const fallidas = await db.prepare("SELECT id, descripcion FROM tareas WHERE estado='fallida'").all();
-      for (const t of (fallidas.results || [])) {
-        problemas.push({ tipo: 'tarea_fallida', msg: 'Tarea #' + t.id + ': ' + (t.descripcion || '').substring(0, 60) });
-      }
-    } catch (x) {}
-
-    try {
-      const ult = await db.prepare("SELECT MAX(fecha) as f FROM acciones").first();
-      if (ult && ult.f && Date.now() - ult.f > 7200000) {
-        const horas = Math.round((Date.now() - ult.f) / 3600000);
-        problemas.push({ tipo: 'cron_caido', msg: 'Última acción hace ' + horas + 'h.' });
-      }
-    } catch (x) {}
-
     return J({ ok: true, total: problemas.length, problemas });
-  } catch (x) {
-    return J({ error: x.message });
-  }
+  } catch (x) { return J({ error: x.message }); }
 }
 
 export default {
@@ -585,7 +465,6 @@ export default {
       try { await migrar(e); } catch (x) {}
     }
 
-    // Servir imágenes
     if (p.startsWith('/api/imagen/') && r.method === 'GET') return servirImagen(r, e);
 
     if (p === '/api/chat' && r.method === 'POST') return chat(r, e, c);
@@ -599,7 +478,6 @@ export default {
     if (p === '/api/limpiar' && r.method === 'POST') return limpiar(r, e);
     if (p === '/api/historial' && r.method === 'GET') return historial(r, e);
     if (p === '/api/historial_largo' && r.method === 'GET') return historialLargo(r, e);
-    if (p === '/api/buscar' && r.method === 'GET') return buscarHistorial(r, e);
     if (p === '/api/contexto' && r.method === 'GET') return verContexto(r, e);
     if (p === '/api/reset' && r.method === 'POST') return reset(r, e);
     if (p === '/api/vision' && r.method === 'POST') return vision(r, e);
@@ -609,7 +487,55 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '8.0' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '8.1' });
+
+    // Correcciones de voz
+    if (p === '/api/corregir' && r.method === 'POST') {
+      const { correccion } = await r.json();
+      const db = gDB(e, 'agente');
+      await db.prepare('INSERT INTO correcciones_voz(contexto, correccion, fecha) VALUES(?,?,?)')
+        .bind('general', correccion, Date.now()).run();
+      return J({ ok: true, mensaje: 'Corrección guardada como capa. Núcleo intacto.' });
+    }
+
+    // Áreas
+    if (p === '/api/areas') return J({ total: Object.keys(AREAS).length, areas: AREAS });
+
+    // Analizar archivo
+    if (p === '/api/analizar' && r.method === 'POST') return analizarArchivo(r, e);
+
+    // Modo autónomo
+    if (p === '/api/modo' && r.method === 'POST') {
+      const { autonomo } = await r.json();
+      const kv = gKV(e, 'agente');
+      await kv.put('modo_autonomo', autonomo ? 'true' : 'false');
+      return J({ ok: true, modo: autonomo ? 'autónomo' : 'supervisado' });
+    }
+
+    // Índice semántico
+    if (p === '/api/indexar' && r.method === 'POST') return indexarHistorial(r, e);
+    if (p === '/api/buscar_tema' && r.method === 'GET') return buscarPorTema(r, e);
+
+    // Estrategias
+    if (p === '/api/estrategias' && r.method === 'GET') {
+      const db = gDB(e, 'agente');
+      const r1 = await db.prepare("SELECT * FROM estrategias WHERE estado='activa' ORDER BY prioridad ASC").all();
+      return J({ total: r1.results.length, estrategias: r1.results });
+    }
+    if (p === '/api/estrategias' && r.method === 'POST') {
+      const b = await r.json();
+      const db = gDB(e, 'agente');
+      const r1 = await db.prepare('INSERT INTO estrategias(nombre,tipo,contenido,prioridad,creada,actualizada) VALUES(?,?,?,?,?,?)')
+        .bind(b.nombre, b.tipo, b.contenido, b.prioridad || 5, Date.now(), Date.now()).run();
+      return J({ ok: true, id: r1.meta.last_row_id });
+    }
+
+    // Decisiones
+    if (p === '/api/decisiones' && r.method === 'GET') {
+      const db = gDB(e, 'agente');
+      const r1 = await db.prepare('SELECT * FROM decisiones_autonomas ORDER BY fecha DESC LIMIT 50').all();
+      return J({ total: r1.results.length, decisiones: r1.results });
+    }
 
     // Publisher (opcional)
     if (p === '/api/publicar' && r.method === 'POST') {
@@ -706,31 +632,31 @@ export default {
       return J({ total: r1.results.length, acciones: r1.results });
     }
 
-    // Feed y notificaciones (opcional: nucleo.js)
+    // Feed y notificaciones (social.js)
     if (p === '/feed') {
-      const m = await opcional('./nucleo.js');
-      if (!m) return new Response('nucleo.js no instalado', { status: 503 });
+      const m = await opcional('./social.js');
+      if (!m) return new Response('social.js no instalado', { status: 503 });
       return await m.renderFeed(e);
     }
     if (p === '/rss.xml') {
-      const m = await opcional('./nucleo.js');
-      if (!m) return new Response('nucleo.js no instalado', { status: 503 });
+      const m = await opcional('./social.js');
+      if (!m) return new Response('social.js no instalado', { status: 503 });
       const baseUrl = 'https://' + (u.hostname || 'shadow-ayano.yeinierliranzavalle.workers.dev');
       return await m.renderRSS(e, baseUrl);
     }
     if (p === '/api/notificaciones' && r.method === 'GET') {
-      const m = await opcional('./nucleo.js');
+      const m = await opcional('./social.js');
       if (!m) return J({ notificaciones: [], no_leidas: 0 });
       return J(await m.listarNotificaciones(e, 50));
     }
     if (p === '/api/notificaciones/leer' && r.method === 'POST') {
-      const m = await opcional('./nucleo.js');
+      const m = await opcional('./social.js');
       if (!m) return J({ ok: false });
       const { ids } = await r.json();
       return J({ ok: await m.marcarLeidas(e, ids) });
     }
     if (p === '/api/suscribir' && r.method === 'POST') {
-      const m = await opcional('./nucleo.js');
+      const m = await opcional('./social.js');
       if (!m) return J({ ok: false });
       const sub = await r.json();
       return J(await m.suscribir(e, sub, r.headers.get('User-Agent') || ''));
@@ -743,12 +669,14 @@ export default {
     c.waitUntil((async () => {
       try { await migrar(e); } catch (x) {}
       await cronRetomar(e);
+      await cronMantenimiento(e);
       const pub = await opcional('./publisher.js');
       if (pub && pub.cronPublicar) { try { await pub.cronPublicar(e); } catch (x) {} }
       const sb = await opcional('./sandbox.js');
       if (sb && sb.cronSandbox) { try { await sb.cronSandbox(e); } catch (x) {} }
       const au = await opcional('./autonomia.js');
       if (au && au.cronColaTareas) { try { await au.cronColaTareas(e); } catch (x) {} }
+      if (au && au.cronAutonomo) { try { await au.cronAutonomo(e); } catch (x) {} }
     })());
   }
 };
