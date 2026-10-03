@@ -29,7 +29,7 @@ async function reconstruir(kv, prefix) {
   return texto;
 }
 
-// ============ SUBIR (NO auto-procesa por defecto) ============
+// ============ SUBIR ============
 export async function subir(r, e, c) {
   try {
     const f = await r.formData();
@@ -70,7 +70,7 @@ export async function subir(r, e, c) {
   } catch (x) { return J({ error: 'Error: ' + x.message }); }
 }
 
-// ============ PROCESAR (manual, cuando el Comandante lo pida) ============
+// ============ PROCESAR ============
 export async function procesar(r, e, c) {
   try {
     const b = await r.json();
@@ -129,6 +129,7 @@ export async function verProceso(r, e) {
   } catch (x) { return J({ error: x.message }); }
 }
 
+// ============ PROCESAR LOTE ============
 export async function procesarLote(e, aId, d, off) {
   const kv = gKV(e, d), db = gDB(e, d), ai = e.ayanokoji_IA;
   if (!kv || !db || !ai) return;
@@ -185,6 +186,7 @@ export async function procesarLote(e, aId, d, off) {
   }
 }
 
+// ============ CONSOLIDAR ============
 export async function consolidar(e, aId, d, ac) {
   const kv = gKV(e, d), db = gDB(e, d), ai = e.ayanokoji_IA;
   if (!kv || !db || !ai) return;
@@ -302,12 +304,11 @@ export async function cronRetomar(e) {
 
 export async function cronMantenimiento(e) {
   const hora = new Date().getUTCHours();
-  if (hora !== 4) return; // Solo a las 4 AM UTC
+  if (hora !== 4) return;
   const db = gDB(e, 'agente');
   const kv = gKV(e, 'agente');
   if (!db || !kv) return;
   try {
-    // Limpiar KV huérfanos
     const files = await kv.list({ prefix: 'file:', limit: 500 });
     const procesos = await db.prepare("SELECT id FROM procesos WHERE estado IN ('procesando','pendiente')").all();
     const activos = new Set((procesos.results || []).map(p => p.id));
@@ -319,11 +320,6 @@ export async function cronMantenimiento(e) {
         await kv.delete(k.name);
         limpiados++;
       }
-    }
-    // Consolidar resumenes viejos
-    const viejos = await db.prepare('SELECT id FROM resumenes_chat WHERE fecha < ? ORDER BY fecha ASC LIMIT 20').bind(Date.now() - 30 * 86400000).all();
-    if (viejos.results && viejos.results.length >= 10) {
-      // Aquí se podrían fusionar, por ahora solo reporta
     }
     await kv.put('ultimo_mantenimiento', String(Date.now()));
   } catch (x) {}
@@ -390,13 +386,19 @@ export async function indexarHistorial(r, e) {
         if (match) {
           try {
             const items = JSON.parse(match[0]);
+            const inserciones = [];
             for (const item of items) {
               if (!item.temas) continue;
               for (const tema of item.temas) {
-                await db.prepare('INSERT INTO indice_temas(mensaje_orden, tema, peso, fecha) VALUES(?,?,?,?)')
-                  .bind(item.orden, String(tema).toLowerCase(), item.peso || 5, Date.now()).run();
+                inserciones.push(
+                  db.prepare('INSERT INTO indice_temas(mensaje_orden, tema, peso, fecha) VALUES(?,?,?,?)')
+                    .bind(item.orden, String(tema).toLowerCase(), item.peso || 5, Date.now())
+                );
                 temasInsertados++;
               }
+            }
+            if (inserciones.length) {
+              try { await db.batch(inserciones); } catch (x) {}
             }
           } catch (x) {}
         }
@@ -656,6 +658,7 @@ function parsearMensaje(m) {
   return { rol, contenido: contenido.trim() };
 }
 
+// ============ IMPORTAR (con batch) ============
 export async function importar(r, e) {
   try {
     const form = await r.formData();
@@ -698,14 +701,29 @@ export async function importar(r, e) {
 
     await db.prepare('DELETE FROM historial_largo WHERE user_id=?').bind(uid).run();
 
+    // Acumular todas las inserciones en un array de sentencias preparadas
+    const sentencias = [];
     let orden = 0, insertados = 0, saltados = 0;
+    const ahora = Date.now();
+
     for (const m of recorte) {
       const p = parsearMensaje(m);
       if (!p) { saltados++; continue; }
       if (p.rol === 'system') { saltados++; continue; }
-      await db.prepare('INSERT INTO historial_largo(user_id,rol,contenido,orden,fecha) VALUES(?,?,?,?,?)')
-        .bind(uid, p.rol, p.contenido, orden, Date.now()).run();
+      sentencias.push(
+        db.prepare('INSERT INTO historial_largo(user_id,rol,contenido,orden,fecha) VALUES(?,?,?,?,?)')
+          .bind(uid, p.rol, p.contenido, orden, ahora)
+      );
       orden++; insertados++;
+    }
+
+    // Ejecutar todo en una sola llamada (1 subpetición en lugar de N)
+    if (sentencias.length > 0) {
+      try {
+        await db.batch(sentencias);
+      } catch (x) {
+        return J({ error: 'Error al insertar en lote: ' + x.message, insertados: 0 });
+      }
     }
 
     try {
