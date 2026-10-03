@@ -3,8 +3,15 @@ import { subir, procesar, resumir, verProceso, retomar, cronRetomar, cronManteni
 import { estadoPresupuesto, consumir } from './presupuesto.js';
 import { detectarIntencion, construirSystemPrompt, identificarArea, AREAS } from './nucleo.js';
 
-async function opcional(ruta) {
-  try { return await import(ruta); } catch (e) { return null; }
+// ============ DISPATCHER ESTÁTICO DE MÓDULOS OPCIONALES ============
+async function opcional(nombre) {
+  try {
+    if (nombre === 'social' || nombre === './social.js') return await import('./social.js');
+    if (nombre === 'autonomia' || nombre === './autonomia.js') return await import('./autonomia.js');
+    if (nombre === 'publisher' || nombre === './publisher.js') return await import('./publisher.js');
+    if (nombre === 'sandbox' || nombre === './sandbox.js') return await import('./sandbox.js');
+    return null;
+  } catch (e) { return null; }
 }
 
 const VENTANA_SEGURA = 25;
@@ -12,6 +19,7 @@ const MAX_CHARS_MENSAJE = 1200;
 const MAX_CHARS_PERFIL_BASE = 3000;
 const MAX_CHARS_CONTEXTO = 3000;
 
+// ============ CHAT ============
 async function chat(r, e, c) {
   try {
     const b = await r.json();
@@ -26,7 +34,7 @@ async function chat(r, e, c) {
     if (i === 'eliminar') return rElim(e, uid);
 
     if (i === 'guardar_datos') {
-      const au = await opcional('./autonomia.js');
+      const au = await opcional('autonomia');
       if (au && au.gestionarDatos) {
         const r1 = await au.gestionarDatos(e, m, uid);
         if (r1) {
@@ -49,7 +57,7 @@ async function chat(r, e, c) {
     }
 
     if (i === 'crear') {
-      const au = await opcional('./autonomia.js');
+      const au = await opcional('autonomia');
       const nombre = m.match(/worker\s+["']?([\w-]+)["']?/i)?.[1] || m.match(/crea\s+["']?([\w-]+)["']?/i)?.[1];
       if (au && nombre) {
         const r1 = await au.crearWorker(e, nombre, '// Worker creado por Ayanokōji\nexport default { async fetch(req) { return new Response("Hola desde " + req.url); } }');
@@ -59,7 +67,7 @@ async function chat(r, e, c) {
     }
 
     if (i === 'mejorar_area') {
-      const au = await opcional('./autonomia.js');
+      const au = await opcional('autonomia');
       if (!au) return J({ respuesta: 'autonomia.js no instalado.', user_id: uid });
       const area = identificarArea(m);
       if (!area) {
@@ -76,7 +84,7 @@ async function chat(r, e, c) {
     }
 
     if (i === 'mejorar' || i === 'desplegar') {
-      const au = await opcional('./autonomia.js');
+      const au = await opcional('autonomia');
       const nombre = m.match(/worker\s+["']?([\w-]+)["']?/i)?.[1];
       if (au && nombre) {
         const r1 = await au.leerCodigoWorker(e, nombre);
@@ -85,6 +93,7 @@ async function chat(r, e, c) {
       return J({ respuesta: 'Dime el área o el nombre del worker.', user_id: uid });
     }
 
+    // CHAT NORMAL
     let perfilBase = '';
     if (e.KV) {
       try {
@@ -199,6 +208,7 @@ async function chat(r, e, c) {
   }
 }
 
+// ============ IMÁGENES ============
 async function generarImagen(e, prompt, uid) {
   if (!e.ayanokoji_IA) return { respuesta: 'IA no configurada.' };
   if (!await consumir(e, 'vision')) return { respuesta: 'Presupuesto agotado.' };
@@ -252,6 +262,7 @@ async function servirImagen(r, e) {
   } catch (x) { return new Response('Error', { status: 500 }); }
 }
 
+// ============ RESPUESTAS DIRECTAS ============
 async function rEst(e, uid) {
   let n = 0, c = 0, a = 0, p = 0, s = 0, hl = 0, tareas = 0, workers = 0, notif = 0;
   try {
@@ -287,6 +298,7 @@ async function rElim(e, uid) {
   } catch (x) { return J({ respuesta: 'Error: ' + x.message }); }
 }
 
+// ============ D1 / KV GENÉRICOS ============
 async function d1(r, e) {
   try {
     const { accion, tabla, datos, condicion, destino } = await r.json();
@@ -407,6 +419,7 @@ async function reset(r, e) {
   } catch (x) { return J({ error: x.message }); }
 }
 
+// ============ DIAGNÓSTICO ============
 async function diagnostico(r, e) {
   const db = gDB(e, 'agente');
   if (!db) return J({ error: 'Sin D1.' });
@@ -423,7 +436,7 @@ async function diagnostico(r, e) {
     let kvCount = 'sin kv';
     try { const lista = await kv.list({ limit: 1000 }); kvCount = lista.keys.length; } catch (x) {}
     const modulos = {};
-    for (const m of ['./social.js','./autonomia.js','./publisher.js','./sandbox.js']) {
+    for (const m of ['social','autonomia','publisher','sandbox']) {
       const x = await opcional(m);
       modulos[m] = !!x;
     }
@@ -452,6 +465,7 @@ async function erroresTardios(r, e) {
   } catch (x) { return J({ error: x.message }); }
 }
 
+// ============ EXPORT PRINCIPAL ============
 export default {
   async fetch(r, e, c) {
     if (r.method === 'OPTIONS') return new Response(null, { headers: CORS });
@@ -463,6 +477,7 @@ export default {
 
     if (p.startsWith('/api/imagen/') && r.method === 'GET') return servirImagen(r, e);
 
+    // Chat y memoria
     if (p === '/api/chat' && r.method === 'POST') return chat(r, e, c);
     if (p === '/api/imagen' && r.method === 'POST') return rImagen(r, e, c);
     if (p === '/api/subir' && r.method === 'POST') return subir(r, e, c);
@@ -485,6 +500,7 @@ export default {
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
     if (p === '/api/estado') return J({ estado: 'activo', v: '8.2' });
 
+    // Correcciones
     if (p === '/api/corregir' && r.method === 'POST') {
       const { correccion } = await r.json();
       const db = gDB(e, 'agente');
@@ -494,13 +510,12 @@ export default {
     }
 
     if (p === '/api/areas') return J({ total: Object.keys(AREAS).length, areas: AREAS });
-
     if (p === '/api/analizar' && r.method === 'POST') return analizarArchivo(r, e);
 
     if (p === '/api/modo' && r.method === 'POST') {
       const { autonomo } = await r.json();
-      const kv = gKV(e, 'agente');
-      await kv.put('modo_autonomo', autonomo ? 'true' : 'false');
+      const kvStore = gKV(e, 'agente');
+      await kvStore.put('modo_autonomo', autonomo ? 'true' : 'false');
       return J({ ok: true, modo: autonomo ? 'autónomo' : 'supervisado' });
     }
 
@@ -526,36 +541,38 @@ export default {
       return J({ total: r1.results.length, decisiones: r1.results });
     }
 
+    // Sandbox: simular precio y promover lección
     if (p === '/api/simular_precio' && r.method === 'POST') {
-      const m = await opcional('./sandbox.js');
+      const m = await opcional('sandbox');
       if (!m) return J({ error: 'sandbox.js no instalado.' });
       return m.simularPrecio(r, e);
     }
     if (p === '/api/promover_leccion' && r.method === 'POST') {
-      const m = await opcional('./sandbox.js');
+      const m = await opcional('sandbox');
       if (!m) return J({ error: 'sandbox.js no instalado.' });
       return m.promoverLeccion(r, e);
     }
 
+    // Publisher
     if (p === '/api/publicar' && r.method === 'POST') {
-      const m = await opcional('./publisher.js');
+      const m = await opcional('publisher');
       if (!m) return J({ error: 'publisher.js no instalado.' });
       return m.rutaPublicar(r, e);
     }
     if (p === '/api/generar' && r.method === 'POST') {
-      const m = await opcional('./publisher.js');
+      const m = await opcional('publisher');
       if (!m) return J({ error: 'publisher.js no instalado.' });
       const { tipo } = await r.json();
       return J(await m.generarContenido(e, tipo || 'provocacion'));
     }
     if (p === '/api/encolar' && r.method === 'POST') {
-      const m = await opcional('./publisher.js');
+      const m = await opcional('publisher');
       if (!m) return J({ error: 'publisher.js no instalado.' });
       const b = await r.json();
       return J(await m.encolar(e, b.tipo || 'manual', b.contenido, b.canales || 'mastodon', b.programada || Date.now(), b.imagen_id));
     }
     if (p === '/api/pub' && r.method === 'POST') {
-      const m = await opcional('./publisher.js');
+      const m = await opcional('publisher');
       if (!m) return J({ error: 'publisher.js no instalado.' });
       const { id } = await r.json();
       return J(await m.publicar(e, id));
@@ -566,59 +583,61 @@ export default {
       return J({ total: r1.results.length, publicaciones: r1.results });
     }
 
+    // Sandbox
     if (p === '/api/sandbox' && r.method === 'POST') {
-      const m = await opcional('./sandbox.js');
+      const m = await opcional('sandbox');
       if (!m) return J({ error: 'sandbox.js no instalado.' });
       return J(await m.generarEscenario(e));
     }
     if (p === '/api/sandbox/decidir' && r.method === 'POST') {
-      const m = await opcional('./sandbox.js');
+      const m = await opcional('sandbox');
       if (!m) return J({ error: 'sandbox.js no instalado.' });
       const { id, decision } = await r.json();
       return J(await m.decidir(e, id, decision));
     }
     if (p === '/api/sandbox' && r.method === 'GET') {
-      const m = await opcional('./sandbox.js');
+      const m = await opcional('sandbox');
       if (!m) return J({ escenarios: [], lecciones: [] });
       return m.verSandbox(r, e);
     }
 
+    // Autonomía
     if (p === '/api/workers' && r.method === 'GET') {
-      const m = await opcional('./autonomia.js');
+      const m = await opcional('autonomia');
       if (!m) return J({ error: 'autonomia.js no instalado.' });
       return J(await m.listarWorkers(e));
     }
     if (p === '/api/workers/crear' && r.method === 'POST') {
-      const m = await opcional('./autonomia.js');
+      const m = await opcional('autonomia');
       if (!m) return J({ error: 'autonomia.js no instalado.' });
       const { nombre, codigo } = await r.json();
       return J(await m.crearWorker(e, nombre, codigo));
     }
     if (p === '/api/workers/actualizar' && r.method === 'POST') {
-      const m = await opcional('./autonomia.js');
+      const m = await opcional('autonomia');
       if (!m) return J({ error: 'autonomia.js no instalado.' });
       const { nombre, codigo } = await r.json();
       return J(await m.actualizarWorker(e, nombre, codigo));
     }
     if (p === '/api/workers/leer' && r.method === 'POST') {
-      const m = await opcional('./autonomia.js');
+      const m = await opcional('autonomia');
       if (!m) return J({ error: 'autonomia.js no instalado.' });
       const { nombre } = await r.json();
       return J(await m.leerCodigoWorker(e, nombre));
     }
     if (p === '/api/mejorar' && r.method === 'POST') {
-      const m = await opcional('./autonomia.js');
+      const m = await opcional('autonomia');
       if (!m) return J({ error: 'autonomia.js no instalado.' });
       return J(await m.autoMejorar(e, await r.json()));
     }
     if (p === '/api/revertir' && r.method === 'POST') {
-      const m = await opcional('./autonomia.js');
+      const m = await opcional('autonomia');
       if (!m) return J({ error: 'autonomia.js no instalado.' });
       const { nombre } = await r.json();
       return J(await m.revertir(e, nombre));
     }
     if (p === '/api/snapshot' && r.method === 'POST') {
-      const m = await opcional('./autonomia.js');
+      const m = await opcional('autonomia');
       if (!m) return J({ error: 'autonomia.js no instalado.' });
       const { nombre } = await r.json();
       return J(await m.crearSnapshot(e, nombre));
@@ -641,30 +660,31 @@ export default {
       return J({ total: r1.results.length, acciones: r1.results });
     }
 
+    // Feed y notificaciones
     if (p === '/feed') {
-      const m = await opcional('./social.js');
+      const m = await opcional('social');
       if (!m) return new Response('social.js no instalado', { status: 503 });
       return await m.renderFeed(e);
     }
     if (p === '/rss.xml') {
-      const m = await opcional('./social.js');
+      const m = await opcional('social');
       if (!m) return new Response('social.js no instalado', { status: 503 });
       const baseUrl = 'https://' + (u.hostname || 'shadow-ayano.yeinierliranzavalle.workers.dev');
       return await m.renderRSS(e, baseUrl);
     }
     if (p === '/api/notificaciones' && r.method === 'GET') {
-      const m = await opcional('./social.js');
+      const m = await opcional('social');
       if (!m) return J({ notificaciones: [], no_leidas: 0 });
       return J(await m.listarNotificaciones(e, 50));
     }
     if (p === '/api/notificaciones/leer' && r.method === 'POST') {
-      const m = await opcional('./social.js');
+      const m = await opcional('social');
       if (!m) return J({ ok: false });
       const { ids } = await r.json();
       return J({ ok: await m.marcarLeidas(e, ids) });
     }
     if (p === '/api/suscribir' && r.method === 'POST') {
-      const m = await opcional('./social.js');
+      const m = await opcional('social');
       if (!m) return J({ ok: false });
       const sub = await r.json();
       return J(await m.suscribir(e, sub, r.headers.get('User-Agent') || ''));
@@ -678,11 +698,11 @@ export default {
       try { await migrar(e); } catch (x) {}
       await cronRetomar(e);
       await cronMantenimiento(e);
-      const pub = await opcional('./publisher.js');
+      const pub = await opcional('publisher');
       if (pub && pub.cronPublicar) { try { await pub.cronPublicar(e); } catch (x) {} }
-      const sb = await opcional('./sandbox.js');
+      const sb = await opcional('sandbox');
       if (sb && sb.cronSandbox) { try { await sb.cronSandbox(e); } catch (x) {} }
-      const au = await opcional('./autonomia.js');
+      const au = await opcional('autonomia');
       if (au && au.cronColaTareas) { try { await au.cronColaTareas(e); } catch (x) {} }
       if (au && au.cronAutonomo) { try { await au.cronAutonomo(e); } catch (x) {} }
       if (au && au.informeDiario) { try { await au.informeDiario(e); } catch (x) {} }
