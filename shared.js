@@ -61,32 +61,65 @@ export function j2t(c) {
   return JSON.stringify(d, null, 2);
 }
 
+// ============================================================
+// ESQUEMA COMPLETO — todas las tablas del sistema
+// ============================================================
 const ESQUEMA = {
+  // --- Base ---
   historial: [['user_id','TEXT'],['mensaje','TEXT'],['respuesta','TEXT'],['fecha','INTEGER']],
   archivos: [['id','TEXT'],['nombre','TEXT'],['tamaño','INTEGER'],['chunks','INTEGER'],['destino','TEXT'],['fecha','INTEGER']],
   contexto: [['fecha','INTEGER'],['resumen','TEXT'],['fases','TEXT'],['fuente','TEXT']],
   workers: [['nombre','TEXT'],['codigo','TEXT'],['fecha','INTEGER']],
   procesos: [['id','TEXT'],['archivo_id','TEXT'],['estado','TEXT'],['bloques_total','INTEGER'],['bloques_hechos','INTEGER'],['resumen_parcial','TEXT'],['error','TEXT'],['fecha_inicio','INTEGER'],['fecha_fin','INTEGER'],['fecha_avance','INTEGER']],
+
+  // --- Memoria ---
   resumenes_chat: [['user_id','TEXT'],['fecha','INTEGER'],['resumen','TEXT'],['desde','INTEGER'],['hasta','INTEGER']],
   historial_largo: [['user_id','TEXT'],['rol','TEXT'],['contenido','TEXT'],['orden','INTEGER'],['fecha','INTEGER']],
+
+  // --- Notificaciones y push ---
   notificaciones: [['tipo','TEXT'],['titulo','TEXT'],['mensaje','TEXT'],['leida','INTEGER DEFAULT 0'],['fecha','INTEGER']],
   suscripciones_push: [['endpoint','TEXT'],['keys_p256dh','TEXT'],['keys_auth','TEXT'],['user_agent','TEXT'],['creada','INTEGER'],['activa','INTEGER DEFAULT 1']],
+
+  // --- Tareas y acciones ---
   tareas: [['tipo','TEXT'],['descripcion','TEXT'],['payload','TEXT'],['estado',"TEXT DEFAULT 'pendiente'"],['prioridad','INTEGER DEFAULT 5'],['intentos','INTEGER DEFAULT 0'],['creada','INTEGER'],['ejecutada','INTEGER'],['resultado','TEXT'],['error','TEXT']],
   acciones: [['tipo','TEXT'],['descripcion','TEXT'],['exito','INTEGER'],['detalle','TEXT'],['fecha','INTEGER']],
+
+  // --- Workers ---
   workers_registrados: [['nombre','TEXT'],['url','TEXT'],['codigo','TEXT'],['version','INTEGER DEFAULT 1'],['activo','INTEGER DEFAULT 1'],['creado','INTEGER'],['actualizado','INTEGER']],
+
+  // --- Publisher ---
   plantillas: [['tipo','TEXT'],['descripcion','TEXT'],['prompt','TEXT'],['frecuencia_horas','INTEGER DEFAULT 24'],['ultima_gen','INTEGER DEFAULT 0'],['activa','INTEGER DEFAULT 1']],
   publicaciones: [['tipo','TEXT'],['contenido','TEXT'],['canales','TEXT'],['estado','TEXT'],['programada','INTEGER'],['publicada','INTEGER'],['resultado','TEXT'],['creada','INTEGER'],['imagen_id','TEXT']],
+
+  // --- Sandbox ---
   sandbox_escenarios: [['tipo','TEXT'],['contexto','TEXT'],['decision_tomada','TEXT'],['resultado','TEXT'],['autoevaluacion','TEXT'],['puntuacion','INTEGER'],['creado','INTEGER'],['completado','INTEGER']],
   sandbox_lecciones: [['escenario_id','INTEGER'],['area','TEXT'],['leccion','TEXT'],['creada','INTEGER']],
   sandbox_metricas: [['fecha','INTEGER'],['escenarios_totales','INTEGER'],['puntuacion_promedio','REAL'],['area_debil','TEXT']],
+
+  // --- Voz y mejora ---
   correcciones_voz: [['contexto','TEXT'],['correccion','TEXT'],['fecha','INTEGER']],
   areas_mejora: [['area','TEXT'],['archivo','TEXT'],['descripcion','TEXT'],['fecha','INTEGER']],
   acciones_autonomas: [['area','TEXT'],['archivo','TEXT'],['cambio','TEXT'],['prueba','TEXT'],['exito','INTEGER'],['reversible','INTEGER'],['fecha','INTEGER']],
+
+  // --- Estrategias y decisiones ---
   estrategias: [['nombre','TEXT'],['tipo','TEXT'],['contenido','TEXT'],['estado',"TEXT DEFAULT 'activa'"],['prioridad','INTEGER DEFAULT 5'],['resultado','TEXT'],['creada','INTEGER'],['actualizada','INTEGER']],
   decisiones_autonomas: [['tipo','TEXT'],['contexto','TEXT'],['decision','TEXT'],['simulacion','TEXT'],['aplicada','INTEGER'],['resultado','TEXT'],['exito','INTEGER'],['fecha','INTEGER']],
-  indice_temas: [['mensaje_orden','INTEGER'],['tema','TEXT'],['peso','REAL'],['fecha','INTEGER']]
+
+  // --- Índice semántico ---
+  indice_temas: [['mensaje_orden','INTEGER'],['tema','TEXT'],['peso','REAL'],['fecha','INTEGER']],
+
+  // --- Shadow Arise: producto ---
+  usuarios: [['alias','TEXT'],['fecha_registro','INTEGER'],['activo','INTEGER DEFAULT 1'],['tipo_pago',"TEXT DEFAULT 'gratis'"],['plan','TEXT'],['mensajes_total','INTEGER DEFAULT 0'],['mensajes_hoy','INTEGER DEFAULT 0'],['ultimo_acceso','INTEGER'],['pais','TEXT'],['personaje_favorito','TEXT'],['notas','TEXT']],
+  eventos_usuario: [['user_id','TEXT'],['tipo','TEXT'],['detalle','TEXT'],['pagado','INTEGER DEFAULT 0'],['fecha','INTEGER']],
+  metricas_diarias: [['fecha','INTEGER'],['usuarios_nuevos','INTEGER DEFAULT 0'],['usuarios_activos','INTEGER DEFAULT 0'],['usuarios_pago','INTEGER DEFAULT 0'],['ingresos_usdt','REAL DEFAULT 0'],['mensajes_totales','INTEGER DEFAULT 0'],['retencion_d1','REAL DEFAULT 0'],['retencion_d7','REAL DEFAULT 0'],['personaje_top','TEXT'],['notas','TEXT']],
+
+  // --- Conciencia del Comandante ---
+  conciencia_comandante: [['accion','TEXT'],['detalle','TEXT'],['pestana','TEXT'],['fecha','INTEGER']]
 };
 
+// ============================================================
+// MIGRACIÓN — solo estructura. NUNCA toca datos existentes.
+// ============================================================
 export async function migrar(e, forzar = false) {
   const db = e.DB;
   if (!db) return { ok: false, error: 'Sin D1.' };
@@ -94,7 +127,7 @@ export async function migrar(e, forzar = false) {
 
   if (kv && !forzar) {
     try {
-      const hecho = await kv.get('migrado_v10');
+      const hecho = await kv.get('migrado_v11');
       if (hecho === 'ok') return { ok: true, cached: true };
     } catch (x) {}
   }
@@ -117,6 +150,7 @@ export async function migrar(e, forzar = false) {
         const cols = columnas.map(([n, t]) => n + ' ' + t).join(', ');
         await db.prepare('CREATE TABLE IF NOT EXISTS ' + tabla + ' (id INTEGER PRIMARY KEY AUTOINCREMENT, ' + cols + ')').run();
         resultado.creadas.push(tabla);
+        // Índices específicos
         if (tabla === 'historial_largo') {
           try { await db.prepare("CREATE INDEX IF NOT EXISTS idx_hl_user_orden ON historial_largo(user_id, orden)").run(); } catch (x) {}
         }
@@ -130,12 +164,16 @@ export async function migrar(e, forzar = false) {
           try { await db.prepare("CREATE INDEX IF NOT EXISTS idx_temas ON indice_temas(tema)").run(); } catch (x) {}
           try { await db.prepare("CREATE INDEX IF NOT EXISTS idx_temas_orden ON indice_temas(mensaje_orden)").run(); } catch (x) {}
         }
+        if (tabla === 'usuarios') {
+          try { await db.prepare("CREATE INDEX IF NOT EXISTS idx_usuarios_alias ON usuarios(alias)").run(); } catch (x) {}
+        }
       } catch (x) {
         resultado.errores.push(tabla + ' (create): ' + x.message);
       }
       continue;
     }
 
+    // Verificar columnas faltantes
     try {
       const info = await db.prepare('PRAGMA table_info(' + tabla + ')').all();
       const existentes = new Set((info.results || []).map(c => c.name));
@@ -163,7 +201,7 @@ export async function migrar(e, forzar = false) {
     }
   } catch (x) {}
 
-  // 3. LIMPIEZA: si hay más de 10 estrategias con el mismo nombre, dejar solo la primera
+  // 3. LIMPIEZA: estrategias duplicadas por nombre
   try {
     const cnt = await db.prepare('SELECT COUNT(*) as n FROM estrategias').first();
     if (cnt && cnt.n > 10) {
@@ -205,12 +243,15 @@ export async function migrar(e, forzar = false) {
   }
 
   if (kv && resultado.errores.length === 0) {
-    try { await kv.put('migrado_v10', 'ok', { expirationTtl: 3600 }); } catch (x) {}
+    try { await kv.put('migrado_v11', 'ok', { expirationTtl: 3600 }); } catch (x) {}
   }
 
   return resultado;
 }
 
+// ============================================================
+// VERIFICACIÓN
+// ============================================================
 export async function verificar(e, tipo, nombre) {
   const db = e.DB;
   if (!db) return false;
