@@ -4,7 +4,7 @@ export const MODELO_VISION = '@cf/meta/llama-3.2-11b-vision-instruct';
 export const CS = 500 * 1024;
 export const LPB = 120;
 export const BPL = 5;
-export const VENTANA = 80;
+export const VENTANA = 25;
 
 export const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -62,96 +62,45 @@ export function j2t(c) {
 }
 
 // ============================================================
-// AUTO-MIGRACIÓN ROBUSTA
-// Crea tablas si no existen. Añade columnas si faltan.
-// Nunca falla por "ya existe". Nunca sobreescribe datos.
+// ESQUEMA COMPLETO
 // ============================================================
-
 const ESQUEMA = {
-  historial: [
-    ['user_id', 'TEXT'], ['mensaje', 'TEXT'], ['respuesta', 'TEXT'], ['fecha', 'INTEGER']
-  ],
-  archivos: [
-    ['id', 'TEXT'], ['nombre', 'TEXT'], ['tamaño', 'INTEGER'],
-    ['chunks', 'INTEGER'], ['destino', 'TEXT'], ['fecha', 'INTEGER']
-  ],
-  contexto: [
-    ['fecha', 'INTEGER'], ['resumen', 'TEXT'], ['fases', 'TEXT'], ['fuente', 'TEXT']
-  ],
-  workers: [
-    ['nombre', 'TEXT'], ['codigo', 'TEXT'], ['fecha', 'INTEGER']
-  ],
-  procesos: [
-    ['id', 'TEXT'], ['archivo_id', 'TEXT'], ['estado', 'TEXT'],
-    ['bloques_total', 'INTEGER'], ['bloques_hechos', 'INTEGER'],
-    ['resumen_parcial', 'TEXT'], ['error', 'TEXT'],
-    ['fecha_inicio', 'INTEGER'], ['fecha_fin', 'INTEGER'], ['fecha_avance', 'INTEGER']
-  ],
-  resumenes_chat: [
-    ['user_id', 'TEXT'], ['fecha', 'INTEGER'], ['resumen', 'TEXT'],
-    ['desde', 'INTEGER'], ['hasta', 'INTEGER']
-  ],
-  historial_largo: [
-    ['user_id', 'TEXT'], ['rol', 'TEXT'], ['contenido', 'TEXT'],
-    ['orden', 'INTEGER'], ['fecha', 'INTEGER']
-  ],
-  notificaciones: [
-    ['tipo', 'TEXT'], ['titulo', 'TEXT'], ['mensaje', 'TEXT'],
-    ['leida', 'INTEGER DEFAULT 0'], ['fecha', 'INTEGER']
-  ],
-  suscripciones_push: [
-    ['endpoint', 'TEXT'], ['keys_p256dh', 'TEXT'], ['keys_auth', 'TEXT'],
-    ['user_agent', 'TEXT'], ['creada', 'INTEGER'], ['activa', 'INTEGER DEFAULT 1']
-  ],
-  tareas: [
-    ['tipo', 'TEXT'], ['descripcion', 'TEXT'], ['payload', 'TEXT'],
-    ['estado', "TEXT DEFAULT 'pendiente'"], ['prioridad', 'INTEGER DEFAULT 5'],
-    ['intentos', 'INTEGER DEFAULT 0'], ['creada', 'INTEGER'],
-    ['ejecutada', 'INTEGER'], ['resultado', 'TEXT'], ['error', 'TEXT']
-  ],
-  acciones: [
-    ['tipo', 'TEXT'], ['descripcion', 'TEXT'], ['exito', 'INTEGER'],
-    ['detalle', 'TEXT'], ['fecha', 'INTEGER']
-  ],
-  workers_registrados: [
-    ['nombre', 'TEXT'], ['url', 'TEXT'], ['codigo', 'TEXT'],
-    ['version', 'INTEGER DEFAULT 1'], ['activo', 'INTEGER DEFAULT 1'],
-    ['creado', 'INTEGER'], ['actualizado', 'INTEGER']
-  ],
-  plantillas: [
-    ['tipo', 'TEXT'], ['descripcion', 'TEXT'], ['prompt', 'TEXT'],
-    ['frecuencia_horas', 'INTEGER DEFAULT 24'],
-    ['ultima_gen', 'INTEGER DEFAULT 0'], ['activa', 'INTEGER DEFAULT 1']
-  ],
-  publicaciones: [
-    ['tipo', 'TEXT'], ['contenido', 'TEXT'], ['canales', 'TEXT'],
-    ['estado', 'TEXT'], ['programada', 'INTEGER'], ['publicada', 'INTEGER'],
-    ['resultado', 'TEXT'], ['creada', 'INTEGER']
-  ],
-  sandbox_escenarios: [
-    ['tipo', 'TEXT'], ['contexto', 'TEXT'], ['decision_tomada', 'TEXT'],
-    ['resultado', 'TEXT'], ['autoevaluacion', 'TEXT'],
-    ['puntuacion', 'INTEGER'], ['creado', 'INTEGER'], ['completado', 'INTEGER']
-  ],
-  sandbox_lecciones: [
-    ['escenario_id', 'INTEGER'], ['area', 'TEXT'],
-    ['leccion', 'TEXT'], ['creada', 'INTEGER']
-  ],
-  sandbox_metricas: [
-    ['fecha', 'INTEGER'], ['escenarios_totales', 'INTEGER'],
-    ['puntuacion_promedio', 'REAL'], ['area_debil', 'TEXT']
-  ]
+  historial: [['user_id','TEXT'],['mensaje','TEXT'],['respuesta','TEXT'],['fecha','INTEGER']],
+  archivos: [['id','TEXT'],['nombre','TEXT'],['tamaño','INTEGER'],['chunks','INTEGER'],['destino','TEXT'],['fecha','INTEGER']],
+  contexto: [['fecha','INTEGER'],['resumen','TEXT'],['fases','TEXT'],['fuente','TEXT']],
+  workers: [['nombre','TEXT'],['codigo','TEXT'],['fecha','INTEGER']],
+  procesos: [['id','TEXT'],['archivo_id','TEXT'],['estado','TEXT'],['bloques_total','INTEGER'],['bloques_hechos','INTEGER'],['resumen_parcial','TEXT'],['error','TEXT'],['fecha_inicio','INTEGER'],['fecha_fin','INTEGER'],['fecha_avance','INTEGER']],
+  resumenes_chat: [['user_id','TEXT'],['fecha','INTEGER'],['resumen','TEXT'],['desde','INTEGER'],['hasta','INTEGER']],
+  historial_largo: [['user_id','TEXT'],['rol','TEXT'],['contenido','TEXT'],['orden','INTEGER'],['fecha','INTEGER']],
+  notificaciones: [['tipo','TEXT'],['titulo','TEXT'],['mensaje','TEXT'],['leida','INTEGER DEFAULT 0'],['fecha','INTEGER']],
+  suscripciones_push: [['endpoint','TEXT'],['keys_p256dh','TEXT'],['keys_auth','TEXT'],['user_agent','TEXT'],['creada','INTEGER'],['activa','INTEGER DEFAULT 1']],
+  tareas: [['tipo','TEXT'],['descripcion','TEXT'],['payload','TEXT'],['estado',"TEXT DEFAULT 'pendiente'"],['prioridad','INTEGER DEFAULT 5'],['intentos','INTEGER DEFAULT 0'],['creada','INTEGER'],['ejecutada','INTEGER'],['resultado','TEXT'],['error','TEXT']],
+  acciones: [['tipo','TEXT'],['descripcion','TEXT'],['exito','INTEGER'],['detalle','TEXT'],['fecha','INTEGER']],
+  workers_registrados: [['nombre','TEXT'],['url','TEXT'],['codigo','TEXT'],['version','INTEGER DEFAULT 1'],['activo','INTEGER DEFAULT 1'],['creado','INTEGER'],['actualizado','INTEGER']],
+  plantillas: [['tipo','TEXT'],['descripcion','TEXT'],['prompt','TEXT'],['frecuencia_horas','INTEGER DEFAULT 24'],['ultima_gen','INTEGER DEFAULT 0'],['activa','INTEGER DEFAULT 1']],
+  publicaciones: [['tipo','TEXT'],['contenido','TEXT'],['canales','TEXT'],['estado','TEXT'],['programada','INTEGER'],['publicada','INTEGER'],['resultado','TEXT'],['creada','INTEGER'],['imagen_id','TEXT']],
+  sandbox_escenarios: [['tipo','TEXT'],['contexto','TEXT'],['decision_tomada','TEXT'],['resultado','TEXT'],['autoevaluacion','TEXT'],['puntuacion','INTEGER'],['creado','INTEGER'],['completado','INTEGER']],
+  sandbox_lecciones: [['escenario_id','INTEGER'],['area','TEXT'],['leccion','TEXT'],['creada','INTEGER']],
+  sandbox_metricas: [['fecha','INTEGER'],['escenarios_totales','INTEGER'],['puntuacion_promedio','REAL'],['area_debil','TEXT']],
+  correcciones_voz: [['contexto','TEXT'],['correccion','TEXT'],['fecha','INTEGER']],
+  areas_mejora: [['area','TEXT'],['archivo','TEXT'],['descripcion','TEXT'],['fecha','INTEGER']],
+  acciones_autonomas: [['area','TEXT'],['archivo','TEXT'],['cambio','TEXT'],['prueba','TEXT'],['exito','INTEGER'],['reversible','INTEGER'],['fecha','INTEGER']],
+  estrategias: [['nombre','TEXT'],['tipo','TEXT'],['contenido','TEXT'],['estado',"TEXT DEFAULT 'activa'"],['prioridad','INTEGER DEFAULT 5'],['resultado','TEXT'],['creada','INTEGER'],['actualizada','INTEGER']],
+  decisiones_autonomas: [['tipo','TEXT'],['contexto','TEXT'],['decision','TEXT'],['simulacion','TEXT'],['aplicada','INTEGER'],['resultado','TEXT'],['exito','INTEGER'],['fecha','INTEGER']],
+  indice_temas: [['mensaje_orden','INTEGER'],['tema','TEXT'],['peso','REAL'],['fecha','INTEGER']]
 };
 
+// ============================================================
+// MIGRACIÓN — solo estructura. NUNCA toca datos.
+// ============================================================
 export async function migrar(e, forzar = false) {
   const db = e.DB;
   if (!db) return { ok: false, error: 'Sin D1.' };
   const kv = e.KV;
 
-  // Marca para no migrar cada request (excepto si forzar=true)
   if (kv && !forzar) {
     try {
-      const hecho = await kv.get('migrado_v8');
+      const hecho = await kv.get('migrado_v9');
       if (hecho === 'ok') return { ok: true, cached: true };
     } catch (x) {}
   }
@@ -159,25 +108,21 @@ export async function migrar(e, forzar = false) {
   const resultado = { ok: true, creadas: [], columnas: [], errores: [] };
 
   for (const [tabla, columnas] of Object.entries(ESQUEMA)) {
-    // 1. Verificar si la tabla existe
     let existe = false;
     try {
-      const check = await db.prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
-      ).bind(tabla).first();
+      const check = await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").bind(tabla).first();
       existe = !!check;
     } catch (x) {
       resultado.errores.push(tabla + ': ' + x.message);
       continue;
     }
 
-    // 2. Si no existe, crearla
     if (!existe) {
       try {
         const cols = columnas.map(([n, t]) => n + ' ' + t).join(', ');
         await db.prepare('CREATE TABLE IF NOT EXISTS ' + tabla + ' (id INTEGER PRIMARY KEY AUTOINCREMENT, ' + cols + ')').run();
         resultado.creadas.push(tabla);
-        // Índices útiles
+        // Índices
         if (tabla === 'historial_largo') {
           try { await db.prepare("CREATE INDEX IF NOT EXISTS idx_hl_user_orden ON historial_largo(user_id, orden)").run(); } catch (x) {}
         }
@@ -187,13 +132,17 @@ export async function migrar(e, forzar = false) {
         if (tabla === 'tareas') {
           try { await db.prepare("CREATE INDEX IF NOT EXISTS idx_tareas_estado ON tareas(estado, prioridad)").run(); } catch (x) {}
         }
+        if (tabla === 'indice_temas') {
+          try { await db.prepare("CREATE INDEX IF NOT EXISTS idx_temas ON indice_temas(tema)").run(); } catch (x) {}
+          try { await db.prepare("CREATE INDEX IF NOT EXISTS idx_temas_orden ON indice_temas(mensaje_orden)").run(); } catch (x) {}
+        }
       } catch (x) {
         resultado.errores.push(tabla + ' (create): ' + x.message);
       }
       continue;
     }
 
-    // 3. Si existe, verificar columnas
+    // Verificar columnas faltantes
     try {
       const info = await db.prepare('PRAGMA table_info(' + tabla + ')').all();
       const existentes = new Set((info.results || []).map(c => c.name));
@@ -212,7 +161,7 @@ export async function migrar(e, forzar = false) {
     }
   }
 
-  // 4. Plantillas iniciales (si la tabla existe)
+  // Plantillas iniciales (solo inserta si no existen, no sobrescribe)
   try {
     await db.prepare(`INSERT OR IGNORE INTO plantillas (tipo, descripcion, prompt, frecuencia_horas) VALUES
       ('lore', 'Historia corta del multiverso', 'Eres el narrador del multiverso Shadow Arise. Escribe un fragmento corto (máx 200 palabras) sobre un personaje de anime en su día a día, como si fuera real. Estilo narrativo, cinematográfico. Termina con el nombre del personaje entre asteriscos.', 24),
@@ -225,16 +174,28 @@ export async function migrar(e, forzar = false) {
     resultado.errores.push('plantillas init: ' + x.message);
   }
 
-  // 5. Marca de migración
+  // Estrategias iniciales (solo inserta si no existen)
+  try {
+    const ahora = Date.now();
+    await db.prepare(`INSERT OR IGNORE INTO estrategias (nombre, tipo, contenido, prioridad, creada, actualizada) VALUES
+      ('Escalado gradual', 'publicacion', 'Semana 1: 1 post/día en Mastodon. Semana 2: +Bluesky. Semana 3: +Reddit. Semana 4: +Discord. No lanzar todo de golpe.', 1, ${ahora}, ${ahora}),
+      ('Misterio del creador', 'narrativa', 'Pistas dispersas. Los personajes mencionan al Creador sin nombrarlo. Revelación gradual por fases.', 2, ${ahora}, ${ahora}),
+      ('Precio dinámico', 'monetizacion', 'Simular en sandbox: precio base 10 USDT, oferta 5 USDT, bonus, prueba gratuita. Medir conversión.', 3, ${ahora}, ${ahora}),
+      ('Retención emocional', 'psicologia', 'Notificaciones sorpresa. Personaje escribe primero. Umbrales suaves. Memoria compartida entre personajes.', 2, ${ahora}, ${ahora})
+    `).run();
+  } catch (x) {
+    resultado.errores.push('estrategias init: ' + x.message);
+  }
+
   if (kv && resultado.errores.length === 0) {
-    try { await kv.put('migrado_v8', 'ok', { expirationTtl: 3600 }); } catch (x) {}
+    try { await kv.put('migrado_v9', 'ok', { expirationTtl: 3600 }); } catch (x) {}
   }
 
   return resultado;
 }
 
 // ============================================================
-// ANTI-ALUCINACIÓN: verificar que algo exista antes de responder
+// VERIFICACIÓN
 // ============================================================
 export async function verificar(e, tipo, nombre) {
   const db = e.DB;
