@@ -2,7 +2,7 @@ import { MODELO_LIGERO, CS, LPB, BPL, J, gDB, gKV, b64e, b64d, j2t } from './sha
 import { notificar } from './notify.js';
 import { consumir } from './presupuesto.js';
 
-const MAX_ARCHIVO = 20 * 1024 * 1024; // 20 MB
+const MAX_ARCHIVO = 20 * 1024 * 1024;
 
 function chunkBytes(bs, size) {
   const ch = [];
@@ -29,13 +29,14 @@ async function reconstruir(kv, prefix) {
   return texto;
 }
 
+// ============ SUBIR (NO auto-procesa por defecto) ============
 export async function subir(r, e, c) {
   try {
     const f = await r.formData();
     const ar = f.get('archivo');
     const nm = f.get('nombre') || (ar ? ar.name : 'sin_nombre');
     const d = f.get('destino') || 'agente';
-    const ap = f.get('autoProcesar') !== 'false';
+    const ap = f.get('autoProcesar') === 'true';
     if (!ar) return J({ error: 'No hay archivo.' });
     const buf = await ar.arrayBuffer();
     const t = buf.byteLength;
@@ -60,16 +61,22 @@ export async function subir(r, e, c) {
       } catch (x) {}
       c.waitUntil(procesarLote(e, id, d, 0));
     }
-    return J({ mensaje: ap ? 'Archivo subido. Procesamiento iniciado.' : 'Archivo subido.', id, tamaño: t, chunks: ch.length, autoProcesando: ap });
+    return J({
+      ok: true,
+      mensaje: ap ? 'Archivo subido. Procesamiento iniciado.' : 'Archivo subido. NO procesado. Disponible bajo ID.',
+      id, tamaño: t, chunks: ch.length, autoProcesado: ap,
+      prueba: { tabla: 'archivos', id, chunks: ch.length }
+    });
   } catch (x) { return J({ error: 'Error: ' + x.message }); }
 }
 
+// ============ PROCESAR (manual, cuando el Comandante lo pida) ============
 export async function procesar(r, e, c) {
   try {
     const b = await r.json();
     if (!b.archivoId) return J({ error: 'Falta archivoId.' });
     c.waitUntil(procesarLote(e, b.archivoId, b.destino || 'agente', b.inicio || 0));
-    return J({ mensaje: 'Lote en proceso.', archivoId: b.archivoId });
+    return J({ ok: true, mensaje: 'Lote en proceso.', archivoId: b.archivoId });
   } catch (x) { return J({ error: x.message }); }
 }
 
@@ -86,7 +93,7 @@ export async function retomar(r, e, c) {
     const inicio = p.bloques_hechos || 0;
     await db.prepare('UPDATE procesos SET estado=?,fecha_avance=? WHERE id=?').bind('procesando', Date.now(), aId).run();
     c.waitUntil(procesarLote(e, aId, d, inicio));
-    return J({ mensaje: 'Retomado desde bloque ' + inicio, archivoId: aId, inicio });
+    return J({ ok: true, mensaje: 'Retomado desde bloque ' + inicio, archivoId: aId, inicio });
   } catch (x) { return J({ error: x.message }); }
 }
 
@@ -104,7 +111,7 @@ export async function resumir(r, e) {
       .bind(id, b.archivoId || id, 'pendiente', 0, 0, Date.now(), Date.now()).run();
     await kv.put('proc:' + id + ':texto', ct);
     await procesarLote(e, id, d, 0);
-    return J({ mensaje: 'Procesamiento iniciado.', procesoId: id });
+    return J({ ok: true, mensaje: 'Procesamiento iniciado.', procesoId: id });
   } catch (x) { return J({ error: 'Error: ' + x.message }); }
 }
 
@@ -266,13 +273,14 @@ ${tc.substring(0, 9000)}`
   }
 }
 
+// ============ CRON ============
 export async function cronRetomar(e) {
   const db = gDB(e, 'agente');
   const ai = e.ayanokoji_IA;
   if (!db || !ai) return;
   const hora = new Date().getUTCHours();
   const nocturno = hora >= 23 || hora < 8;
-  if (nocurno) {
+  if (nocturno) {
     const ultimo = await e.KV?.get('cron_ultimo_nocturno');
     const ahora = Date.now();
     if (ultimo && ahora - parseInt(ultimo) < 20 * 60 * 1000) return;
@@ -289,6 +297,35 @@ export async function cronRetomar(e) {
     await db.prepare('UPDATE procesos SET estado=?,fecha_avance=? WHERE id=?')
       .bind('procesando', ahora, p.id).run();
     await procesarLote(e, p.id, 'agente', off);
+  } catch (x) {}
+}
+
+export async function cronMantenimiento(e) {
+  const hora = new Date().getUTCHours();
+  if (hora !== 4) return; // Solo a las 4 AM UTC
+  const db = gDB(e, 'agente');
+  const kv = gKV(e, 'agente');
+  if (!db || !kv) return;
+  try {
+    // Limpiar KV huérfanos
+    const files = await kv.list({ prefix: 'file:', limit: 500 });
+    const procesos = await db.prepare("SELECT id FROM procesos WHERE estado IN ('procesando','pendiente')").all();
+    const activos = new Set((procesos.results || []).map(p => p.id));
+    let limpiados = 0;
+    for (const k of files.keys) {
+      const partes = k.name.split(':');
+      const archivoId = partes[1];
+      if (!activos.has(archivoId)) {
+        await kv.delete(k.name);
+        limpiados++;
+      }
+    }
+    // Consolidar resumenes viejos
+    const viejos = await db.prepare('SELECT id FROM resumenes_chat WHERE fecha < ? ORDER BY fecha ASC LIMIT 20').bind(Date.now() - 30 * 86400000).all();
+    if (viejos.results && viejos.results.length >= 10) {
+      // Aquí se podrían fusionar, por ahora solo reporta
+    }
+    await kv.put('ultimo_mantenimiento', String(Date.now()));
   } catch (x) {}
 }
 
@@ -320,9 +357,118 @@ export async function resumirChats(e, uid) {
   } catch (x) {}
 }
 
-// ============================================================
-// EXTRACTOR DE TEXTO GENÉRICO
-// ============================================================
+// ============ ÍNDICE SEMÁNTICO ============
+export async function indexarHistorial(r, e) {
+  try {
+    const db = gDB(e, 'agente');
+    const ai = e.ayanokoji_IA;
+    if (!db || !ai) return J({ error: 'D1 o IA no disponible.' });
+
+    const msgs = await db.prepare(
+      'SELECT orden, contenido FROM historial_largo WHERE user_id=? ORDER BY orden ASC'
+    ).bind('comandante').all();
+    if (!msgs.results || !msgs.results.length) return J({ error: 'Historial vacío.' });
+
+    await db.prepare('DELETE FROM indice_temas').run();
+
+    let procesados = 0, temasInsertados = 0;
+    for (let i = 0; i < msgs.results.length; i += 20) {
+      const lote = msgs.results.slice(i, i + 20);
+      const texto = lote.map(m => `[${m.orden}] ${m.contenido.substring(0, 400)}`).join('\n\n');
+
+      if (!await consumir(e, 'procesamiento')) break;
+
+      try {
+        const res = await ai.run(MODELO_LIGERO, {
+          messages: [{ role: 'user', content: `De estos mensajes, extrae los TEMAS/CONCEPTOS clave (no palabras sueltas). Formato JSON: [{"orden": N, "temas": ["tema1", "tema2"], "peso": 1-10}]. Max 3 temas por mensaje. Temas cortos (1-3 palabras).\n\n${texto}` }],
+          max_tokens: 800,
+          temperature: 0.2
+        });
+
+        const rp = res.response || '';
+        const match = rp.match(/\[[\s\S]*\]/);
+        if (match) {
+          try {
+            const items = JSON.parse(match[0]);
+            for (const item of items) {
+              if (!item.temas) continue;
+              for (const tema of item.temas) {
+                await db.prepare('INSERT INTO indice_temas(mensaje_orden, tema, peso, fecha) VALUES(?,?,?,?)')
+                  .bind(item.orden, String(tema).toLowerCase(), item.peso || 5, Date.now()).run();
+                temasInsertados++;
+              }
+            }
+          } catch (x) {}
+        }
+        procesados += lote.length;
+      } catch (x) {}
+    }
+
+    return J({ ok: true, procesados, total: msgs.results.length, temas_insertados: temasInsertados });
+  } catch (x) {
+    return J({ error: x.message });
+  }
+}
+
+export async function buscarPorTema(r, e) {
+  try {
+    const u = new URL(r.url);
+    const q = (u.searchParams.get('q') || '').toLowerCase();
+    const limite = parseInt(u.searchParams.get('limite') || '30');
+    if (!q) return J({ error: 'Falta q.' });
+
+    const db = gDB(e, 'agente');
+    if (!db) return J({ error: 'D1 no disponible.' });
+
+    const temas = await db.prepare(
+      'SELECT DISTINCT mensaje_orden, tema, peso FROM indice_temas WHERE tema LIKE ? ORDER BY peso DESC LIMIT ?'
+    ).bind('%' + q + '%', limite).all();
+
+    if (!temas.results || !temas.results.length) {
+      const r1 = await db.prepare(
+        'SELECT rol,contenido,orden FROM historial_largo WHERE contenido LIKE ? ORDER BY orden DESC LIMIT ?'
+      ).bind('%' + q + '%', limite).all();
+      return J({ consulta: q, metodo: 'directo', total: r1.results.length, resultados: r1.results });
+    }
+
+    const ords = temas.results.map(t => t.mensaje_orden);
+    const ph = ords.map(() => '?').join(',');
+    const msgs = await db.prepare(
+      'SELECT rol,contenido,orden FROM historial_largo WHERE orden IN (' + ph + ') ORDER BY orden ASC'
+    ).bind(...ords).all();
+
+    return J({ consulta: q, metodo: 'indice_semantico', total: msgs.results.length, resultados: msgs.results });
+  } catch (x) {
+    return J({ error: x.message });
+  }
+}
+
+// ============ ANÁLISIS DE ARCHIVOS ============
+export async function analizarArchivo(r, e) {
+  try {
+    const b = await r.json();
+    const archivoId = b.archivoId;
+    if (!archivoId) return J({ error: 'Falta archivoId.' });
+    const kv = gKV(e, 'agente');
+    if (!kv) return J({ error: 'KV no disponible.' });
+
+    const txt = j2t(await reconstruir(kv, 'file:' + archivoId + ':'));
+    const db = gDB(e, 'agente');
+    const meta = db ? await db.prepare('SELECT * FROM archivos WHERE id=?').bind(archivoId).first() : null;
+
+    return J({
+      ok: true,
+      archivoId,
+      metadata: meta,
+      longitud_texto: txt.length,
+      preview: txt.substring(0, 3000)
+    });
+  } catch (x) {
+    return J({ error: x.message });
+  }
+}
+
+// ============ EXTRACTOR DE CONTENIDO ============
 function extraerTextoDeContent(content) {
   if (!content) return '';
   if (typeof content === 'string') return content;
@@ -330,25 +476,16 @@ function extraerTextoDeContent(content) {
     return content.map(c => extraerTextoDeContent(c)).filter(Boolean).join('\n');
   }
   if (typeof content === 'object') {
-    if (Array.isArray(content.parts)) {
-      return content.parts.map(p => extraerTextoDeContent(p)).filter(Boolean).join('\n');
-    }
+    if (Array.isArray(content.parts)) return content.parts.map(p => extraerTextoDeContent(p)).filter(Boolean).join('\n');
     if (typeof content.text === 'string') return content.text;
     if (typeof content.content === 'string') return content.content;
     if (typeof content.value === 'string') return content.value;
     if (typeof content.body === 'string') return content.body;
-    if (Array.isArray(content.content)) {
-      return content.content.map(c => extraerTextoDeContent(c)).filter(Boolean).join('\n');
-    }
+    if (Array.isArray(content.content)) return content.content.map(c => extraerTextoDeContent(c)).filter(Boolean).join('\n');
   }
   return '';
 }
 
-// ============================================================
-// EXTRACTOR PARA FRAGMENTS (formato DeepSeek export)
-// Cada mensaje tiene message.fragments[] con {type, content}
-// type: REQUEST (user) | RESPONSE (assistant) | THINKING (razonamiento interno, ignorar)
-// ============================================================
 function extraerDeFragments(fragments) {
   if (!Array.isArray(fragments)) return [];
   const mensajes = [];
@@ -358,9 +495,8 @@ function extraerDeFragments(fragments) {
     let rol = 'user';
     if (tipo === 'RESPONSE') rol = 'assistant';
     else if (tipo === 'REQUEST') rol = 'user';
-    else if (tipo === 'THINKING') continue; // razonamiento interno, no es conversación
+    else if (tipo === 'THINKING') continue;
     else if (tipo === 'ERROR' || tipo === 'SEARCH') continue;
-    else rol = 'user';
 
     let contenido = '';
     if (typeof f.content === 'string') contenido = f.content;
@@ -372,9 +508,6 @@ function extraerDeFragments(fragments) {
   return mensajes;
 }
 
-// ============================================================
-// EXTRACTOR PARA MAPPING (ChatGPT/DeepSeek export)
-// ============================================================
 function extraerMensajesDeMapping(mapping) {
   const keys = Object.keys(mapping);
   if (!keys.length) return null;
@@ -390,7 +523,6 @@ function extraerMensajesDeMapping(mapping) {
 
     const msg = n.message;
 
-    // Ordenar por create_time o inserted_at o clave numérica
     let tiempo = 0;
     if (msg.create_time) tiempo = msg.create_time;
     else if (msg.inserted_at) {
@@ -399,34 +531,20 @@ function extraerMensajesDeMapping(mapping) {
     }
     if (!tiempo) tiempo = parseFloat(k) || 0;
 
-    // CASO 1: fragments (formato DeepSeek export)
     if (Array.isArray(msg.fragments) && msg.fragments.length) {
       const fragMsgs = extraerDeFragments(msg.fragments);
       if (fragMsgs.length) {
         for (const fm of fragMsgs) {
-          nodos.push({
-            orden: tiempo,
-            rol: fm.rol,
-            contenido: fm.contenido
-          });
+          nodos.push({ orden: tiempo, rol: fm.rol, contenido: fm.contenido });
         }
         continue;
       } else {
         sinContenido++;
-        if (ejemplos.length < 3) {
-          ejemplos.push({
-            key: k,
-            tipo: 'fragments_vacios',
-            fragments_count: msg.fragments.length,
-            primer_fragment_type: msg.fragments[0]?.type,
-            primer_fragment_content_type: typeof msg.fragments[0]?.content
-          });
-        }
+        if (ejemplos.length < 3) ejemplos.push({ key: k, tipo: 'fragments_vacios', fragments_count: msg.fragments.length });
         continue;
       }
     }
 
-    // CASO 2: content como string u objeto (formato ChatGPT)
     let rol = msg.author?.role || msg.role || msg.sender || 'user';
     rol = String(rol).toLowerCase();
     if (rol === 'assistant' || rol === 'bot' || rol === 'ai' || rol === 'model') rol = 'assistant';
@@ -439,30 +557,16 @@ function extraerMensajesDeMapping(mapping) {
       sinContenido++;
       if (ejemplos.length < 3) {
         let preview = '';
-        try {
-          preview = String(JSON.stringify(msg.content) || '').substring(0, 200);
-        } catch (e) {
-          preview = String(msg.content || '').substring(0, 200);
-        }
-        ejemplos.push({
-          key: k,
-          msg_keys: Object.keys(msg),
-          content_type: typeof msg.content,
-          content_preview: preview
-        });
+        try { preview = String(JSON.stringify(msg.content) || '').substring(0, 200); } catch (e) { preview = String(msg.content || '').substring(0, 200); }
+        ejemplos.push({ key: k, msg_keys: Object.keys(msg), content_type: typeof msg.content, content_preview: preview });
       }
       continue;
     }
 
-    nodos.push({
-      orden: tiempo,
-      rol,
-      contenido: contenido.trim()
-    });
+    nodos.push({ orden: tiempo, rol, contenido: contenido.trim() });
   }
 
   nodos.sort((a, b) => a.orden - b.orden);
-
   const mensajes = nodos.map(n => ({ role: n.rol, content: n.contenido }));
 
   return {
@@ -477,9 +581,6 @@ function extraerMensajesDeMapping(mapping) {
   };
 }
 
-// ============================================================
-// EXTRACTOR RECURSIVO GENERAL
-// ============================================================
 function extraerMensajes(data, profundidad = 0) {
   if (profundidad > 10) return null;
   if (!data) return null;
@@ -526,7 +627,6 @@ function extraerMensajes(data, profundidad = 0) {
       }
     }
   }
-
   return null;
 }
 
@@ -535,7 +635,6 @@ function parsearMensaje(m) {
     if (typeof m === 'string') return { rol: 'user', contenido: m };
     return null;
   }
-
   let rol = m.role || m.rol || m.from || m.sender || m.author || m.who || m.tipo || m.type || 'user';
   rol = String(rol).toLowerCase();
   if (['assistant','bot','ai','model','gpt','ayanokoji','ayanokōji','a'].includes(rol)) rol = 'assistant';
@@ -548,15 +647,12 @@ function parsearMensaje(m) {
     contenido = m.content || m.contenido || m.text || m.texto || m.message || m.mensaje || m.query || m.prompt || m.value || m.body || '';
     if (typeof contenido !== 'string') contenido = JSON.stringify(contenido);
   }
-
   if (!contenido.trim() && (m.response || m.completion || m.answer || m.respuesta)) {
     const r = m.response || m.completion || m.answer || m.respuesta;
     contenido = typeof r === 'string' ? r : JSON.stringify(r);
     rol = 'assistant';
   }
-
   if (!contenido.trim()) return null;
-
   return { rol, contenido: contenido.trim() };
 }
 
@@ -565,7 +661,7 @@ export async function importar(r, e) {
     const form = await r.formData();
     const archivo = form.get('archivo');
     const uid = form.get('user_id') || 'comandante';
-    const limite = parseInt(form.get('limite') || '500');
+    const limite = parseInt(form.get('limite') || '2000');
     if (!archivo) return J({ error: 'Falta archivo JSON.' });
 
     const texto = await archivo.text();
@@ -616,14 +712,7 @@ export async function importar(r, e) {
       await notificar(e, `📥 *Importación*\n\nInsertados: ${insertados}\nTotal: ${lista.length}`);
     } catch (x) {}
 
-    return J({
-      ok: true,
-      insertados,
-      total: lista.length,
-      saltados,
-      desde,
-      stats_extractor: stats
-    });
+    return J({ ok: true, insertados, total: lista.length, saltados, desde, stats_extractor: stats });
   } catch (x) {
     return J({ error: 'Error al importar: ' + x.message });
   }
