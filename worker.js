@@ -3,7 +3,6 @@ import { subir, procesar, resumir, verProceso, retomar, cronRetomar, cronManteni
 import { estadoPresupuesto, consumir } from './presupuesto.js';
 import { detectarIntencion, construirSystemPrompt, identificarArea, AREAS } from './nucleo.js';
 
-// ============ DISPATCHER ESTÁTICO DE MÓDULOS OPCIONALES ============
 async function opcional(nombre) {
   try {
     if (nombre === 'social' || nombre === './social.js') return await import('./social.js');
@@ -161,7 +160,16 @@ async function chat(r, e, c) {
       } catch (x) {}
     }
 
-    let systemPrompt = construirSystemPrompt(ctx, fs, rec, perfilBase, correcciones, estrategias);
+    // Conciencia del Comandante (qué hizo en el frontend)
+    let conciencia = [];
+    if (e.KV) {
+      try {
+        const c = JSON.parse(await e.KV.get('conciencia:' + uid) || '[]');
+        conciencia = c.slice(0, 10).map(x => `[${x.pestana}] ${x.accion}: ${x.detalle}`.substring(0, 200));
+      } catch (x) {}
+    }
+
+    let systemPrompt = construirSystemPrompt(ctx, fs, rec, perfilBase, correcciones, estrategias, conciencia);
 
     const mensajes = [
       { role: 'system', content: systemPrompt },
@@ -298,7 +306,7 @@ async function rElim(e, uid) {
   } catch (x) { return J({ respuesta: 'Error: ' + x.message }); }
 }
 
-// ============ D1 / KV GENÉRICOS ============
+// ============ D1 / KV ============
 async function d1(r, e) {
   try {
     const { accion, tabla, datos, condicion, destino } = await r.json();
@@ -498,7 +506,7 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '8.2' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '8.3' });
 
     // Correcciones
     if (p === '/api/corregir' && r.method === 'POST') {
@@ -539,6 +547,85 @@ export default {
       const db = gDB(e, 'agente');
       const r1 = await db.prepare('SELECT * FROM decisiones_autonomas ORDER BY fecha DESC LIMIT 50').all();
       return J({ total: r1.results.length, decisiones: r1.results });
+    }
+
+    // Conciencia del Comandante
+    if (p === '/api/conciencia' && r.method === 'POST') {
+      const b = await r.json();
+      const uid = b.user_id || 'comandante';
+      const kv = gKV(e, 'agente');
+      if (kv) {
+        const clave = 'conciencia:' + uid;
+        const actual = JSON.parse(await kv.get(clave) || '[]');
+        actual.unshift({ accion: b.accion, detalle: (b.detalle || '').substring(0, 300), pestana: b.pestana || 'chat', fecha: Date.now() });
+        await kv.put(clave, JSON.stringify(actual.slice(0, 30)), { expirationTtl: 86400 });
+      }
+      return J({ ok: true });
+    }
+
+    if (p === '/api/leer_conciencia' && r.method === 'GET') {
+      const uu = new URL(r.url);
+      const uid = uu.searchParams.get('user_id') || 'comandante';
+      const kv = gKV(e, 'agente');
+      if (!kv) return J({ conciencia: [] });
+      const c = JSON.parse(await kv.get('conciencia:' + uid) || '[]');
+      return J({ total: c.length, conciencia: c });
+    }
+
+    // Shadow Arise stats
+    if (p === '/api/shadow_stats' && r.method === 'GET') {
+      const db = gDB(e, 'agente');
+      if (!db) return J({ error: 'Sin D1.' });
+      try {
+        let ut = 0, up = 0, activos = 0, nuevosSem = 0, ingresos = 0;
+        try { const t = await db.prepare('SELECT COUNT(*) as n FROM usuarios').first(); ut = t ? t.n : 0; } catch (x) {}
+        try { const t = await db.prepare("SELECT COUNT(*) as n FROM usuarios WHERE tipo_pago='pago'").first(); up = t ? t.n : 0; } catch (x) {}
+        try { const t = await db.prepare('SELECT COUNT(*) as n FROM usuarios WHERE ultimo_acceso > ?').bind(Date.now() - 86400000).first(); activos = t ? t.n : 0; } catch (x) {}
+        try { const t = await db.prepare('SELECT COUNT(*) as n FROM usuarios WHERE fecha_registro > ?').bind(Date.now() - 7 * 86400000).first(); nuevosSem = t ? t.n : 0; } catch (x) {}
+        try { const t = await db.prepare('SELECT COALESCE(SUM(ingresos_usdt),0) as t FROM metricas_diarias').first(); ingresos = t ? parseFloat(t.t) : 0; } catch (x) {}
+
+        const conv = ut > 0 ? ((up / ut) * 100).toFixed(1) : 0;
+
+        let topP = null;
+        try { topP = await db.prepare("SELECT personaje_favorito as p, COUNT(*) as n FROM usuarios WHERE personaje_favorito IS NOT NULL GROUP BY personaje_favorito ORDER BY n DESC LIMIT 1").first(); } catch (x) {}
+
+        let recientes = [];
+        try { const r = await db.prepare('SELECT * FROM metricas_diarias ORDER BY fecha DESC LIMIT 7').all(); recientes = r.results || []; } catch (x) {}
+
+        const ret = recientes.length ? { d1: recientes[0].retencion_d1 || 0, d7: recientes[0].retencion_d7 || 0, d30: 0 } : { d1: 0, d7: 0, d30: 0 };
+
+        const escala = ut === 0 ? 0 : ut < 50 ? 1 : ut < 500 ? 2 : ut < 5000 ? 3 : 4;
+
+        const resumen = ut === 0
+          ? 'Shadow Arise no está operativo aún. El sistema está listo para recibir usuarios. Esperando el lanzamiento.'
+          : `Shadow Arise lleva ${ut} usuarios registrados. ${up} están pagando (${conv}%). Retención día 1: ${ret.d1}%.`;
+
+        return J({
+          stats: {
+            usuarios_totales: ut, usuarios_pago: up, usuarios_activos_dia: activos,
+            usuarios_nuevos_semana: nuevosSem, conversion_pct: parseFloat(conv),
+            retencion_d1: ret.d1, retencion_d7: ret.d7, retencion_d30: ret.d30,
+            ingresos_mes: ingresos, ingresos_total: ingresos,
+            arpu: up > 0 ? (ingresos / up).toFixed(2) : 0,
+            personaje_top: topP ? topP.p : '—', personaje_retencion: topP ? topP.p : '—'
+          },
+          escala: { actual: escala, pasos: ['Prototipo','Beta cerrada','Lanzamiento público','Tracción','Escala'] },
+          metricas_recientes: recientes,
+          resumen_ayanokoji: resumen
+        });
+      } catch (x) {
+        return J({ error: x.message });
+      }
+    }
+
+    // Componentes del frontend
+    if (p === '/api/componentes' && r.method === 'GET') {
+      return J({
+        pestanas: ['chat','sandbox','shadow','stats','decisiones','ideas','bandeja'],
+        botones: ['subir','imagen','indexar','migrar','diagnostico','procesos','contexto','corregir','limpiar'],
+        acciones_chat: ['enviar_mensaje','cargar_historial','corregir_voz','generar_imagen'],
+        acciones_auto: ['indexar','migrar','analizar','encolar','publicar']
+      });
     }
 
     // Sandbox: simular precio y promover lección
