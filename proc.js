@@ -353,7 +353,7 @@ export async function resumirChats(e, uid) {
   } catch (x) {}
 }
 
-// ============ ÍNDICE SEMÁNTICO ============
+// ============ ÍNDICE SEMÁNTICO (con fix del 429) ============
 export async function indexarHistorial(r, e) {
   try {
     const db = gDB(e, 'agente');
@@ -367,12 +367,17 @@ export async function indexarHistorial(r, e) {
 
     await db.prepare('DELETE FROM indice_temas').run();
 
+    // Consumir 1 sola vez para toda la operación (evita 429 en KV)
+    if (!await consumir(e, 'procesamiento')) {
+      return J({ error: 'Presupuesto de procesamiento agotado. Intenta mañana.' });
+    }
+
     let procesados = 0, temasInsertados = 0;
-    for (let i = 0; i < msgs.results.length; i += 20) {
+    const total = msgs.results.length;
+
+    for (let i = 0; i < total; i += 20) {
       const lote = msgs.results.slice(i, i + 20);
       const texto = lote.map(m => `[${m.orden}] ${m.contenido.substring(0, 400)}`).join('\n\n');
-
-      if (!await consumir(e, 'procesamiento')) break;
 
       try {
         const res = await ai.run(MODELO_LIGERO, {
@@ -406,7 +411,7 @@ export async function indexarHistorial(r, e) {
       } catch (x) {}
     }
 
-    return J({ ok: true, procesados, total: msgs.results.length, temas_insertados: temasInsertados });
+    return J({ ok: true, procesados, total, temas_insertados: temasInsertados });
   } catch (x) {
     return J({ error: x.message });
   }
@@ -701,7 +706,6 @@ export async function importar(r, e) {
 
     await db.prepare('DELETE FROM historial_largo WHERE user_id=?').bind(uid).run();
 
-    // Acumular todas las inserciones en un array de sentencias preparadas
     const sentencias = [];
     let orden = 0, insertados = 0, saltados = 0;
     const ahora = Date.now();
@@ -717,7 +721,6 @@ export async function importar(r, e) {
       orden++; insertados++;
     }
 
-    // Ejecutar todo en una sola llamada (1 subpetición en lugar de N)
     if (sentencias.length > 0) {
       try {
         await db.batch(sentencias);
