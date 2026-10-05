@@ -1,6 +1,7 @@
 export const MODELO = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 export const MODELO_LIGERO = '@cf/meta/llama-3.1-8b-instruct';
 export const MODELO_VISION = '@cf/meta/llama-3.2-11b-vision-instruct';
+export const MODELO_RAZONAMIENTO = '@cf/deepseek-ai/deepseek-r1-distill-qwen-32b';
 export const CS = 500 * 1024;
 export const LPB = 120;
 export const BPL = 5;
@@ -62,7 +63,7 @@ export function j2t(c) {
 }
 
 // ============================================================
-// ESQUEMA COMPLETO — todas las tablas del sistema
+// ESQUEMA COMPLETO
 // ============================================================
 const ESQUEMA = {
   // --- Base ---
@@ -76,7 +77,7 @@ const ESQUEMA = {
   resumenes_chat: [['user_id','TEXT'],['fecha','INTEGER'],['resumen','TEXT'],['desde','INTEGER'],['hasta','INTEGER']],
   historial_largo: [['user_id','TEXT'],['rol','TEXT'],['contenido','TEXT'],['orden','INTEGER'],['fecha','INTEGER']],
 
-  // --- Notificaciones y push ---
+  // --- Notificaciones ---
   notificaciones: [['tipo','TEXT'],['titulo','TEXT'],['mensaje','TEXT'],['leida','INTEGER DEFAULT 0'],['fecha','INTEGER']],
   suscripciones_push: [['endpoint','TEXT'],['keys_p256dh','TEXT'],['keys_auth','TEXT'],['user_agent','TEXT'],['creada','INTEGER'],['activa','INTEGER DEFAULT 1']],
 
@@ -109,16 +110,20 @@ const ESQUEMA = {
   indice_temas: [['mensaje_orden','INTEGER'],['tema','TEXT'],['peso','REAL'],['fecha','INTEGER']],
 
   // --- Shadow Arise: producto ---
-  usuarios: [['alias','TEXT'],['fecha_registro','INTEGER'],['activo','INTEGER DEFAULT 1'],['tipo_pago',"TEXT DEFAULT 'gratis'"],['plan','TEXT'],['mensajes_total','INTEGER DEFAULT 0'],['mensajes_hoy','INTEGER DEFAULT 0'],['ultimo_acceso','INTEGER'],['pais','TEXT'],['personaje_favorito','TEXT'],['notas','TEXT']],
+  usuarios: [['alias','TEXT'],['fecha_registro','INTEGER'],['activo','INTEGER DEFAULT 1'],['tipo_pago',"TEXT DEFAULT 'gratis'"],['plan','TEXT'],['mensajes_total','INTEGER DEFAULT 0'],['mensajes_hoy','INTEGER DEFAULT 0'],['ultimo_acceso','INTEGER'],['pais','TEXT'],['personaje_favorito','TEXT'],['vip','INTEGER DEFAULT 0'],['razon_vip','TEXT'],['notas','TEXT']],
   eventos_usuario: [['user_id','TEXT'],['tipo','TEXT'],['detalle','TEXT'],['pagado','INTEGER DEFAULT 0'],['fecha','INTEGER']],
   metricas_diarias: [['fecha','INTEGER'],['usuarios_nuevos','INTEGER DEFAULT 0'],['usuarios_activos','INTEGER DEFAULT 0'],['usuarios_pago','INTEGER DEFAULT 0'],['ingresos_usdt','REAL DEFAULT 0'],['mensajes_totales','INTEGER DEFAULT 0'],['retencion_d1','REAL DEFAULT 0'],['retencion_d7','REAL DEFAULT 0'],['personaje_top','TEXT'],['notas','TEXT']],
+
+  // --- Personajes por usuario ---
+  personajes_usuario: [['user_id','TEXT'],['personaje','TEXT'],['confianza','INTEGER DEFAULT 0'],['humor','TEXT'],['ultima_interaccion','INTEGER'],['notas','TEXT']],
+  memoria_personaje: [['user_id','TEXT'],['personaje','TEXT'],['recuerdo','TEXT'],['fecha','INTEGER']],
 
   // --- Conciencia del Comandante ---
   conciencia_comandante: [['accion','TEXT'],['detalle','TEXT'],['pestana','TEXT'],['fecha','INTEGER']]
 };
 
 // ============================================================
-// MIGRACIÓN — solo estructura. NUNCA toca datos existentes.
+// MIGRACIÓN
 // ============================================================
 export async function migrar(e, forzar = false) {
   const db = e.DB;
@@ -127,14 +132,13 @@ export async function migrar(e, forzar = false) {
 
   if (kv && !forzar) {
     try {
-      const hecho = await kv.get('migrado_v11');
+      const hecho = await kv.get('migrado_v12');
       if (hecho === 'ok') return { ok: true, cached: true };
     } catch (x) {}
   }
 
   const resultado = { ok: true, creadas: [], columnas: [], limpiezas: [], errores: [] };
 
-  // 1. Crear/actualizar tablas
   for (const [tabla, columnas] of Object.entries(ESQUEMA)) {
     let existe = false;
     try {
@@ -150,7 +154,6 @@ export async function migrar(e, forzar = false) {
         const cols = columnas.map(([n, t]) => n + ' ' + t).join(', ');
         await db.prepare('CREATE TABLE IF NOT EXISTS ' + tabla + ' (id INTEGER PRIMARY KEY AUTOINCREMENT, ' + cols + ')').run();
         resultado.creadas.push(tabla);
-        // Índices específicos
         if (tabla === 'historial_largo') {
           try { await db.prepare("CREATE INDEX IF NOT EXISTS idx_hl_user_orden ON historial_largo(user_id, orden)").run(); } catch (x) {}
         }
@@ -173,7 +176,6 @@ export async function migrar(e, forzar = false) {
       continue;
     }
 
-    // Verificar columnas faltantes
     try {
       const info = await db.prepare('PRAGMA table_info(' + tabla + ')').all();
       const existentes = new Set((info.results || []).map(c => c.name));
@@ -192,25 +194,24 @@ export async function migrar(e, forzar = false) {
     }
   }
 
-  // 2. LIMPIEZA: si hay más de 10 plantillas, dejar solo la primera de cada tipo
+  // Limpieza de duplicados
   try {
     const cnt = await db.prepare('SELECT COUNT(*) as n FROM plantillas').first();
     if (cnt && cnt.n > 10) {
       await db.prepare('DELETE FROM plantillas WHERE id NOT IN (SELECT MIN(id) FROM plantillas GROUP BY tipo)').run();
-      resultado.limpiezas.push('plantillas duplicadas: eliminadas');
+      resultado.limpiezas.push('plantillas duplicadas');
     }
   } catch (x) {}
 
-  // 3. LIMPIEZA: estrategias duplicadas por nombre
   try {
     const cnt = await db.prepare('SELECT COUNT(*) as n FROM estrategias').first();
     if (cnt && cnt.n > 10) {
       await db.prepare('DELETE FROM estrategias WHERE id NOT IN (SELECT MIN(id) FROM estrategias GROUP BY nombre)').run();
-      resultado.limpiezas.push('estrategias duplicadas: eliminadas');
+      resultado.limpiezas.push('estrategias duplicadas');
     }
   } catch (x) {}
 
-  // 4. Insertar plantillas iniciales SOLO si hay menos de 3
+  // Plantillas iniciales
   try {
     const cnt = await db.prepare('SELECT COUNT(*) as n FROM plantillas').first();
     if (!cnt || cnt.n < 3) {
@@ -226,7 +227,7 @@ export async function migrar(e, forzar = false) {
     resultado.errores.push('plantillas init: ' + x.message);
   }
 
-  // 5. Insertar estrategias iniciales SOLO si hay menos de 3
+  // Estrategias iniciales
   try {
     const cnt = await db.prepare('SELECT COUNT(*) as n FROM estrategias').first();
     if (!cnt || cnt.n < 3) {
@@ -243,7 +244,7 @@ export async function migrar(e, forzar = false) {
   }
 
   if (kv && resultado.errores.length === 0) {
-    try { await kv.put('migrado_v11', 'ok', { expirationTtl: 3600 }); } catch (x) {}
+    try { await kv.put('migrado_v12', 'ok', { expirationTtl: 3600 }); } catch (x) {}
   }
 
   return resultado;
