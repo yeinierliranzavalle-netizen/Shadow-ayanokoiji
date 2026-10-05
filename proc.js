@@ -66,9 +66,8 @@ export async function subir(r, e, c) {
     }
     return J({
       ok: true,
-      mensaje: ap ? 'Archivo subido. Procesamiento iniciado.' : 'Archivo subido. NO procesado. Disponible bajo ID.',
-      id, tamaño: t, chunks: ch.length, autoProcesado: ap,
-      prueba: { tabla: 'archivos', id, chunks: ch.length }
+      mensaje: ap ? 'Archivo subido. Procesamiento iniciado.' : 'Archivo subido. NO procesado.',
+      id, tamaño: t, chunks: ch.length, autoProcesado: ap
     });
   } catch (x) { return J({ error: 'Error: ' + x.message }); }
 }
@@ -177,7 +176,7 @@ export async function procesarLote(e, aId, d, off) {
     try {
       await db.prepare('UPDATE procesos SET estado=?,error=?,fecha_avance=? WHERE id=?')
         .bind('error', x.message, Date.now(), aId).run();
-      await notificar(e, `❌ *Proceso falló*\n\nID: \`${aId}\`\nBloque: ${off}\nError: ${x.message}`);
+      await notificar(e, `❌ *Proceso falló*\n\nID: \`${aId}\`\nError: ${x.message}`);
     } catch (y) {}
   }
 }
@@ -207,34 +206,17 @@ export async function consolidar(e, aId, d, ac) {
     const rf = await ai.run(MODELO_LIGERO, {
       messages: [{
         role: 'user',
-        content: `Genera un PERFIL MAESTRO del Comandante Yeinier en 9 secciones. Cada sección debe ser EXPLICATIVA: QUÉ, POR QUÉ y CÓMO. Formato: cada sección empieza con "### N. TITULO:" y termina con "###" en línea aparte. Mínimo 80 palabras por sección.
+        content: `Genera un PERFIL MAESTRO del Comandante Yeinier en 9 secciones. Cada sección EXPLICATIVA: QUÉ, POR QUÉ y CÓMO. Formato: "### N. TITULO:" y termina con "###". Mínimo 80 palabras.
 
-### 1. IDENTIDAD:
-Quién es, esencia, forma de pensar.
-
-### 2. CONTEXTO:
-Cuba rural, familia, presión, fe adventista.
-
-### 3. OBJETIVO:
-Meta principal y motivación profunda.
-
-### 4. PROYECTO SHADOW ARISE:
-Estrategia, componentes, monetización, estado.
-
-### 5. ALIADO DIGITAL:
-Rol de Ayanokōji, cómo debe comportarse, límites.
-
-### 6. IA PUBLICADORA:
-Canales, estrategia, contenido.
-
-### 7. REGLAS OPERATIVAS:
-Cómo trabajar con el Comandante.
-
-### 8. DECISIONES TOMADAS Y SU RAZÓN:
-QUÉ, POR QUÉ y CÓMO.
-
-### 9. IDEAS PENDIENTES:
-Robot, casa, paneles, auto-mejora, sandbox.
+### 1. IDENTIDAD
+### 2. CONTEXTO
+### 3. OBJETIVO
+### 4. PROYECTO SHADOW ARISE
+### 5. ALIADO DIGITAL
+### 6. IA PUBLICADORA
+### 7. REGLAS OPERATIVAS
+### 8. DECISIONES TOMADAS Y SU RAZÓN
+### 9. IDEAS PENDIENTES
 
 Resúmenes:
 ${tc.substring(0, 9000)}`
@@ -264,6 +246,9 @@ ${tc.substring(0, 9000)}`
   }
 }
 
+// ============================================================
+// CRON RETOMAR — Cada 2 min. Solo procesos atascados.
+// ============================================================
 export async function cronRetomar(e) {
   const db = gDB(e, 'agente');
   const ai = e.ayanokoji_IA;
@@ -290,23 +275,255 @@ export async function cronRetomar(e) {
   } catch (x) {}
 }
 
-export async function cronMantenimiento(e) {
-  const hora = new Date().getUTCHours();
-  if (hora !== 4) return;
+// ============================================================
+// CRON AUTÓNOMO — El cerebro. Despierta, mira el tablero, decide.
+// Corre cada 30 min. Evalúa el estado y elige UNA acción.
+// ============================================================
+export async function cronAutonomo(e) {
   const db = gDB(e, 'agente');
   const kv = gKV(e, 'agente');
-  if (!db || !kv) return;
+  const ai = e.ayanokoji_IA;
+  if (!db || !kv || !ai) return;
+
+  // No correr más de una vez cada 25 min
+  const ultima = await kv.get('cron_autonomo_ultima');
+  const ahora = Date.now();
+  if (ultima && ahora - parseInt(ultima) < 25 * 60 * 1000) return;
+  await kv.put('cron_autonomo_ultima', String(ahora), { expirationTtl: 7200 });
+
+  // ============ FASE 1: OBSERVAR EL TABLERO ============
+  const tablero = {
+    procesos_activos: 0,
+    archivos_huerfanos: 0,
+    mensajes_largo: 0,
+    temas_indexados: 0,
+    modo_indice: 'ninguno',
+    resumenes_viejos: 0,
+    presupuesto_hoy: {},
+    errores_recientes: 0,
+    acciones_sin_resultado: 0,
+    hora: new Date().getUTCHours()
+  };
+
+  try {
+    const p = await db.prepare("SELECT COUNT(*) as n FROM procesos WHERE estado IN ('procesando','pendiente')").first();
+    tablero.procesos_activos = p ? p.n : 0;
+  } catch (x) {}
+
   try {
     const files = await kv.list({ prefix: 'file:', limit: 500 });
-    const procesos = await db.prepare("SELECT id FROM procesos WHERE estado IN ('procesando','pendiente')").all();
-    const activos = new Set((procesos.results || []).map(p => p.id));
-    for (const k of files.keys) {
-      const partes = k.name.split(':');
-      const archivoId = partes[1];
-      if (!activos.has(archivoId)) await kv.delete(k.name);
-    }
-    await kv.put('ultimo_mantenimiento', String(Date.now()));
+    tablero.archivos_huerfanos = files.keys.length;
   } catch (x) {}
+
+  try {
+    const m = await db.prepare('SELECT COUNT(*) as n FROM historial_largo').first();
+    tablero.mensajes_largo = m ? m.n : 0;
+    const t = await db.prepare('SELECT COUNT(*) as n FROM indice_temas').first();
+    tablero.temas_indexados = t ? t.n : 0;
+    tablero.modo_indice = await kv.get('indice:ultimo_modo') || 'ninguno';
+  } catch (x) {}
+
+  try {
+    const r = await db.prepare("SELECT COUNT(*) as n FROM resumenes_chat WHERE fecha < ?").bind(Date.now() - 30 * 86400000).first();
+    tablero.resumenes_viejos = r ? r.n : 0;
+  } catch (x) {}
+
+  try {
+    const fecha = new Date().toISOString().split('T')[0];
+    for (const area of ['chat','procesamiento','sandbox','publisher','vision']) {
+      const c = await kv.get('presupuesto:' + fecha + ':' + area);
+      tablero.presupuesto_hoy[area] = c ? parseInt(c) : 0;
+    }
+  } catch (x) {}
+
+  try {
+    const e1 = await db.prepare("SELECT COUNT(*) as n FROM acciones WHERE exito=0 AND fecha > ?").bind(ahora - 86400000).first();
+    tablero.errores_recientes = e1 ? e1.n : 0;
+  } catch (x) {}
+
+  try {
+    const t = await db.prepare("SELECT COUNT(*) as n FROM tareas WHERE estado='pendiente'").first();
+    tablero.acciones_sin_resultado = t ? t.n : 0;
+  } catch (x) {}
+
+  // ============ FASE 2: DECIDIR ============
+  // Lista de acciones candidatas según lo que ve el tablero
+  const candidatas = [];
+
+  // No puede actuar si hay procesos activos (prioridad crítica)
+  if (tablero.procesos_activos > 0) {
+    return; // Esperar
+  }
+
+  // 1. Reindexar con IA si el índice está pobre y hay margen
+  if (tablero.modo_indice !== 'ia_con_fallback' && tablero.mensajes_largo > 100 && tablero.temas_indexados < tablero.mensajes_largo * 3) {
+    candidatas.push({ tipo: 'reindexar', peso: 8 });
+  }
+
+  // 2. Limpiar KV huérfanos (siempre útil si hay muchos)
+  if (tablero.archivos_huerfanos > 30) {
+    candidatas.push({ tipo: 'limpiar_kv', peso: 5 });
+  }
+
+  // 3. Consolidar resúmenes viejos (si hay más de 10)
+  if (tablero.resumenes_viejos > 10) {
+    candidatas.push({ tipo: 'consolidar_resumenes', peso: 6 });
+  }
+
+  // 4. Analizar errores recientes (si hay más de 5 en 24h)
+  if (tablero.errores_recientes > 5) {
+    candidatas.push({ tipo: 'analizar_errores', peso: 7 });
+  }
+
+  // 5. Procesar tareas pendientes
+  if (tablero.acciones_sin_resultado > 0) {
+    candidatas.push({ tipo: 'procesar_tareas', peso: 4 });
+  }
+
+  // 6. Reflexión silenciosa: leer historial largo por tema y sintetizar aprendizajes
+  if (tablero.mensajes_largo > 500 && tablero.hora >= 2 && tablero.hora < 6) {
+    candidatas.push({ tipo: 'reflexionar', peso: 3 });
+  }
+
+  // Si no hay nada urgente, esperar
+  if (!candidatas.length) {
+    try {
+      await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
+        .bind('cron_autonomo', 'Noche tranquila', 'Observé el tablero. Nada requiere acción. Sigo esperando.', Date.now()).run();
+    } catch (x) {}
+    return;
+  }
+
+  // Elegir la de mayor peso (más importante)
+  candidatas.sort((a, b) => b.peso - a.peso);
+  const elegida = candidatas[0];
+
+  // ============ FASE 3: EJECUTAR ============
+  let resultado = '';
+  try {
+    if (elegida.tipo === 'reindexar') {
+      // Verificar IA disponible
+      try {
+        const prueba = await ai.run(MODELO_LIGERO, {
+          messages: [{ role: 'user', content: 'ok' }],
+          max_tokens: 3
+        });
+        if (prueba && prueba.response) {
+          const idx = await indexarHistorial({ json: async () => ({}) }, e);
+          resultado = 'Reindexado con IA. Temas: ' + (idx.temas_insertados || '?');
+        } else {
+          resultado = 'IA no disponible, pospuesto.';
+        }
+      } catch (x) {
+        resultado = 'Reindexado falló: ' + x.message;
+      }
+    }
+
+    if (elegida.tipo === 'limpiar_kv') {
+      const files = await kv.list({ prefix: 'file:', limit: 500 });
+      const procs = await db.prepare("SELECT id FROM procesos WHERE estado IN ('procesando','pendiente')").all();
+      const activos = new Set((procs.results || []).map(p => p.id));
+      let limpiados = 0;
+      for (const k of files.keys) {
+        const archivoId = k.name.split(':')[1];
+        if (!activos.has(archivoId)) { await kv.delete(k.name); limpiados++; }
+      }
+      resultado = 'Limpiados ' + limpiados + ' chunks huérfanos.';
+    }
+
+    if (elegida.tipo === 'consolidar_resumenes') {
+      // Tomar los 10 resúmenes más viejos, fusionarlos en uno solo con IA, y guardar
+      const viejos = await db.prepare("SELECT id, resumen FROM resumenes_chat WHERE fecha < ? ORDER BY fecha ASC LIMIT 10").bind(Date.now() - 30 * 86400000).all();
+      if (viejos.results && viejos.results.length >= 5) {
+        const texto = viejos.results.map(r => r.resumen).join('\n---\n');
+        try {
+          const fus = await ai.run(MODELO_LIGERO, {
+            messages: [{ role: 'user', content: `Fusiona estos resúmenes antiguos en uno solo consolidado. Conserva lo esencial. Máximo 400 palabras.\n\n${texto}` }],
+            max_tokens: 600,
+            temperature: 0.3
+          });
+          if (fus.response) {
+            await db.prepare('INSERT INTO resumenes_chat(user_id,fecha,resumen,desde,hasta) VALUES(?,?,?,?,?)')
+              .bind('comandante', Date.now(), '[CONSOLIDADO] ' + fus.response, 0, Date.now()).run();
+            const ids = viejos.results.map(r => r.id);
+            const ph = ids.map(() => '?').join(',');
+            await db.prepare('DELETE FROM resumenes_chat WHERE id IN (' + ph + ')').bind(...ids).run();
+            resultado = 'Consolidados ' + ids.length + ' resúmenes.';
+          }
+        } catch (x) {
+          resultado = 'Consolidación IA falló: ' + x.message;
+        }
+      } else {
+        resultado = 'Insuficientes resúmenes viejos.';
+      }
+    }
+
+    if (elegida.tipo === 'analizar_errores') {
+      const errs = await db.prepare("SELECT tipo, descripcion, detalle FROM acciones WHERE exito=0 ORDER BY fecha DESC LIMIT 10").all();
+      if (errs.results && errs.results.length) {
+        const texto = errs.results.map(e => `[${e.tipo}] ${e.descripcion} — ${e.detalle}`).join('\n');
+        try {
+          const anal = await ai.run(MODELO_LIGERO, {
+            messages: [{ role: 'user', content: `Analiza estos errores recientes. ¿Hay un patrón? ¿Qué solución propones? Máximo 200 palabras.\n\n${texto}` }],
+            max_tokens: 400,
+            temperature: 0.5
+          });
+          resultado = 'Análisis de errores: ' + (anal.response || '').substring(0, 300);
+        } catch (x) {
+          resultado = 'Análisis IA falló.';
+        }
+      }
+    }
+
+    if (elegida.tipo === 'procesar_tareas') {
+      // Aquí el worker llama a cronColaTareas, pero podemos dejar el registro
+      resultado = 'Tareas pendientes detectadas. Delegado al worker.';
+    }
+
+    if (elegida.tipo === 'reflexionar') {
+      // Leer un fragmento del historial largo y extraer una idea para el comandante
+      try {
+        const frag = await db.prepare('SELECT contenido FROM historial_largo ORDER BY RANDOM() LIMIT 5').all();
+        const texto = (frag.results || []).map(x => x.contenido).join('\n---\n');
+        if (texto.length > 200) {
+          const refl = await ai.run(MODELO_LIGERO, {
+            messages: [{ role: 'user', content: `Lee estos fragmentos del historial del Comandante y extrae UNA idea o patrón que valga la pena recordarle. Máximo 150 palabras. Directo, sin adornos.\n\n${texto.substring(0, 6000)}` }],
+            max_tokens: 300,
+            temperature: 0.6
+          });
+          resultado = 'Reflexión: ' + (refl.response || '').substring(0, 300);
+        }
+      } catch (x) {
+        resultado = 'Reflexión falló.';
+      }
+    }
+
+    // Registrar la acción tomada
+    try {
+      await db.prepare('INSERT INTO acciones(tipo,descripcion,exito,detalle,fecha) VALUES(?,?,?,?,?)')
+        .bind('autonomo_' + elegida.tipo, 'Cron autónomo eligió: ' + elegida.tipo, 1, resultado.substring(0, 500), ahora).run();
+    } catch (x) {}
+
+    try {
+      await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
+        .bind('cron_autonomo', 'Acción autónoma: ' + elegida.tipo, resultado, ahora).run();
+    } catch (x) {}
+
+  } catch (x) {
+    try {
+      await db.prepare('INSERT INTO acciones(tipo,descripcion,exito,detalle,fecha) VALUES(?,?,?,?,?)')
+        .bind('autonomo_' + elegida.tipo, 'Cron autónomo falló: ' + elegida.tipo, 0, x.message, Date.now()).run();
+    } catch (y) {}
+  }
+}
+
+// ============================================================
+// CRON MANTENIMIENTO — Ya no hace tarea fija. Llama al autónomo.
+// ============================================================
+export async function cronMantenimiento(e) {
+  // Ya no decide tareas específicas. El cronAutonomo hace todo el trabajo.
+  // Se conserva por compatibilidad con el worker.
+  return;
 }
 
 export async function resumirChats(e, uid) {
@@ -335,50 +552,43 @@ export async function resumirChats(e, uid) {
   } catch (x) {}
 }
 
-// ============ INDEXADO HÍBRIDO (IA + fallback de keywords) ============
+// ============================================================
+// INDEXADO HÍBRIDO
+// ============================================================
 function extraerKeywords(texto) {
-  const limpio = texto
-    .toLowerCase()
-    .replace(/[^\wáéíóúñü\s]/g, ' ')
-    .replace(/\s+/g, ' ');
+  const limpio = texto.toLowerCase().replace(/[^\wáéíóúñü\s]/g, ' ').replace(/\s+/g, ' ');
   const palabras = limpio.split(' ').filter(p => p.length > 4 && !STOPWORDS.has(p) && !/^\d+$/.test(p));
   const frecuencia = {};
   for (const p of palabras) frecuencia[p] = (frecuencia[p] || 0) + 1;
-  const top = Object.entries(frecuencia)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5)
-    .map(([palabra, freq]) => ({ palabra, freq }));
-  return top;
+  return Object.entries(frecuencia).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([palabra, freq]) => ({ palabra, freq }));
 }
 
 export async function indexarHistorial(r, e) {
   try {
     const db = gDB(e, 'agente');
     const ai = e.ayanokoji_IA;
-    if (!db) return J({ error: 'D1 no disponible.' });
+    const kv = gKV(e, 'agente');
+    if (!db) return { error: 'D1 no disponible.' };
 
     const msgs = await db.prepare(
       'SELECT orden, contenido FROM historial_largo WHERE user_id=? ORDER BY orden ASC'
     ).bind('comandante').all();
-    if (!msgs.results || !msgs.results.length) return J({ error: 'Historial vacío.' });
+    if (!msgs.results || !msgs.results.length) return { error: 'Historial vacío.' };
 
     await db.prepare('DELETE FROM indice_temas').run();
 
     let procesados = 0, temasInsertados = 0, erroresIA = 0, fallbacks = 0;
     const total = msgs.results.length;
 
-    // Prueba mínima a la IA
     let iaDisponible = false;
     if (ai) {
       try {
         const prueba = await ai.run(MODELO_LIGERO, {
-          messages: [{ role: 'user', content: 'Responde solo: ok' }],
-          max_tokens: 5
+          messages: [{ role: 'user', content: 'ok' }],
+          max_tokens: 3
         });
         if (prueba && prueba.response) iaDisponible = true;
-      } catch (x) {
-        iaDisponible = false;
-      }
+      } catch (x) {}
     }
 
     for (let i = 0; i < total; i += 20) {
@@ -389,7 +599,7 @@ export async function indexarHistorial(r, e) {
         const texto = lote.map(m => `[${m.orden}] ${m.contenido.substring(0, 400)}`).join('\n\n');
         try {
           const res = await ai.run(MODELO_LIGERO, {
-            messages: [{ role: 'user', content: `De estos mensajes, extrae los TEMAS/CONCEPTOS clave. Formato JSON estricto: [{"orden": N, "temas": ["tema1", "tema2"], "peso": 5}]. Máximo 3 temas por mensaje. Temas de 1 a 3 palabras.\n\nResponde SOLO con el JSON, sin texto adicional.\n\n${texto}` }],
+            messages: [{ role: 'user', content: `De estos mensajes, extrae los TEMAS/CONCEPTOS clave. Formato JSON estricto: [{"orden": N, "temas": ["tema1", "tema2"], "peso": 5}]. Máximo 3 temas por mensaje. Temas de 1 a 3 palabras. Responde SOLO con el JSON.\n\n${texto}` }],
             max_tokens: 800,
             temperature: 0.2
           });
@@ -419,7 +629,6 @@ export async function indexarHistorial(r, e) {
         }
       }
 
-      // Fallback: keywords si la IA falló
       if (!usoTemaIA) {
         const inserciones = [];
         for (const msg of lote) {
@@ -440,17 +649,15 @@ export async function indexarHistorial(r, e) {
       procesados += lote.length;
     }
 
-    return J({
-      ok: true,
-      procesados,
-      total,
-      temas_insertados: temasInsertados,
-      modo: iaDisponible ? 'ia_con_fallback' : 'solo_keywords',
-      errores_ia: erroresIA,
-      lotes_fallback: fallbacks
-    });
+    const modo = iaDisponible ? 'ia_con_fallback' : 'solo_keywords';
+    if (kv) {
+      try { await kv.put('indice:ultimo_modo', modo, { expirationTtl: 2592000 }); } catch (x) {}
+      try { await kv.put('indice:ultimo_intento', String(Date.now()), { expirationTtl: 2592000 }); } catch (x) {}
+    }
+
+    return { ok: true, procesados, total, temas_insertados: temasInsertados, modo, errores_ia: erroresIA, lotes_fallback: fallbacks };
   } catch (x) {
-    return J({ error: x.message });
+    return { error: x.message };
   }
 }
 
