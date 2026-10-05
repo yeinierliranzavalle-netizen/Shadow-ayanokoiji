@@ -1,4 +1,4 @@
-import { MODELO, MODELO_LIGERO, MODELO_VISION, CORS, J, gDB, gKV, VENTANA, migrar } from './shared.js';
+import { MODELO, MODELO_LIGERO, MODELO_VISION, MODELO_RAZONAMIENTO, CORS, J, gDB, gKV, VENTANA, migrar } from './shared.js';
 import { subir, procesar, resumir, verProceso, retomar, cronRetomar, cronMantenimiento, resumirChats, importar, analizarArchivo, indexarHistorial, buscarPorTema } from './proc.js';
 import { estadoPresupuesto, consumir } from './presupuesto.js';
 import { detectarIntencion, construirSystemPrompt, identificarArea, AREAS } from './nucleo.js';
@@ -92,7 +92,6 @@ async function chat(r, e, c) {
       return J({ respuesta: 'Dime el área o el nombre del worker.', user_id: uid });
     }
 
-    // CHAT NORMAL
     let perfilBase = '';
     if (e.KV) {
       try {
@@ -160,7 +159,6 @@ async function chat(r, e, c) {
       } catch (x) {}
     }
 
-    // Conciencia del Comandante (qué hizo en el frontend)
     let conciencia = [];
     if (e.KV) {
       try {
@@ -485,7 +483,6 @@ export default {
 
     if (p.startsWith('/api/imagen/') && r.method === 'GET') return servirImagen(r, e);
 
-    // Chat y memoria
     if (p === '/api/chat' && r.method === 'POST') return chat(r, e, c);
     if (p === '/api/imagen' && r.method === 'POST') return rImagen(r, e, c);
     if (p === '/api/subir' && r.method === 'POST') return subir(r, e, c);
@@ -506,9 +503,8 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '8.3' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '9.0' });
 
-    // Correcciones
     if (p === '/api/corregir' && r.method === 'POST') {
       const { correccion } = await r.json();
       const db = gDB(e, 'agente');
@@ -618,7 +614,6 @@ export default {
       }
     }
 
-    // Componentes del frontend
     if (p === '/api/componentes' && r.method === 'GET') {
       return J({
         pestanas: ['chat','sandbox','shadow','stats','decisiones','ideas','bandeja'],
@@ -628,7 +623,17 @@ export default {
       });
     }
 
-    // Sandbox: simular precio y promover lección
+    // Sandbox
+    if (p === '/api/sandbox/construir' && r.method === 'POST') {
+      const m = await opcional('sandbox');
+      if (!m) return J({ error: 'sandbox.js no instalado.' });
+      return J(await m.construirShadowArise(e));
+    }
+    if (p === '/api/sandbox/simular_arranque' && r.method === 'POST') {
+      const m = await opcional('sandbox');
+      if (!m) return J({ error: 'sandbox.js no instalado.' });
+      return J(await m.simularArranque(e));
+    }
     if (p === '/api/simular_precio' && r.method === 'POST') {
       const m = await opcional('sandbox');
       if (!m) return J({ error: 'sandbox.js no instalado.' });
@@ -638,6 +643,22 @@ export default {
       const m = await opcional('sandbox');
       if (!m) return J({ error: 'sandbox.js no instalado.' });
       return m.promoverLeccion(r, e);
+    }
+    if (p === '/api/sandbox' && r.method === 'POST') {
+      const m = await opcional('sandbox');
+      if (!m) return J({ error: 'sandbox.js no instalado.' });
+      return J(await m.generarEscenario(e));
+    }
+    if (p === '/api/sandbox/decidir' && r.method === 'POST') {
+      const m = await opcional('sandbox');
+      if (!m) return J({ error: 'sandbox.js no instalado.' });
+      const { id } = await r.json();
+      return J(await m.decidir(e, id));
+    }
+    if (p === '/api/sandbox' && r.method === 'GET') {
+      const m = await opcional('sandbox');
+      if (!m) return J({ escenarios: [], lecciones: [] });
+      return m.verSandbox(r, e);
     }
 
     // Publisher
@@ -668,24 +689,6 @@ export default {
       const db = gDB(e, 'agente');
       const r1 = await db.prepare('SELECT * FROM publicaciones ORDER BY creada DESC LIMIT 30').all();
       return J({ total: r1.results.length, publicaciones: r1.results });
-    }
-
-    // Sandbox
-    if (p === '/api/sandbox' && r.method === 'POST') {
-      const m = await opcional('sandbox');
-      if (!m) return J({ error: 'sandbox.js no instalado.' });
-      return J(await m.generarEscenario(e));
-    }
-    if (p === '/api/sandbox/decidir' && r.method === 'POST') {
-      const m = await opcional('sandbox');
-      if (!m) return J({ error: 'sandbox.js no instalado.' });
-      const { id, decision } = await r.json();
-      return J(await m.decidir(e, id, decision));
-    }
-    if (p === '/api/sandbox' && r.method === 'GET') {
-      const m = await opcional('sandbox');
-      if (!m) return J({ escenarios: [], lecciones: [] });
-      return m.verSandbox(r, e);
     }
 
     // Autonomía
