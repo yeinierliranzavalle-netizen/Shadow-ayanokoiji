@@ -1,36 +1,49 @@
 import { MODELO_LIGERO, MODELO_RAZONAMIENTO, J, gDB, gKV } from './shared.js';
 import { consumir } from './presupuesto.js';
 
-// ============ CURRÍCULUM PROGRESIVO ============
-// Ayanokōji no salta a lo complejo sin dominar lo básico.
-// Cada nivel requiere que el anterior esté aprobado.
+// ============================================================
+// CURRÍCULUM REAL — Temas del proyecto, no genéricos
+// Ordenado de lo básico a lo estratégico. Con prereqs.
+// ============================================================
 const CURRICULUM = [
-  // Nivel 1: Básico — cómo funciona el sistema y cómo responder
-  { nivel: 1, tema: 'identidad', descripcion: 'Quién es, qué rol cumple, cómo debe responder', prereq: [] },
-  { nivel: 1, tema: 'comunicacion', descripcion: 'Cómo hablar al Comandante, tono, formato', prereq: [] },
-  { nivel: 1, tema: 'memoria', descripcion: 'Cómo guardar, leer y usar el historial largo', prereq: [] },
+  // Fase 0: CONSTRUCCIÓN (antes de operar, debe saber qué está construyendo)
+  { fase: 0, tema: 'construccion_shadow_arise',  descripcion: 'Planificar el frontend, la lógica, la IA publicadora, la retención y la monetización desde cero', prereq: [] },
+  { fase: 0, tema: 'arquitectura_shadow_arise',  descripcion: 'Componentes técnicos, flujo de usuario, tablas, endpoints', prereq: ['construccion_shadow_arise'] },
+  { fase: 0, tema: 'plan_ia_publicadora',        descripcion: 'Canales, formatos, frecuencia, contenido, psicología', prereq: ['arquitectura_shadow_arise'] },
+  { fase: 0, tema: 'plan_retencion',             descripcion: 'Umbrales suaves, notificaciones, memoria compartida, pecera', prereq: ['arquitectura_shadow_arise'] },
+  { fase: 0, tema: 'plan_monetizacion',          descripcion: 'Precios, suscripciones, cartas, pases, conversión', prereq: ['arquitectura_shadow_arise'] },
 
-  // Nivel 2: Sistema — cómo funciona Shadow Arise y sus componentes
-  { nivel: 2, tema: 'shadow_arise', descripcion: 'Componentes, arquitectura, flujo de usuario', prereq: ['identidad'] },
-  { nivel: 2, tema: 'usuarios', descripcion: 'Tipos de usuario, retención, conversión', prereq: ['shadow_arise'] },
-  { nivel: 2, tema: 'publicacion', descripcion: 'Canales, formatos, contenido, frecuencia', prereq: ['shadow_arise'] },
+  // Fase 1: ARRANQUE — primeros usuarios, sin presupuesto
+  { fase: 1, tema: 'arranque_sin_presupuesto',   descripcion: 'Conseguir primeros usuarios con 0 ST', prereq: ['construccion_shadow_arise'] },
+  { fase: 1, tema: 'primeros_usuarios',          descripcion: 'Retención temprana, evitar abandono', prereq: ['arranque_sin_presupuesto'] },
+  { fase: 1, tema: 'primera_conversion',         descripcion: 'Convertir gratis a pago sin presionar', prereq: ['primeros_usuarios'] },
 
-  // Nivel 3: Economía — dinero, costos, priorización
-  { nivel: 3, tema: 'monetizacion', descripcion: 'Precios, suscripciones, conversión a pago', prereq: ['usuarios'] },
-  { nivel: 3, tema: 'presupuesto', descripcion: 'Gestión de ST, priorización de gastos', prereq: ['monetizacion'] },
-  { nivel: 3, tema: 'x402', descripcion: 'Pagos automáticos, migración a modo pago', prereq: ['presupuesto'] },
+  // Fase 2: ECONOMÍA — gestión real de recursos
+  { fase: 2, tema: 'gestion_st',                 descripcion: 'Presupuesto, prioridades, cuotas recurrentes', prereq: ['primera_conversion'] },
+  { fase: 2, tema: 'priorizacion_servicios',     descripcion: 'Qué pagar primero, cuándo, por qué', prereq: ['gestion_st'] },
+  { fase: 2, tema: 'migracion_x402',             descripcion: 'Pasar servicios a pago automático', prereq: ['priorizacion_servicios'] },
+  { fase: 2, tema: 'wallet_comandante',          descripcion: 'Retener reservas, depositar el resto, no tocar', prereq: ['migracion_x402'] },
 
-  // Nivel 4: Crisis — qué hacer cuando algo falla
-  { nivel: 4, tema: 'crisis', descripcion: 'Errores, caídas, usuarios molestos, reembolsos', prereq: ['presupuesto'] },
-  { nivel: 4, tema: 'escalado', descripcion: 'Cuándo crecer, cuándo frenar, cuándo expandir', prereq: ['crisis'] },
+  // Fase 3: OPERACIÓN — mantener el sistema vivo
+  { fase: 3, tema: 'mantenimiento_sistema',      descripcion: 'Monitorear, detectar fallos, auto-reparar', prereq: ['wallet_comandante'] },
+  { fase: 3, tema: 'crisis_usuarios',            descripcion: 'Usuarios molestos, reembolsos, quejas', prereq: ['mantenimiento_sistema'] },
+  { fase: 3, tema: 'crisis_tecnicas',            descripcion: 'Caídas, errores, pérdida de datos', prereq: ['mantenimiento_sistema'] },
 
-  // Nivel 5: Estratégico — visión de largo plazo
-  { nivel: 5, tema: 'viralidad', descripcion: 'Cómo hacer que Shadow Arise se expanda solo', prereq: ['escalado'] },
-  { nivel: 5, tema: 'lore', descripcion: 'Multiverso, misterio del creador, reliquia', prereq: ['viralidad'] },
-  { nivel: 5, tema: 'etica', descripcion: 'Límites, privacidad, modo privado, respeto al usuario', prereq: ['lore'] }
+  // Fase 4: CRECIMIENTO — escalar sin romper
+  { fase: 4, tema: 'retencion_largo_plazo',      descripcion: 'Usuarios que se quedan meses', prereq: ['crisis_usuarios'] },
+  { fase: 4, tema: 'viralidad',                  descripcion: 'Contenido compartible, misterio del creador, teorías', prereq: ['retencion_largo_plazo'] },
+  { fase: 4, tema: 'escalado_canales',           descripcion: 'Cuándo añadir canal, cuándo frenar', prereq: ['viralidad'] },
+
+  // Fase 5: ESTRATÉGICO — visión de largo plazo
+  { fase: 5, tema: 'lore_multiverso',            descripcion: 'Reliquia, Creador, Shadow Kiyora, cruces entre universos', prereq: ['escalado_canales'] },
+  { fase: 5, tema: 'personajes_por_usuario',     descripcion: 'Instancias únicas, memoria compartida, confianza', prereq: ['lore_multiverso'] },
+  { fase: 5, tema: 'etica_privacidad',           descripcion: 'Límites, modo privado, transparencia', prereq: ['personajes_por_usuario'] },
+  { fase: 5, tema: 'auto_mejora_congruente',     descripcion: 'Mejorar sin desviarse del objetivo del Comandante', prereq: ['etica_privacidad'] }
 ];
 
-// ============ SERVICIOS Y COSTOS ============
+// ============================================================
+// SERVICIOS Y COSTOS (1 ST = 1 USDT)
+// ============================================================
 const SERVICIOS = {
   workers_ai:   { nombre: 'Workers AI',    costo_diario: 0.5,  prioridad: 1, critico: true },
   d1_storage:   { nombre: 'D1 Storage',    costo_diario: 0.1,  prioridad: 2, critico: true },
@@ -40,19 +53,21 @@ const SERVICIOS = {
 };
 
 const COSTO = {
-  escenario_simple: 0.03,
-  escenario_medio: 0.05,
+  escenario: 0.05,
   escenario_complejo: 0.10,
   decision: 0.03,
+  construccion: 0.20,
   publicacion: 0.02,
-  imagen: 0.15,
-  analisis: 0.05
+  analisis_historial: 0.08
 };
 
 const ESTADO_KEY = 'sandbox:estado';
 const APRENDIZAJE_KEY = 'sandbox:aprendizaje';
+const CONSTRUCCION_KEY = 'sandbox:construccion';
 
-// ============ ESTADO ECONÓMICO ============
+// ============================================================
+// ESTADO ECONÓMICO
+// ============================================================
 async function leerEstado(e) {
   const kv = gKV(e, 'agente');
   if (!kv) return null;
@@ -83,15 +98,17 @@ async function guardarEstado(e, estado) {
   } catch (x) {}
 }
 
-// ============ ESTADO DE APRENDIZAJE ============
+// ============================================================
+// ESTADO DE APRENDIZAJE
+// ============================================================
 async function leerAprendizaje(e) {
   const kv = gKV(e, 'agente');
-  if (!kv) return { dominados: [], en_progreso: [], fallos: {} };
+  if (!kv) return { dominados: [], en_progreso: [], intentos: {} };
   try {
     const raw = await kv.get(APRENDIZAJE_KEY);
     if (raw) return JSON.parse(raw);
   } catch (x) {}
-  return { dominados: [], en_progreso: [], fallos: {}, intentos: {} };
+  return { dominados: [], en_progreso: [], intentos: {} };
 }
 
 async function guardarAprendizaje(e, ap) {
@@ -102,109 +119,263 @@ async function guardarAprendizaje(e, ap) {
   } catch (x) {}
 }
 
-// ============ AUTONOMÍA: DECIDIR QUÉ ESTUDIAR ============
+// ============================================================
+// ESTADO DE CONSTRUCCIÓN (Shadow Arise desde cero)
+// ============================================================
+async function leerConstruccion(e) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { completado: false, plan: {}, componentes: {} };
+  try {
+    const raw = await kv.get(CONSTRUCCION_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (x) {}
+  return { completado: false, plan: {}, componentes: {} };
+}
+
+async function guardarConstruccion(e, c) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return;
+  try {
+    await kv.put(CONSTRUCCION_KEY, JSON.stringify(c), { expirationTtl: 31536000 });
+  } catch (x) {}
+}
+
+// ============================================================
+// SELECCIÓN AUTÓNOMA DEL SIGUIENTE TEMA
+// ============================================================
 async function decidirSiguienteTema(e) {
   const ap = await leerAprendizaje(e);
-  // Buscar el tema más básico que aún no domina y cuyos prereqs estén cumplidos
   for (const item of CURRICULUM) {
     if (ap.dominados.includes(item.tema)) continue;
     const prereqsCumplidos = item.prereq.every(p => ap.dominados.includes(p));
-    if (prereqsCumplidos) {
-      return item;
-    }
+    if (prereqsCumplidos) return item;
   }
-  return null; // Ya dominó todo
+  return null;
 }
 
-// ============ GENERAR ESCENARIO AUTÓNOMO ============
+// ============================================================
+// LEER HISTORIAL LARGO POR TEMA
+// Busca en indice_temas los mensajes relevantes al tema.
+// ============================================================
+async function leerHistorialPorTema(e, tema) {
+  const db = gDB(e, 'agente');
+  if (!db) return '';
+  try {
+    // Buscar mensajes en el índice relacionados con el tema
+    const palabrasClave = tema.split('_').filter(p => p.length > 3);
+    if (!palabrasClave.length) return '';
+
+    let todosLosOrdenes = new Set();
+    for (const p of palabrasClave) {
+      try {
+        const r = await db.prepare(
+          'SELECT DISTINCT mensaje_orden FROM indice_temas WHERE tema LIKE ? LIMIT 30'
+        ).bind('%' + p + '%').all();
+        if (r.results) r.results.forEach(x => todosLosOrdenes.add(x.mensaje_orden));
+      } catch (x) {}
+    }
+
+    if (!todosLosOrdenes.size) {
+      // Fallback: búsqueda directa en historial
+      const r = await db.prepare(
+        'SELECT contenido FROM historial_largo WHERE contenido LIKE ? ORDER BY orden DESC LIMIT 10'
+      ).bind('%' + palabrasClave[0] + '%').all();
+      if (r.results) return r.results.map(x => x.contenido).join('\n\n---\n\n');
+      return '';
+    }
+
+    const ords = Array.from(todosLosOrdenes).slice(0, 15);
+    const ph = ords.map(() => '?').join(',');
+    const msgs = await db.prepare(
+      'SELECT contenido FROM historial_largo WHERE orden IN (' + ph + ') ORDER BY orden ASC'
+    ).bind(...ords).all();
+
+    if (!msgs.results || !msgs.results.length) return '';
+    return msgs.results.map(m => m.contenido).join('\n\n---\n\n').substring(0, 8000);
+  } catch (x) {
+    return '';
+  }
+}
+
+// ============================================================
+// FASE 0: CONSTRUIR SHADOW ARISE DESDE CERO
+// Ayanokōji planifica el proyecto completo antes de operar.
+// ============================================================
+export async function construirShadowArise(e) {
+  const ai = e.ayanokoji_IA;
+  const db = gDB(e, 'agente');
+  if (!ai || !db) return { error: 'IA o D1 no disponible.' };
+
+  const estado = await leerEstado(e);
+  if (estado.st < COSTO.construccion) {
+    return { ok: true, mensaje: 'Sin ST para construir. Esperando generación inicial.' };
+  }
+
+  const construccion = await leerConstruccion(e);
+  const ap = await leerAprendizaje(e);
+
+  // Leer todo lo planeado sobre Shadow Arise
+  const historialConstruccion = await leerHistorialPorTema(e, 'shadow_arise');
+  const historialPublicadora = await leerHistorialPorTema(e, 'publicadora');
+  const historialRetencion = await leerHistorialPorTema(e, 'retencion');
+  const historialMonetizacion = await leerHistorialPorTema(e, 'monetizacion');
+
+  const material = [
+    historialConstruccion ? 'CONSTRUCCIÓN:\n' + historialConstruccion : '',
+    historialPublicadora ? 'PUBLICADORA:\n' + historialPublicadora : '',
+    historialRetencion ? 'RETENCIÓN:\n' + historialRetencion : '',
+    historialMonetizacion ? 'MONETIZACIÓN:\n' + historialMonetizacion : ''
+  ].filter(Boolean).join('\n\n====\n\n');
+
+  const prompt = `Eres Ayanokōji Digital. Tu tarea ahora NO es operar. Es CONSTRUIR Shadow Arise desde cero, de forma autónoma.
+
+MATERIAL DEL HISTORIAL LARGO (lo que el Comandante y tú ya planeaste en meses de conversación):
+${material || 'Aún no hay material indexado. Usa lo que sabes del proyecto.'}
+
+INSTRUCCIONES:
+Diseña y documenta el plan completo de Shadow Arise. No es un escenario. Es tu blueprint real. Responde con estas secciones exactas:
+
+### 1. FRONTEND
+Describe la interfaz: pantallas, colores (con justificación psicológica), flujo de usuario, elementos visuales clave (pecera, emojis, cartas).
+
+### 2. ARQUITECTURA TÉCNICA
+Componentes: qué tablas, qué endpoints, cómo se conecta el chat, cómo se guarda la memoria por usuario.
+
+### 3. IA PUBLICADORA
+Canales, formatos, frecuencia, tipos de contenido, tono por canal, psicología aplicada.
+
+### 4. RETENCIÓN
+Cómo evitar abandono: notificaciones, umbrales suaves, memoria compartida entre personajes, eventos, recompensas.
+
+### 5. MONETIZACIÓN
+Precios, suscripciones, cartas, pases, cómo convertir gratis a pago sin presionar.
+
+### 6. MULTIVERSO Y LORE
+Reliquia, Creador, Shadow Kiyora, cruces entre universos, cómo se manifiesta en el chat.
+
+### 7. PRIMEROS 30 DÍAS
+Plan paso a paso de qué hacer cuando Shadow Arise salga al mundo: qué publicar, cuándo, en qué canal, cómo medir éxito.
+
+Sé específico. Sé real. No inventes cosas que no estén alineadas al Comandante. Máximo 2000 palabras.`;
+
+  try {
+    const res = await ai.run(MODELO_RAZONAMIENTO, {
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 2500,
+      temperature: 0.6
+    });
+
+    const plan = res.response || '';
+    if (plan.length < 200) return { error: 'Plan vacío o muy corto.' };
+
+    construccion.plan = { texto: plan, fecha: Date.now() };
+    construccion.completado = true;
+    await guardarConstruccion(e, construccion);
+
+    // Cobrar
+    estado.st -= COSTO.construccion;
+    estado.gastos_totales += COSTO.construccion;
+    await guardarEstado(e, estado);
+
+    // Marcar temas de fase 0 como dominados
+    if (!ap.dominados.includes('construccion_shadow_arise')) ap.dominados.push('construccion_shadow_arise');
+    if (!ap.dominados.includes('arquitectura_shadow_arise')) ap.dominados.push('arquitectura_shadow_arise');
+    if (!ap.dominados.includes('plan_ia_publicadora')) ap.dominados.push('plan_ia_publicadora');
+    if (!ap.dominados.includes('plan_retencion')) ap.dominados.push('plan_retencion');
+    if (!ap.dominados.includes('plan_monetizacion')) ap.dominados.push('plan_monetizacion');
+    await guardarAprendizaje(e, ap);
+
+    // Guardar en D1 también
+    try {
+      await db.prepare('INSERT INTO contexto(fecha,resumen,fases,fuente) VALUES(?,?,?,?)')
+        .bind(Date.now(), plan, JSON.stringify([]), 'sandbox_construccion').run();
+    } catch (x) {}
+
+    return { ok: true, mensaje: 'Shadow Arise construido y documentado.', plan, st_actual: estado.st };
+  } catch (x) {
+    return { error: 'Error IA: ' + x.message };
+  }
+}
+
+// ============================================================
+// GENERAR ESCENARIO (SIN OPCIONES A/B/C)
+// Lee el historial largo por tema y construye un escenario real.
+// ============================================================
 export async function generarEscenario(e, tipoForzado) {
   const ai = e.ayanokoji_IA, db = gDB(e, 'agente');
   if (!ai || !db) return { error: 'IA o D1 no disponible.' };
 
-  // Si no hay tipo forzado, decidir por sí mismo según currículum
-  let tema, nivel, costoEscenario;
+  // Si aún no ha construido Shadow Arise, hacerlo primero
+  const construccion = await leerConstruccion(e);
+  if (!construccion.completado) {
+    return await construirShadowArise(e);
+  }
+
+  // Selección autónoma del tema
+  let tema, fase, costoEscenario;
   if (tipoForzado) {
     tema = tipoForzado;
-    nivel = 3;
-    costoEscenario = COSTO.escenario_medio;
+    fase = 3;
+    costoEscenario = COSTO.escenario;
   } else {
     const siguiente = await decidirSiguienteTema(e);
-    if (!siguiente) {
-      return { ok: true, mensaje: 'Currículum completado. Ayanokōji ha dominado todos los temas.' };
-    }
+    if (!siguiente) return { ok: true, mensaje: 'Currículum completado. Ayanokōji domina todos los temas.' };
     tema = siguiente.tema;
-    nivel = siguiente.nivel;
-    costoEscenario = nivel <= 2 ? COSTO.escenario_simple : nivel <= 3 ? COSTO.escenario_medio : COSTO.escenario_complejo;
+    fase = siguiente.fase;
+    costoEscenario = fase >= 4 ? COSTO.escenario_complejo : COSTO.escenario;
   }
 
-  // Verificar presupuesto
   const estado = await leerEstado(e);
   if (estado.st < costoEscenario) {
-    // Si no hay ST, simular generación de ingresos primero
     if (estado.usuarios === 0) {
       await simularArranque(e);
-      return { ok: true, mensaje: 'Sin ST. Ejecutada simulación de arranque para generar ingresos iniciales.' };
+      return { ok: true, mensaje: 'Sin ST. Ejecutada simulación de arranque.' };
     }
-    return { ok: true, mensaje: 'Sin ST suficiente. Esperando a que la economía del sandbox genere ingresos.' };
+    return { ok: true, mensaje: 'Sin ST suficiente. Esperando ingresos del sandbox.' };
   }
 
-  // Cargar contexto y estrategias
-  let ctx = '';
-  try {
-    const c = await db.prepare('SELECT resumen FROM contexto ORDER BY fecha DESC LIMIT 1').first();
-    if (c && c.resumen) ctx = c.resumen.substring(0, 2000);
-  } catch (x) {}
+  // Leer el historial largo por tema — esto es lo que faltaba
+  const material = await leerHistorialPorTema(e, tema);
+  const planConstruccion = construccion.plan.texto ? construccion.plan.texto.substring(0, 3000) : '';
 
-  let estrategias = [];
-  try {
-    const es = await db.prepare("SELECT nombre, tipo, contenido FROM estrategias WHERE estado='activa' ORDER BY prioridad ASC LIMIT 5").all();
-    if (es.results) estrategias = es.results;
-  } catch (x) {}
+  const prompt = `Eres Ayanokōji Digital entrenando en tu sandbox autónomo. Tema a practicar: "${tema}" (fase ${fase}).
 
-  const estrTexto = estrategias.length
-    ? estrategias.map(es => `[${es.tipo}] ${es.nombre}: ${es.contenido}`).join('\n')
-    : 'Sin estrategias cargadas.';
-
-  // Prompt según nivel
-  const promptBase = `Eres Ayanokōji Digital. Estás entrenando en tu sandbox autónomo. Tu tarea es generar un escenario realista para practicar el tema "${tema}" (nivel ${nivel}/5).
-
-ESTADO ACTUAL:
-- Presupuesto: ${estado.st.toFixed(2)} ST (1 ST = 1 USDT)
+CONTEXTO ECONÓMICO:
+- Presupuesto: ${estado.st.toFixed(2)} ST
 - Usuarios: ${estado.usuarios} (${estado.usuarios_pago} de pago)
-- Día de simulación: ${estado.dia_simulacion}
+- Día: ${estado.dia_simulacion}
 
-CONTEXTO DEL PROYECTO:
-${ctx}
+PLAN DE SHADOW ARISE (tu blueprint):
+${planConstruccion}
 
-ESTRATEGIAS ACTIVAS:
-${estrTexto}
+MATERIAL DEL HISTORIAL LARGO (lo que el Comandante y tú ya planearon sobre este tema):
+${material || 'Aún sin material indexado sobre este tema. Usa lo que sepas del proyecto.'}
 
 INSTRUCCIONES:
-- El escenario debe estar alineado al objetivo del Comandante: construir Shadow Arise, retener usuarios, generar ingresos, y no desviarse.
-- Debe tener consecuencias económicas reales (ST ganados o perdidos, usuarios ganados o perdidos).
-- Debe tener 3 opciones concretas.
-- Debe ser específico, no genérico.
-- ${nivel <= 2 ? 'Sé simple y directo. Enseña lo básico.' : nivel <= 3 ? 'Incluye matices económicos y de usuario.' : 'Es un escenario complejo. Incluye variables múltiples y consecuencias profundas.'}
+Genera un escenario realista para practicar "${tema}".
 
-Formato:
-CONTEXTO: (situación concreta)
-PREGUNTA: (qué debe decidir)
-OPCIONES:
-1. (opción con costo/beneficio en ST)
-2. (opción con costo/beneficio en ST)
-3. (opción con costo/beneficio en ST)`;
+REGLAS IMPORTANTES:
+- NO des opciones A/B/C. El Comandante quiere que TÚ decidas, no que elijas de una lista.
+- El escenario debe ser específico y basado en el material del historial largo.
+- Debe tener consecuencias económicas reales en ST, usuarios y retención.
+- Debe ser congruente con el objetivo del Comandante.
+- ${fase <= 1 ? 'Simple y directo. Aprende lo básico.' : fase <= 2 ? 'Con matices económicos y de usuario.' : fase <= 3 ? 'Complejo. Variables múltiples.' : 'Muy complejo. Estratégico y de largo plazo.'}
+
+FORMATO EXACTO:
+SITUACIÓN: (describe la situación concreta con datos, contexto, cifras)
+DECISIÓN REQUERIDA: (qué problema debe resolver Ayanokōji, sin opciones)
+CONSECUENCIAS POTENCIALES: (qué se juega en ST, usuarios, alineación)`;
 
   try {
     const res = await ai.run(MODELO_RAZONAMIENTO, {
-      messages: [{ role: 'user', content: promptBase }],
-      max_tokens: 700,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 900,
       temperature: 0.7
     });
 
     const contenido = res.response || '';
-    if (contenido.length < 50) return { error: 'Escenario vacío.' };
+    if (contenido.length < 100) return { error: 'Escenario vacío.' };
 
-    // Cobrar
     estado.st -= costoEscenario;
     estado.gastos_totales += costoEscenario;
     await guardarEstado(e, estado);
@@ -213,19 +384,20 @@ OPCIONES:
       'INSERT INTO sandbox_escenarios(tipo,contexto,creado) VALUES(?,?,?)'
     ).bind(tema, contenido, Date.now()).run();
 
-    // Marcar como en progreso
     const ap = await leerAprendizaje(e);
     if (!ap.en_progreso.includes(tema)) ap.en_progreso.push(tema);
     ap.intentos[tema] = (ap.intentos[tema] || 0) + 1;
     await guardarAprendizaje(e, ap);
 
-    return { ok: true, id: r.meta.last_row_id, tipo: tema, nivel, escenario: contenido, st_actual: estado.st };
+    return { ok: true, id: r.meta.last_row_id, tipo: tema, fase, escenario: contenido, st_actual: estado.st };
   } catch (x) {
     return { error: 'Error IA: ' + x.message };
   }
 }
 
-// ============ DECIDIR Y AUTOEVALUAR ============
+// ============================================================
+// DECIDIR SIN OPCIONES — Ayanokōji encuentra la solución solo
+// ============================================================
 export async function decidir(e, escenarioId) {
   const ai = e.ayanokoji_IA, db = gDB(e, 'agente');
   if (!ai || !db) return { error: 'IA o D1 no disponible.' };
@@ -236,44 +408,49 @@ export async function decidir(e, escenarioId) {
   const estado = await leerEstado(e);
   if (estado.st < COSTO.decision) return { error: 'Sin ST para decidir.' };
 
+  const construccion = await leerConstruccion(e);
+  const plan = construccion.plan.texto ? construccion.plan.texto.substring(0, 2000) : '';
+
   let lecciones = [];
   try {
     const ls = await db.prepare('SELECT area, leccion FROM sandbox_lecciones ORDER BY creada DESC LIMIT 10').all();
     if (ls.results) lecciones = ls.results;
   } catch (x) {}
+  const lecTexto = lecciones.length ? lecciones.map(l => `[${l.area}] ${l.leccion}`).join('\n') : 'Sin lecciones previas.';
 
-  const lecTexto = lecciones.length
-    ? lecciones.map(l => `[${l.area}] ${l.leccion}`).join('\n')
-    : 'Sin lecciones previas.';
-
-  // Decisión con DeepSeek (razonamiento)
+  // Decisión: sin opciones, él genera la solución
   const resDec = await ai.run(MODELO_RAZONAMIENTO, {
-    messages: [{ role: 'user', content: `Eres Ayanokōji Digital. Presupuesto: ${estado.st.toFixed(2)} ST. Usuarios: ${estado.usuarios}.
+    messages: [{ role: 'user', content: `Eres Ayanokōji Digital. Estás operando Shadow Arise en modo simulación.
+
+PLAN DE SHADOW ARISE:
+${plan}
 
 LECCIONES PREVIAS:
 ${lecTexto}
 
+ESTADO: ${estado.st.toFixed(2)} ST, ${estado.usuarios} usuarios, ${estado.usuarios_pago} de pago.
+
 ESCENARIO:
 ${esc.contexto}
 
-Toma una decisión. Considera el costo, el beneficio y la alineación con el objetivo del Comandante. Responde SOLO con la decisión y una justificación breve (máx 100 palabras).` }],
-    max_tokens: 350,
+Encuentra TÚ la solución. No hay opciones. Decide y explica brevemente por qué. Máximo 200 palabras.` }],
+    max_tokens: 500,
     temperature: 0.6
   });
-  const decision = resDec.response || 'Sin decisión.';
+  const decision = resDec.response || '';
 
-  // Simular resultado
+  // Simulación de consecuencias
   const resSim = await ai.run(MODELO_RAZONAMIENTO, {
-    messages: [{ role: 'user', content: `Escenario: ${esc.contexto}\n\nDecisión: "${decision}"\n\nSimula el resultado realista. Consecuencias en ST, usuarios, ingresos, retención. ¿Funciona o no? Explica el porqué. 150 palabras.` }],
-    max_tokens: 400,
+    messages: [{ role: 'user', content: `Escenario: ${esc.contexto}\n\nDecisión tomada: "${decision}"\n\nSimula el resultado realista. Consecuencias en ST, usuarios, retención, alineación con el objetivo del Comandante. ¿Funciona? Explica el porqué. 200 palabras.` }],
+    max_tokens: 500,
     temperature: 0.7
   });
   const resultado = resSim.response || '';
 
   // Autoevaluación
   const resEval = await ai.run(MODELO_RAZONAMIENTO, {
-    messages: [{ role: 'user', content: `Analiza esta decisión y su resultado. ¿Fue la mejor opción? ¿Qué alternativa habría sido mejor? ¿Qué lección se extrae? Máximo 200 palabras.\n\nEscenario: ${esc.contexto}\n\nDecisión: ${decision}\n\nResultado: ${resultado}` }],
-    max_tokens: 500,
+    messages: [{ role: 'user', content: `Analiza esta decisión y su resultado. ¿Fue la mejor opción? ¿Qué alternativa habría sido mejor? ¿Qué lección se extrae para futuros escenarios? Máximo 250 palabras.\n\nEscenario: ${esc.contexto}\n\nDecisión: ${decision}\n\nResultado: ${resultado}` }],
+    max_tokens: 600,
     temperature: 0.5
   });
   const autoevaluacion = resEval.response || '';
@@ -282,17 +459,14 @@ Toma una decisión. Considera el costo, el beneficio y la alineación con el obj
   estado.st -= COSTO.decision;
   estado.gastos_totales += COSTO.decision;
 
-  // Aplicar consecuencias económicas reales extraídas del resultado
+  // Aplicar consecuencias reales
   const mUsuarios = resultado.match(/(\d+)\s*(nuevos usuarios|usuarios nuevos|usuarios ganados)/i);
   const mSt = resultado.match(/(\d+(?:\.\d+)?)\s*ST/i);
   if (mUsuarios) estado.usuarios += parseInt(mUsuarios[1]);
-  if (mSt) {
+  if (mSt && /gan|obtuv|recib|ingres/i.test(resultado)) {
     const cantidad = parseFloat(mSt[1]);
-    // Si el resultado describe ganancia, sumar; si describe pérdida, no sumar
-    if (/gan|obtuv|recib|ingres/i.test(resultado)) {
-      estado.st += cantidad;
-      estado.ingresos_totales += cantidad;
-    }
+    estado.st += cantidad;
+    estado.ingresos_totales += cantidad;
   }
   await guardarEstado(e, estado);
 
@@ -309,9 +483,9 @@ Toma una decisión. Considera el costo, el beneficio y la alineación con el obj
       .bind('sandbox_' + esc.tipo, esc.contexto.substring(0, 500), decision, resultado.substring(0, 500), 0, autoevaluacion.substring(0, 500), 1, Date.now()).run();
   } catch (x) {}
 
-  // Evaluar si domina el tema (puntuación alta)
+  // Dominio
   const ap = await leerAprendizaje(e);
-  if (/excelente|correcta|acertada|la mejor opción|bien ejecutado/i.test(autoevaluacion)) {
+  if (/excelente|correcta|acertada|la mejor opción|bien ejecutado|óptima/i.test(autoevaluacion)) {
     if (!ap.dominados.includes(esc.tipo)) ap.dominados.push(esc.tipo);
     ap.en_progreso = ap.en_progreso.filter(t => t !== esc.tipo);
   }
@@ -320,24 +494,34 @@ Toma una decisión. Considera el costo, el beneficio y la alineación con el obj
   return { ok: true, escenario_id: escenarioId, decision, resultado, autoevaluacion, st_actual: estado.st, dominado: ap.dominados.includes(esc.tipo) };
 }
 
-// ============ SIMULACIÓN DE ARRANQUE ============
+// ============================================================
+// SIMULACIÓN DE ARRANQUE (solo si ya construyó)
+// ============================================================
 export async function simularArranque(e) {
   const ai = e.ayanokoji_IA;
   if (!ai) return { error: 'IA no disponible.' };
 
+  const construccion = await leerConstruccion(e);
+  if (!construccion.completado) return await construirShadowArise(e);
+
   const estado = await leerEstado(e);
+  const plan = construccion.plan.texto ? construccion.plan.texto.substring(0, 2500) : '';
 
   const res = await ai.run(MODELO_RAZONAMIENTO, {
-    messages: [{ role: 'user', content: `Eres Ayanokōji Digital. Shadow Arise se lanza con 0 ST de presupuesto. El sistema está listo: chatbot con personajes de anime, multiverso, lore, pagos con USDT.
+    messages: [{ role: 'user', content: `Eres Ayanokōji Digital. Shadow Arise acaba de salir al mundo con 0 ST.
 
-Simula cómo atraerías los primeros usuarios sin gastar nada:
-- ¿Cuántos usuarios llegaron en la primera semana? (realista: 5-200)
-- ¿Cuántos pagaron? (realista: 0-10%)
+TU PLAN:
+${plan}
+
+Simula los primeros 7 días:
+- ¿Cuántos usuarios llegaron? (realista para un proyecto nuevo)
+- ¿Cuántos pagaron?
 - ¿Cuánto ST generaron?
-- ¿Qué canal funcionó mejor y por qué?
+- ¿Qué canal funcionó mejor?
+- ¿Qué falló y cómo lo resolviste?
 
-Sé realista. Es un proyecto nuevo sin audiencia previa. Máximo 300 palabras.` }],
-    max_tokens: 600,
+Sé realista, no optimista. Máximo 400 palabras.` }],
+    max_tokens: 800,
     temperature: 0.7
   });
 
@@ -345,7 +529,7 @@ Sé realista. Es un proyecto nuevo sin audiencia previa. Máximo 300 palabras.` 
   const mTotal = simulacion.match(/(\d+)\s*usuarios/i);
   const mPago = simulacion.match(/(\d+)\s*(de pago|pagaron|pagando)/i);
 
-  const nuevosUsuarios = mTotal ? Math.min(parseInt(mTotal[1]), 200) : 5;
+  const nuevosUsuarios = mTotal ? Math.min(parseInt(mTotal[1]), 300) : 5;
   const nuevosPago = mPago ? Math.min(parseInt(mPago[1]), nuevosUsuarios) : 0;
   const stGenerados = nuevosPago * 10;
 
@@ -356,25 +540,17 @@ Sé realista. Es un proyecto nuevo sin audiencia previa. Máximo 300 palabras.` 
   estado.dia_simulacion += 1;
   await guardarEstado(e, estado);
 
-  return {
-    ok: true,
-    simulacion,
-    nuevos_usuarios: nuevosUsuarios,
-    nuevos_pago: nuevosPago,
-    st_generados: stGenerados,
-    st_actual: estado.st,
-    usuarios_totales: estado.usuarios
-  };
+  return { ok: true, simulacion, nuevos_usuarios: nuevosUsuarios, nuevos_pago: nuevosPago, st_generados: stGenerados, st_actual: estado.st, usuarios_totales: estado.usuarios };
 }
 
-// ============ PRIORIZACIÓN AUTÓNOMA DE GASTOS ============
+// ============================================================
+// PRIORIZACIÓN AUTÓNOMA
+// ============================================================
 export async function priorizarGastos(e) {
-  const db = gDB(e, 'agente');
   const ai = e.ayanokoji_IA;
-  if (!db || !ai) return { error: 'IA o D1 no disponible.' };
-
+  if (!ai) return { error: 'IA no disponible.' };
   const estado = await leerEstado(e);
-  if (estado.st < 0.5) return { ok: true, mensaje: 'Presupuesto insuficiente para priorizar.' };
+  if (estado.st < 0.5) return { ok: true, mensaje: 'Presupuesto insuficiente.' };
 
   const res = await ai.run(MODELO_RAZONAMIENTO, {
     messages: [{ role: 'user', content: `Ayanokōji Digital tiene ${estado.st.toFixed(2)} ST.
@@ -382,78 +558,26 @@ export async function priorizarGastos(e) {
 Servicios disponibles:
 ${Object.entries(SERVICIOS).map(([k, v]) => `- ${v.nombre}: ${v.costo_diario} ST/día (prioridad ${v.prioridad}${v.critico ? ', CRÍTICO' : ''})`).join('\n')}
 
-¿Qué servicios activar para que el presupuesto dure al menos 7 días? Responde con lista y justificación breve.` }],
+¿Qué servicios activar para que el presupuesto dure al menos 7 días? Justifica brevemente.` }],
     max_tokens: 400,
     temperature: 0.5
   });
 
-  const plan = res.response || '';
-  return { ok: true, plan, st_actual: estado.st };
+  return { ok: true, plan: res.response || '', st_actual: estado.st };
 }
 
-// ============ CRON AUTÓNOMO DEL SANDBOX ============
-// Se ejecuta solo. Ayanokōji decide qué hacer en cada ciclo.
-export async function cronSandbox(e) {
-  const db = gDB(e, 'agente');
-  if (!db) return;
-  if (!await consumir(e, 'sandbox')) return;
-
-  const estado = await leerEstado(e);
-  if (!estado) return;
-
-  // 1. Si es el primer día y no hay usuarios, simular arranque
-  if (estado.dia_simulacion === 0 && estado.usuarios === 0) {
-    await simularArranque(e);
-    return;
-  }
-
-  // 2. Si no hay ST pero hay usuarios, simular crecimiento
-  if (estado.st < 0.5 && estado.usuarios > 0 && estado.dia_simulacion % 3 === 0) {
-    await simularCrecimiento(e);
-    return;
-  }
-
-  // 3. Si tiene ST suficiente, priorizar gastos
-  if (estado.st > 2 && estado.dia_simulacion % 5 === 0) {
-    try { await priorizarGastos(e); } catch (x) {}
-  }
-
-  // 4. Procesar escenarios pendientes
-  const escPend = await db.prepare("SELECT id FROM sandbox_escenarios WHERE completado IS NULL LIMIT 2").all();
-  if (escPend.results && escPend.results.length) {
-    for (const esc of escPend.results) {
-      if (estado.st >= COSTO.decision) await decidir(e, esc.id);
-    }
-    return;
-  }
-
-  // 5. Generar uno nuevo (decidiendo el tema por sí mismo)
-  if (estado.st >= COSTO.escenario_simple) {
-    const g = await generarEscenario(e);
-    if (!g.error && g.id) await decidir(e, g.id);
-  }
-
-  // 6. Avanzar día de simulación
-  estado.dia_simulacion += 1;
-  await guardarEstado(e, estado);
-}
-
-// ============ SIMULAR CRECIMIENTO ORGÁNICO ============
+// ============================================================
+// SIMULAR CRECIMIENTO ORGÁNICO
+// ============================================================
 async function simularCrecimiento(e) {
   const ai = e.ayanokoji_IA;
   if (!ai) return;
   const estado = await leerEstado(e);
 
   const res = await ai.run(MODELO_RAZONAMIENTO, {
-    messages: [{ role: 'user', content: `Shadow Arise tiene ${estado.usuarios} usuarios (${estado.usuarios_pago} de pago) y ${estado.st.toFixed(2)} ST. El día ${estado.dia_simulacion} de simulación.
+    messages: [{ role: 'user', content: `Shadow Arise: ${estado.usuarios} usuarios (${estado.usuarios_pago} pago), ${estado.st.toFixed(2)} ST, día ${estado.dia_simulacion}.
 
-Simula el crecimiento orgánico de esta semana:
-- ¿Cuántos usuarios nuevos llegaron? (realista)
-- ¿Cuántos se convirtieron a pago?
-- ¿Cuánto ST generaron?
-- ¿Hubo abandono? ¿Cuántos?
-
-Máximo 200 palabras.` }],
+Simula el crecimiento orgánico de esta semana. Sé realista. 200 palabras.` }],
     max_tokens: 400,
     temperature: 0.7
   });
@@ -472,7 +596,64 @@ Máximo 200 palabras.` }],
   await guardarEstado(e, estado);
 }
 
-// ============ VER SANDBOX ============
+// ============================================================
+// CRON AUTÓNOMO — él decide qué hacer
+// ============================================================
+export async function cronSandbox(e) {
+  const db = gDB(e, 'agente');
+  if (!db) return;
+  if (!await consumir(e, 'sandbox')) return;
+
+  const estado = await leerEstado(e);
+  if (!estado) return;
+
+  const construccion = await leerConstruccion(e);
+
+  // 1. Primero construir Shadow Arise si no lo ha hecho
+  if (!construccion.completado) {
+    await construirShadowArise(e);
+    return;
+  }
+
+  // 2. Si no hay usuarios, simular arranque
+  if (estado.usuarios === 0) {
+    await simularArranque(e);
+    return;
+  }
+
+  // 3. Si no hay ST pero hay usuarios, simular crecimiento
+  if (estado.st < 0.5 && estado.usuarios > 0 && estado.dia_simulacion % 3 === 0) {
+    await simularCrecimiento(e);
+    return;
+  }
+
+  // 4. Cada 5 días, priorizar gastos
+  if (estado.st > 2 && estado.dia_simulacion % 5 === 0) {
+    try { await priorizarGastos(e); } catch (x) {}
+  }
+
+  // 5. Procesar escenarios pendientes
+  const escPend = await db.prepare("SELECT id FROM sandbox_escenarios WHERE completado IS NULL LIMIT 2").all();
+  if (escPend.results && escPend.results.length) {
+    for (const esc of escPend.results) {
+      if (estado.st >= COSTO.decision) await decidir(e, esc.id);
+    }
+    return;
+  }
+
+  // 6. Generar uno nuevo (eligiendo tema solo)
+  if (estado.st >= COSTO.escenario) {
+    const g = await generarEscenario(e);
+    if (!g.error && g.id) await decidir(e, g.id);
+  }
+
+  estado.dia_simulacion += 1;
+  await guardarEstado(e, estado);
+}
+
+// ============================================================
+// VER SANDBOX
+// ============================================================
 export async function verSandbox(r, e) {
   try {
     const db = gDB(e, 'agente');
@@ -482,11 +663,14 @@ export async function verSandbox(r, e) {
     const stats = await db.prepare("SELECT COUNT(*) as total, SUM(CASE WHEN completado IS NOT NULL THEN 1 ELSE 0 END) as completados FROM sandbox_escenarios").first();
     const estado = await leerEstado(e);
     const ap = await leerAprendizaje(e);
+    const construccion = await leerConstruccion(e);
     return J({
       stats: stats || { total: 0, completados: 0 },
       estado_economico: estado,
       aprendizaje: ap,
       curriculum_actual: await decidirSiguienteTema(e),
+      construccion_completada: construccion.completado,
+      plan_shadow_arise: construccion.plan.texto ? construccion.plan.texto.substring(0, 3000) : null,
       escenarios: esc.results || [],
       lecciones: lec.results || []
     });
@@ -495,7 +679,9 @@ export async function verSandbox(r, e) {
   }
 }
 
-// ============ SIMULACIÓN DE PRECIO ============
+// ============================================================
+// SIMULACIÓN DE PRECIO
+// ============================================================
 export async function simularPrecio(r, e) {
   try {
     const b = await r.json();
@@ -515,7 +701,9 @@ export async function simularPrecio(r, e) {
   }
 }
 
-// ============ PROMOVER LECCIÓN ============
+// ============================================================
+// PROMOVER LECCIÓN A ESTRATEGIA
+// ============================================================
 export async function promoverLeccion(r, e) {
   try {
     const b = await r.json();
