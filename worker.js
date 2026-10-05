@@ -1,5 +1,5 @@
 import { MODELO, MODELO_LIGERO, MODELO_VISION, MODELO_RAZONAMIENTO, CORS, J, gDB, gKV, VENTANA, migrar } from './shared.js';
-import { subir, procesar, resumir, verProceso, retomar, cronRetomar, cronMantenimiento, resumirChats, importar, analizarArchivo, indexarHistorial, buscarPorTema } from './proc.js';
+import { subir, procesar, resumir, verProceso, retomar, cronRetomar, cronAutonomo, resumirChats, importar, analizarArchivo, indexarHistorial, buscarPorTema } from './proc.js';
 import { estadoPresupuesto, consumir } from './presupuesto.js';
 import { detectarIntencion, construirSystemPrompt, identificarArea, AREAS } from './nucleo.js';
 
@@ -18,7 +18,76 @@ const MAX_CHARS_MENSAJE = 1200;
 const MAX_CHARS_PERFIL_BASE = 3000;
 const MAX_CHARS_CONTEXTO = 3000;
 
-// ============ CHAT ============
+// ============================================================
+// MONITOR REAL DE CLOUDFLARE — Datos exactos, no estimaciones
+// ============================================================
+async function consultarUsoReal(e) {
+  const accountId = e.CF_ACCOUNT_ID;
+  const token = e.CF_ANALYTICS_TOKEN;
+  if (!accountId || !token) {
+    return { ok: false, error: 'Falta CF_ACCOUNT_ID o CF_ANALYTICS_TOKEN.' };
+  }
+
+  const ahora = new Date();
+  const inicioDia = new Date(Date.UTC(ahora.getUTCFullYear(), ahora.getUTCMonth(), ahora.getUTCDate())).toISOString();
+
+  // Query GraphQL para Workers requests
+  const query = `
+    query GetUsage($accountTag: string, $datetimeStart: string) {
+      viewer {
+        accounts(filter: {accountTag: $accountTag}) {
+          workersInvocationsAdaptive(limit: 100, filter: {
+            datetime_geq: $datetimeStart
+          }) {
+            sum { requests errors subrequests }
+            quantiles { cpuTimeP50 cpuTimeP99 }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const r = await fetch('https://api.cloudflare.com/client/v4/graphql', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        query: query,
+        variables: { accountTag: accountId, datetimeStart: inicioDia }
+      })
+    });
+
+    const data = await r.json();
+    if (!data.data || !data.data.viewer || !data.data.viewer.accounts) {
+      return { ok: false, error: 'Respuesta GraphQL vacía.', raw: data };
+    }
+
+    const groups = data.data.viewer.accounts[0].workersInvocationsAdaptive || [];
+    let requests = 0, errores = 0, subrequests = 0;
+    for (const g of groups) {
+      requests += g.sum?.requests || 0;
+      errores += g.sum?.errors || 0;
+      subrequests += g.sum?.subrequests || 0;
+    }
+
+    return {
+      ok: true,
+      workers_requests: requests,
+      workers_errores: errores,
+      workers_subrequests: subrequests,
+      consultado_en: Date.now()
+    };
+  } catch (x) {
+    return { ok: false, error: x.message };
+  }
+}
+
+// ============================================================
+// CHAT
+// ============================================================
 async function chat(r, e, c) {
   try {
     const b = await r.json();
@@ -471,7 +540,9 @@ async function erroresTardios(r, e) {
   } catch (x) { return J({ error: x.message }); }
 }
 
-// ============ EXPORT PRINCIPAL ============
+// ============================================================
+// EXPORT PRINCIPAL
+// ============================================================
 export default {
   async fetch(r, e, c) {
     if (r.method === 'OPTIONS') return new Response(null, { headers: CORS });
@@ -503,8 +574,57 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '9.0' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '9.1' });
 
+    // ============ NUEVO: CAPACIDADES REALES ============
+    if (p === '/api/capacidades' && r.method === 'GET') {
+      const uso = await consultarUsoReal(e);
+      const db = gDB(e, 'agente');
+      const kv = gKV(e, 'agente');
+      
+      let procesosActivos = 0;
+      let totalMensajes = 0;
+      let totalTemas = 0;
+      let modoIndice = 'ninguno';
+      
+      if (db) {
+        try { const p1 = await db.prepare("SELECT COUNT(*) as n FROM procesos WHERE estado IN ('procesando','pendiente')").first(); procesosActivos = p1 ? p1.n : 0; } catch (x) {}
+        try { const p2 = await db.prepare('SELECT COUNT(*) as n FROM historial_largo').first(); totalMensajes = p2 ? p2.n : 0; } catch (x) {}
+        try { const p3 = await db.prepare('SELECT COUNT(*) as n FROM indice_temas').first(); totalTemas = p3 ? p3.n : 0; } catch (x) {}
+      }
+      if (kv) {
+        try { modoIndice = await kv.get('indice:ultimo_modo') || 'ninguno'; } catch (x) {}
+      }
+      
+      const lim = {
+        workers_requests: { usado: uso.workers_requests || 0, limite: 100000 },
+        workers_errores: { usado: uso.workers_errores || 0 },
+        d1_reads: { usado: 0, limite: 5000000 },
+        d1_writes: { usado: 0, limite: 100000 },
+        kv_reads: { usado: 0, limite: 100000 },
+        kv_writes: { usado: 0, limite: 1000 }
+      };
+      
+      return J({
+        ok: true,
+        consulta_real: uso.ok,
+        error_consulta: uso.error || null,
+        fecha_consulta: new Date().toISOString(),
+        limites_cloudflare: lim,
+        procesos_activos: procesosActivos,
+        mensajes_historial: totalMensajes,
+        temas_indexados: totalTemas,
+        modo_indice: modoIndice
+      });
+    }
+
+    // ============ NUEVO: USO REAL DE CLOUDFLARE ============
+    if (p === '/api/uso_real' && r.method === 'GET') {
+      const uso = await consultarUsoReal(e);
+      return J(uso);
+    }
+
+    // Correcciones
     if (p === '/api/corregir' && r.method === 'POST') {
       const { correccion } = await r.json();
       const db = gDB(e, 'agente');
@@ -523,7 +643,7 @@ export default {
       return J({ ok: true, modo: autonomo ? 'autónomo' : 'supervisado' });
     }
 
-    if (p === '/api/indexar' && r.method === 'POST') return indexarHistorial(r, e);
+    if (p === '/api/indexar' && r.method === 'POST') return J(await indexarHistorial(r, e));
     if (p === '/api/buscar_tema' && r.method === 'GET') return buscarPorTema(r, e);
 
     if (p === '/api/estrategias' && r.method === 'GET') {
@@ -545,7 +665,6 @@ export default {
       return J({ total: r1.results.length, decisiones: r1.results });
     }
 
-    // Conciencia del Comandante
     if (p === '/api/conciencia' && r.method === 'POST') {
       const b = await r.json();
       const uid = b.user_id || 'comandante';
@@ -568,7 +687,6 @@ export default {
       return J({ total: c.length, conciencia: c });
     }
 
-    // Shadow Arise stats
     if (p === '/api/shadow_stats' && r.method === 'GET') {
       const db = gDB(e, 'agente');
       if (!db) return J({ error: 'Sin D1.' });
@@ -787,14 +905,13 @@ export default {
     c.waitUntil((async () => {
       try { await migrar(e); } catch (x) {}
       await cronRetomar(e);
-      await cronMantenimiento(e);
+      await cronAutonomo(e);
       const pub = await opcional('publisher');
       if (pub && pub.cronPublicar) { try { await pub.cronPublicar(e); } catch (x) {} }
       const sb = await opcional('sandbox');
       if (sb && sb.cronSandbox) { try { await sb.cronSandbox(e); } catch (x) {} }
       const au = await opcional('autonomia');
       if (au && au.cronColaTareas) { try { await au.cronColaTareas(e); } catch (x) {} }
-      if (au && au.cronAutonomo) { try { await au.cronAutonomo(e); } catch (x) {} }
       if (au && au.informeDiario) { try { await au.informeDiario(e); } catch (x) {} }
     })());
   }
