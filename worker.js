@@ -19,28 +19,38 @@ const MAX_CHARS_PERFIL_BASE = 3000;
 const MAX_CHARS_CONTEXTO = 3000;
 
 // ============================================================
-// MONITOR REAL DE CLOUDFLARE — Datos exactos, no estimaciones
+// MONITOR REAL DE CLOUDFLARE — Usa CF_API_TOKEN
 // ============================================================
 async function consultarUsoReal(e) {
   const accountId = e.CF_ACCOUNT_ID;
-  const token = e.CF_ANALYTICS_TOKEN;
+  const token = e.CF_API_TOKEN;
   if (!accountId || !token) {
-    return { ok: false, error: 'Falta CF_ACCOUNT_ID o CF_ANALYTICS_TOKEN.' };
+    return { ok: false, error: 'Falta CF_ACCOUNT_ID o CF_API_TOKEN.' };
   }
 
   const ahora = new Date();
-  const inicioDia = new Date(Date.UTC(ahora.getUTCFullYear(), ahora.getUTCMonth(), ahora.getUTCDate())).toISOString();
+  const inicioDiaISO = new Date(Date.UTC(ahora.getUTCFullYear(), ahora.getUTCMonth(), ahora.getUTCDate())).toISOString();
+  const inicioDiaDate = inicioDiaISO.split('T')[0];
 
-  // Query GraphQL para Workers requests
   const query = `
-    query GetUsage($accountTag: string, $datetimeStart: string) {
+    query GetFullUsage($accountTag: String!, $startDate: String!, $startDatetime: String!) {
       viewer {
         accounts(filter: {accountTag: $accountTag}) {
-          workersInvocationsAdaptive(limit: 100, filter: {
-            datetime_geq: $datetimeStart
+          workersInvocationsAdaptive(limit: 1000, filter: {
+            datetime_geq: $startDatetime
           }) {
             sum { requests errors subrequests }
-            quantiles { cpuTimeP50 cpuTimeP99 }
+          }
+          d1AnalyticsAdaptiveGroups(limit: 100, filter: {
+            date_geq: $startDate
+          }) {
+            sum { readQueries writeQueries rowsRead rowsWritten }
+          }
+          kvOperationsAdaptiveGroups(limit: 100, filter: {
+            date_geq: $startDate
+          }) {
+            sum { requests }
+            dimensions { actionType }
           }
         }
       }
@@ -55,22 +65,51 @@ async function consultarUsoReal(e) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        query: query,
-        variables: { accountTag: accountId, datetimeStart: inicioDia }
+        query,
+        variables: {
+          accountTag: accountId,
+          startDate: inicioDiaDate,
+          startDatetime: inicioDiaISO
+        }
       })
     });
 
     const data = await r.json();
+
     if (!data.data || !data.data.viewer || !data.data.viewer.accounts) {
-      return { ok: false, error: 'Respuesta GraphQL vacía.', raw: data };
+      const fallback = await consultarSoloWorkers(accountId, token, inicioDiaISO);
+      fallback.raw = data;
+      return fallback;
     }
 
-    const groups = data.data.viewer.accounts[0].workersInvocationsAdaptive || [];
+    const cuenta = data.data.viewer.accounts[0];
+
     let requests = 0, errores = 0, subrequests = 0;
-    for (const g of groups) {
+    const workerGroups = cuenta.workersInvocationsAdaptive || [];
+    for (const g of workerGroups) {
       requests += g.sum?.requests || 0;
       errores += g.sum?.errors || 0;
       subrequests += g.sum?.subrequests || 0;
+    }
+
+    let d1_reads = 0, d1_writes = 0, d1_rows_read = 0, d1_rows_written = 0;
+    const d1Groups = cuenta.d1AnalyticsAdaptiveGroups || [];
+    for (const g of d1Groups) {
+      d1_reads += g.sum?.readQueries || 0;
+      d1_writes += g.sum?.writeQueries || 0;
+      d1_rows_read += g.sum?.rowsRead || 0;
+      d1_rows_written += g.sum?.rowsWritten || 0;
+    }
+
+    let kv_reads = 0, kv_writes = 0, kv_deletes = 0, kv_lists = 0;
+    const kvGroups = cuenta.kvOperationsAdaptiveGroups || [];
+    for (const g of kvGroups) {
+      const tipo = (g.dimensions?.actionType || '').toLowerCase();
+      const cantidad = g.sum?.requests || 0;
+      if (tipo.includes('read') || tipo === 'read') kv_reads += cantidad;
+      else if (tipo.includes('write') || tipo === 'write') kv_writes += cantidad;
+      else if (tipo.includes('delete')) kv_deletes += cantidad;
+      else if (tipo.includes('list')) kv_lists += cantidad;
     }
 
     return {
@@ -78,7 +117,69 @@ async function consultarUsoReal(e) {
       workers_requests: requests,
       workers_errores: errores,
       workers_subrequests: subrequests,
+      d1_reads,
+      d1_writes,
+      d1_rows_read,
+      d1_rows_written,
+      kv_reads,
+      kv_writes,
+      kv_deletes,
+      kv_lists,
       consultado_en: Date.now()
+    };
+  } catch (x) {
+    const fallback = await consultarSoloWorkers(accountId, token, inicioDiaISO);
+    fallback.error_principal = x.message;
+    return fallback;
+  }
+}
+
+async function consultarSoloWorkers(accountId, token, inicioDiaISO) {
+  const query = `
+    query GetUsage($accountTag: String!, $datetimeStart: String!) {
+      viewer {
+        accounts(filter: {accountTag: $accountTag}) {
+          workersInvocationsAdaptive(limit: 1000, filter: {
+            datetime_geq: $datetimeStart
+          }) {
+            sum { requests errors subrequests }
+          }
+        }
+      }
+    }
+  `;
+  try {
+    const r = await fetch('https://api.cloudflare.com/client/v4/graphql', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        query,
+        variables: { accountTag: accountId, datetimeStart: inicioDiaISO }
+      })
+    });
+    const data = await r.json();
+    if (!data.data || !data.data.viewer || !data.data.viewer.accounts) {
+      return { ok: false, error: 'GraphQL sin datos.', raw: data };
+    }
+    const groups = data.data.viewer.accounts[0].workersInvocationsAdaptive || [];
+    let requests = 0, errores = 0, subrequests = 0;
+    for (const g of groups) {
+      requests += g.sum?.requests || 0;
+      errores += g.sum?.errors || 0;
+      subrequests += g.sum?.subrequests || 0;
+    }
+    return {
+      ok: true,
+      workers_requests: requests,
+      workers_errores: errores,
+      workers_subrequests: subrequests,
+      d1_reads: null, d1_writes: null,
+      kv_reads: null, kv_writes: null,
+      consultado_en: Date.now(),
+      modo: 'solo_workers'
     };
   } catch (x) {
     return { ok: false, error: x.message };
@@ -373,7 +474,7 @@ async function rElim(e, uid) {
   } catch (x) { return J({ respuesta: 'Error: ' + x.message }); }
 }
 
-// ============ D1 / KV ============
+// ============ D1 / KV GENÉRICOS ============
 async function d1(r, e) {
   try {
     const { accion, tabla, datos, condicion, destino } = await r.json();
@@ -574,19 +675,25 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '9.1' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '9.2' });
 
-    // ============ NUEVO: CAPACIDADES REALES ============
+    // ============ USO REAL ============
+    if (p === '/api/uso_real' && r.method === 'GET') {
+      const uso = await consultarUsoReal(e);
+      return J(uso);
+    }
+
+    // ============ CAPACIDADES ============
     if (p === '/api/capacidades' && r.method === 'GET') {
       const uso = await consultarUsoReal(e);
       const db = gDB(e, 'agente');
       const kv = gKV(e, 'agente');
-      
+
       let procesosActivos = 0;
       let totalMensajes = 0;
       let totalTemas = 0;
       let modoIndice = 'ninguno';
-      
+
       if (db) {
         try { const p1 = await db.prepare("SELECT COUNT(*) as n FROM procesos WHERE estado IN ('procesando','pendiente')").first(); procesosActivos = p1 ? p1.n : 0; } catch (x) {}
         try { const p2 = await db.prepare('SELECT COUNT(*) as n FROM historial_largo').first(); totalMensajes = p2 ? p2.n : 0; } catch (x) {}
@@ -595,16 +702,23 @@ export default {
       if (kv) {
         try { modoIndice = await kv.get('indice:ultimo_modo') || 'ninguno'; } catch (x) {}
       }
-      
+
+      const wr = uso.workers_requests || 0;
+      const d1r = uso.d1_reads || 0;
+      const d1w = uso.d1_writes || 0;
+      const kvr = uso.kv_reads || 0;
+      const kvw = uso.kv_writes || 0;
+
       const lim = {
-        workers_requests: { usado: uso.workers_requests || 0, limite: 100000 },
+        workers_requests: { usado: wr, limite: 100000, pct: Math.round(wr / 100000 * 100) },
         workers_errores: { usado: uso.workers_errores || 0 },
-        d1_reads: { usado: 0, limite: 5000000 },
-        d1_writes: { usado: 0, limite: 100000 },
-        kv_reads: { usado: 0, limite: 100000 },
-        kv_writes: { usado: 0, limite: 1000 }
+        workers_subrequests: { usado: uso.workers_subrequests || 0, limite: 1000000, pct: Math.round((uso.workers_subrequests || 0) / 1000000 * 100) },
+        d1_reads: { usado: d1r, limite: 5000000, pct: d1r ? Math.round(d1r / 5000000 * 100) : null },
+        d1_writes: { usado: d1w, limite: 100000, pct: d1w ? Math.round(d1w / 100000 * 100) : null },
+        kv_reads: { usado: kvr, limite: 100000, pct: kvr ? Math.round(kvr / 100000 * 100) : null },
+        kv_writes: { usado: kvw, limite: 1000, pct: kvw ? Math.round(kvw / 1000 * 100) : null }
       };
-      
+
       return J({
         ok: true,
         consulta_real: uso.ok,
@@ -618,13 +732,7 @@ export default {
       });
     }
 
-    // ============ NUEVO: USO REAL DE CLOUDFLARE ============
-    if (p === '/api/uso_real' && r.method === 'GET') {
-      const uso = await consultarUsoReal(e);
-      return J(uso);
-    }
-
-    // Correcciones
+    // ============ CORRECCIONES ============
     if (p === '/api/corregir' && r.method === 'POST') {
       const { correccion } = await r.json();
       const db = gDB(e, 'agente');
@@ -711,7 +819,7 @@ export default {
         const escala = ut === 0 ? 0 : ut < 50 ? 1 : ut < 500 ? 2 : ut < 5000 ? 3 : 4;
 
         const resumen = ut === 0
-          ? 'Shadow Arise no está operativo aún. El sistema está listo para recibir usuarios. Esperando el lanzamiento.'
+          ? 'Shadow Arise no está operativo aún. El sistema está listo para recibir usuarios.'
           : `Shadow Arise lleva ${ut} usuarios registrados. ${up} están pagando (${conv}%). Retención día 1: ${ret.d1}%.`;
 
         return J({
@@ -727,9 +835,7 @@ export default {
           metricas_recientes: recientes,
           resumen_ayanokoji: resumen
         });
-      } catch (x) {
-        return J({ error: x.message });
-      }
+      } catch (x) { return J({ error: x.message }); }
     }
 
     if (p === '/api/componentes' && r.method === 'GET') {
