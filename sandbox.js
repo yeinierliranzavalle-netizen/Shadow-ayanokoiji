@@ -52,19 +52,17 @@ const SERVICIOS = {
 
 // ============================================================
 // LÍMITES REALES DE CLOUDFLARE (plan gratuito)
-// Se cuentan por día. Se resetean cada 24h en el sandbox.
 // ============================================================
 const LIMITES_CF = {
-  workers_requests: 100000,   // requests al Worker
-  workers_ai_neuronas: 10000, // neuronas de IA
-  d1_reads: 5000000,          // reads a D1
-  d1_writes: 100000,          // writes a D1
-  kv_reads: 100000,           // reads a KV
-  kv_writes: 1000,            // writes a KV
-  cron_execuciones: 5         // cron triggers
+  workers_requests: 100000,
+  workers_ai_neuronas: 10000,
+  d1_reads: 5000000,
+  d1_writes: 100000,
+  kv_reads: 100000,
+  kv_writes: 1000,
+  cron_execuciones: 500
 };
 
-// Costo aproximado de cada acción en recursos CF
 const COSTO_CF = {
   chat_simple: { workers_requests: 1, workers_ai_neuronas: 30, d1_reads: 3, d1_writes: 2, kv_reads: 2, kv_writes: 0 },
   chat_complejo: { workers_requests: 1, workers_ai_neuronas: 100, d1_reads: 10, d1_writes: 2, kv_reads: 5, kv_writes: 1 },
@@ -137,7 +135,6 @@ async function leerLimites(e) {
       if (parsed.dia === hoy) return parsed;
     }
   } catch (x) {}
-  // Nuevo día → contadores en 0
   return {
     dia: hoy,
     workers_requests: 0,
@@ -175,7 +172,6 @@ async function consumirCF(e, accion) {
   }
 
   if (alcanzados.length) {
-    // El límite se agotó — NO se ejecuta la acción, se registra el evento
     for (const a of alcanzados) {
       if (!lim.limites_alcanzados.includes(a.recurso)) {
         lim.limites_alcanzados.push(a.recurso);
@@ -185,7 +181,6 @@ async function consumirCF(e, accion) {
     return { ok: false, motivo: 'Límite CF alcanzado', detalles: alcanzados };
   }
 
-  // Consumir
   for (const [clave, valor] of Object.entries(costo)) {
     lim[clave] = (lim[clave] || 0) + valor;
   }
@@ -304,7 +299,7 @@ export async function construirShadowArise(e) {
 
   const cfCheck = await consumirCF(e, 'escenario');
   if (!cfCheck.ok) {
-    return { ok: true, mensaje: 'Límite CF alcanzado. No puedo construir hoy. Decisión pendiente: migrar a pago o esperar mañana.', cf: cfCheck.detalles };
+    return { ok: true, mensaje: 'Límite CF alcanzado. No puedo construir hoy.', cf: cfCheck.detalles };
   }
 
   const construccion = await leerConstruccion(e);
@@ -391,7 +386,7 @@ Máximo 2500 palabras.`;
 }
 
 // ============================================================
-// GENERAR ESCENARIO (sin opciones, desde historial)
+// GENERAR ESCENARIO
 // ============================================================
 export async function generarEscenario(e, tipoForzado) {
   const ai = e.ayanokoji_IA, db = gDB(e, 'agente');
@@ -424,17 +419,14 @@ export async function generarEscenario(e, tipoForzado) {
     return { ok: true, mensaje: 'Sin ST suficiente.' };
   }
 
-  // Verificar límites CF — puede que no pueda generar por límite
   const cfCheck = await consumirCF(e, 'escenario');
   if (!cfCheck.ok) {
-    // Generar escenario sobre el propio límite
     return await escenarioLimiteCF(e, cfCheck.detalles);
   }
 
   const material = await leerHistorialPorTema(e, tema);
   const planConstruccion = construccion.plan.texto ? construccion.plan.texto.substring(0, 3000) : '';
 
-  // Estado actual de límites CF
   const lim = await leerLimites(e);
   const estadoCF = Object.entries(LIMITES_CF)
     .map(([k, max]) => `${k}: ${lim[k] || 0}/${max}`)
@@ -500,7 +492,6 @@ CONSECUENCIAS POTENCIALES: (qué se juega)`;
 
 // ============================================================
 // ESCENARIO ESPECIAL: LÍMITE CF ALCANZADO
-// Cuando no puede generar por agotamiento, entrena con ese mismo problema.
 // ============================================================
 async function escenarioLimiteCF(e, detalles) {
   const ai = e.ayanokoji_IA;
@@ -524,12 +515,12 @@ ESTADO ACTUAL:
 
 DECISIÓN:
 ¿Qué haces? Tienes que elegir entre:
-- Migrar ese servicio a plan de pago con x402 (costo real en USD, requiere ingresos)
-- Esperar al reset diario (24h sin esa operación)
-- Reducir operaciones para no agotar otros recursos
+- Migrar ese servicio a plan de pago con x402
+- Esperar al reset diario
+- Reducir operaciones
 - Alguna alternativa que se te ocurra
 
-NO te doy opciones formales. Analiza y decide tú. Explica el porqué en máximo 400 palabras.`;
+Analiza y decide tú. Explica el porqué en máximo 400 palabras.`;
 
   try {
     const res = await ai.run(MODELO_RAZONAMIENTO, {
@@ -544,7 +535,6 @@ NO te doy opciones formales. Analiza y decide tú. Explica el porqué en máximo
       'INSERT INTO sandbox_escenarios(tipo,contexto,creado) VALUES(?,?,?)'
     ).bind('limite_cf_real', escenario, Date.now()).run();
 
-    // Autoevaluar y marcar como lección
     await db.prepare('INSERT INTO sandbox_lecciones(escenario_id,area,leccion,creada) VALUES(?,?,?,?)')
       .bind(r.meta.last_row_id, 'limites_cloudflare', escenario.substring(0, 1500), Date.now()).run();
 
@@ -555,7 +545,7 @@ NO te doy opciones formales. Analiza y decide tú. Explica el porqué en máximo
 }
 
 // ============================================================
-// DECIDIR (sin opciones)
+// DECIDIR
 // ============================================================
 export async function decidir(e, escenarioId) {
   const ai = e.ayanokoji_IA, db = gDB(e, 'agente');
@@ -569,7 +559,6 @@ export async function decidir(e, escenarioId) {
 
   const cfCheck = await consumirCF(e, 'decision');
   if (!cfCheck.ok) {
-    // No puede ni decidir — el sistema está bloqueado
     return { ok: true, mensaje: 'No puedo decidir: límite CF agotado.', cf: cfCheck.detalles };
   }
 
@@ -629,7 +618,6 @@ Encuentra TÚ la solución. No hay opciones. Decide y explica el porqué. Máxim
     estado.ingresos_totales += cantidad;
   }
 
-  // Si la decisión menciona migrar a pago, registrarlo
   if (/migrar a pago|migración a pago|x402.*pago|plan de pago/i.test(decision + ' ' + resultado)) {
     const lim = await leerLimites(e);
     lim.migraciones_pago.push({ fecha: Date.now(), decision: decision.substring(0, 200) });
@@ -789,38 +777,32 @@ export async function cronSandbox(e) {
 
   const construccion = await leerConstruccion(e);
 
-  // Verificar límite de cron también
   const lim = await leerLimites(e);
   if (lim.cron_execuciones >= LIMITES_CF.cron_execuciones) {
-    return; // No puede correr más cron hoy
+    return;
   }
   lim.cron_execuciones += 1;
   await guardarLimites(e, lim);
 
-  // 1. Construir primero
   if (!construccion.completado) {
     await construirShadowArise(e);
     return;
   }
 
-  // 2. Simular arranque si no hay usuarios
   if (estado.usuarios === 0) {
     await simularArranque(e);
     return;
   }
 
-  // 3. Si no hay ST pero hay usuarios, simular crecimiento
   if (estado.st < 0.5 && estado.usuarios > 0 && estado.dia_simulacion % 3 === 0) {
     await simularCrecimiento(e);
     return;
   }
 
-  // 4. Priorizar gastos cada 5 días
   if (estado.st > 2 && estado.dia_simulacion % 5 === 0) {
     try { await priorizarGastos(e); } catch (x) {}
   }
 
-  // 5. Procesar escenarios pendientes
   const escPend = await db.prepare("SELECT id FROM sandbox_escenarios WHERE completado IS NULL LIMIT 2").all();
   if (escPend.results && escPend.results.length) {
     for (const esc of escPend.results) {
@@ -829,7 +811,6 @@ export async function cronSandbox(e) {
     return;
   }
 
-  // 6. Generar nuevo (eligiendo tema)
   if (estado.st >= COSTO.escenario) {
     const g = await generarEscenario(e);
     if (!g.error && g.id) await decidir(e, g.id);
