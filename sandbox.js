@@ -2,45 +2,47 @@ import { MODELO_LIGERO, MODELO_RAZONAMIENTO, J, gDB, gKV } from './shared.js';
 import { consumir } from './presupuesto.js';
 
 // ============================================================
-// CURRÍCULUM REAL
+// CURRÍCULUM — El sandbox PREPARA a Ayanokōji, no construye Shadow Arise
 // ============================================================
 const CURRICULUM = [
-  { fase: 0, tema: 'construccion_shadow_arise',  descripcion: 'Planificar frontend, lógica, IA publicadora, retención y monetización desde cero', prereq: [] },
-  { fase: 0, tema: 'arquitectura_shadow_arise',  descripcion: 'Componentes técnicos, flujo de usuario, tablas, endpoints', prereq: ['construccion_shadow_arise'] },
-  { fase: 0, tema: 'plan_ia_publicadora',        descripcion: 'Canales, formatos, frecuencia, contenido, psicología', prereq: ['arquitectura_shadow_arise'] },
-  { fase: 0, tema: 'plan_retencion',             descripcion: 'Umbrales suaves, notificaciones, memoria compartida, pecera', prereq: ['arquitectura_shadow_arise'] },
-  { fase: 0, tema: 'plan_monetizacion',          descripcion: 'Precios, suscripciones, cartas, pases, conversión', prereq: ['arquitectura_shadow_arise'] },
+  // FASE 0: PREPARACIÓN — Ayanokōji aprende a conocerse y a medir su capacidad
+  { fase: 0, tema: 'preparacion_shadow_arise', descripcion: 'Analizar qué necesita Shadow Arise. No construirlo. Prepararse para construirlo.', prereq: [] },
+  { fase: 0, tema: 'medicion_capacidad_real',  descripcion: 'Aprender a leer los datos reales de Cloudflare y decidir según ellos', prereq: ['preparacion_shadow_arise'] },
+  { fase: 0, tema: 'decision_bajo_presion',    descripcion: 'Decidir con recursos limitados, sin opciones, sin red', prereq: ['preparacion_shadow_arise'] },
 
-  { fase: 1, tema: 'arranque_sin_presupuesto',   descripcion: 'Conseguir primeros usuarios con 0 ST', prereq: ['construccion_shadow_arise'] },
-  { fase: 1, tema: 'primeros_usuarios',          descripcion: 'Retención temprana, evitar abandono', prereq: ['arranque_sin_presupuesto'] },
-  { fase: 1, tema: 'primera_conversion',         descripcion: 'Convertir gratis a pago sin presionar', prereq: ['primeros_usuarios'] },
+  // FASE 1: ECONOMÍA SIMULADA
+  { fase: 1, tema: 'gestion_st',               descripcion: 'Presupuesto ST como si fuera USDT real. Prioridades, cuotas, reservas', prereq: ['medicion_capacidad_real'] },
+  { fase: 1, tema: 'priorizacion_servicios',   descripcion: 'Qué pagar primero, cuándo, por qué', prereq: ['gestion_st'] },
+  { fase: 1, tema: 'migracion_x402',           descripcion: 'Pasar servicios a pago automático cuando haya ingresos', prereq: ['priorizacion_servicios'] },
+  { fase: 1, tema: 'wallet_comandante',        descripcion: 'Reservar para pagos, depositar el resto, no tocar', prereq: ['migracion_x402'] },
 
-  { fase: 2, tema: 'gestion_st',                 descripcion: 'Presupuesto, prioridades, cuotas recurrentes', prereq: ['primera_conversion'] },
-  { fase: 2, tema: 'limites_cloudflare',         descripcion: 'Qué hacer cuando el plan gratuito se agota', prereq: ['gestion_st'] },
-  { fase: 2, tema: 'priorizacion_servicios',     descripcion: 'Qué pagar primero, cuándo, por qué', prereq: ['limites_cloudflare'] },
-  { fase: 2, tema: 'migracion_x402',             descripcion: 'Pasar servicios a pago automático', prereq: ['priorizacion_servicios'] },
-  { fase: 2, tema: 'wallet_comandante',          descripcion: 'Retener reservas, depositar el resto, no tocar', prereq: ['migracion_x402'] },
+  // FASE 2: OPERACIÓN SIMULADA
+  { fase: 2, tema: 'arranque_sin_presupuesto', descripcion: 'Primeros usuarios con 0 ST', prereq: ['wallet_comandante'] },
+  { fase: 2, tema: 'primera_conversion',       descripcion: 'Convertir gratis a pago sin presionar', prereq: ['arranque_sin_presupuesto'] },
+  { fase: 2, tema: 'limites_cloudflare',       descripcion: 'Qué hacer cuando el plan gratuito se agota', prereq: ['primera_conversion'] },
 
-  { fase: 3, tema: 'mantenimiento_sistema',      descripcion: 'Monitorear, detectar fallos, auto-reparar', prereq: ['wallet_comandante'] },
-  { fase: 3, tema: 'crisis_usuarios',            descripcion: 'Usuarios molestos, reembolsos, quejas', prereq: ['mantenimiento_sistema'] },
-  { fase: 3, tema: 'crisis_tecnicas',            descripcion: 'Caídas, errores, pérdida de datos', prereq: ['mantenimiento_sistema'] },
-  { fase: 3, tema: 'crisis_narrativas',          descripcion: 'Lore inconsistente, personajes fuera de carácter', prereq: ['mantenimiento_sistema'] },
-  { fase: 3, tema: 'rate_limits_redes',          descripcion: 'Twitter, Reddit, Bluesky bloquean publicaciones', prereq: ['mantenimiento_sistema'] },
+  // FASE 3: CRISIS
+  { fase: 3, tema: 'crisis_tecnicas',          descripcion: 'Caídas, errores, pérdida de datos', prereq: ['limites_cloudflare'] },
+  { fase: 3, tema: 'crisis_usuarios',          descripcion: 'Quejas, reembolsos, abandono', prereq: ['crisis_tecnicas'] },
+  { fase: 3, tema: 'crisis_narrativas',        descripcion: 'Lore inconsistente, personajes fuera de carácter', prereq: ['crisis_usuarios'] },
+  { fase: 3, tema: 'rate_limits_redes',        descripcion: 'Reddit, Bluesky, Mastodon bloquean publicaciones', prereq: ['crisis_narrativas'] },
 
-  { fase: 4, tema: 'retencion_largo_plazo',      descripcion: 'Usuarios que se quedan meses', prereq: ['crisis_usuarios'] },
-  { fase: 4, tema: 'picos_virales',              descripcion: 'Tráfico inesperado, no colapsar', prereq: ['retencion_largo_plazo'] },
-  { fase: 4, tema: 'competidores',               descripcion: 'Qué hacer si aparece un clon o una plataforma mejor', prereq: ['picos_virales'] },
-  { fase: 4, tema: 'viralidad',                  descripcion: 'Contenido compartible, misterio del creador, teorías', prereq: ['competidores'] },
-  { fase: 4, tema: 'escalado_canales',           descripcion: 'Cuándo añadir canal, cuándo frenar', prereq: ['viralidad'] },
+  // FASE 4: CRECIMIENTO
+  { fase: 4, tema: 'retencion_largo_plazo',    descripcion: 'Usuarios que se quedan meses', prereq: ['rate_limits_redes'] },
+  { fase: 4, tema: 'picos_virales',            descripcion: 'Tráfico inesperado, no colapsar', prereq: ['retencion_largo_plazo'] },
+  { fase: 4, tema: 'competidores',             descripcion: 'Clones, plataformas mejores', prereq: ['picos_virales'] },
+  { fase: 4, tema: 'viralidad',                descripcion: 'Contenido compartible, misterio del creador', prereq: ['competidores'] },
+  { fase: 4, tema: 'escalado_canales',         descripcion: 'Cuándo añadir canal, cuándo frenar', prereq: ['viralidad'] },
 
-  { fase: 5, tema: 'lore_multiverso',            descripcion: 'Reliquia, Creador, Shadow Kiyora, cruces entre universos', prereq: ['escalado_canales'] },
-  { fase: 5, tema: 'personajes_por_usuario',     descripcion: 'Instancias únicas, memoria compartida, confianza', prereq: ['lore_multiverso'] },
-  { fase: 5, tema: 'etica_privacidad',           descripcion: 'Límites, modo privado, transparencia', prereq: ['personajes_por_usuario'] },
-  { fase: 5, tema: 'auto_mejora_congruente',     descripcion: 'Mejorar sin desviarse del objetivo del Comandante', prereq: ['etica_privacidad'] }
+  // FASE 5: ESTRATÉGICO
+  { fase: 5, tema: 'lore_multiverso',          descripcion: 'Reliquia, Creador, Shadow Kiyora, cruces entre universos', prereq: ['escalado_canales'] },
+  { fase: 5, tema: 'personajes_por_usuario',   descripcion: 'Instancias únicas, memoria compartida, confianza', prereq: ['lore_multiverso'] },
+  { fase: 5, tema: 'etica_privacidad',         descripcion: 'Límites, modo privado, transparencia', prereq: ['personajes_por_usuario'] },
+  { fase: 5, tema: 'auto_mejora_congruente',   descripcion: 'Mejorar sin desviarse del objetivo del Comandante', prereq: ['etica_privacidad'] }
 ];
 
 // ============================================================
-// SERVICIOS Y COSTOS (1 ST = 1 USDT)
+// SERVICIOS Y COSTOS (1 ST = 1 USDT simulado)
 // ============================================================
 const SERVICIOS = {
   workers_ai:   { nombre: 'Workers AI',    costo_diario: 0.5,  prioridad: 1, critico: true },
@@ -52,40 +54,138 @@ const SERVICIOS = {
 
 // ============================================================
 // LÍMITES REALES DE CLOUDFLARE (plan gratuito)
+// Se usan solo como respaldo si la API real no responde.
 // ============================================================
-const LIMITES_CF = {
+const LIMITES_CF_REALES = {
   workers_requests: 100000,
-  workers_ai_neuronas: 10000,
+  workers_subrequests: 1000000,
   d1_reads: 5000000,
   d1_writes: 100000,
   kv_reads: 100000,
-  kv_writes: 1000,
-  cron_execuciones: 500
+  kv_writes: 1000
 };
 
+// ============================================================
+// COSTO SIMULADO EN RECURSOS CF POR ACCIÓN
+// (lo que Ayanokōji "gastaría" del plan gratuito por hacer algo)
+// ============================================================
 const COSTO_CF = {
-  chat_simple: { workers_requests: 1, workers_ai_neuronas: 30, d1_reads: 3, d1_writes: 2, kv_reads: 2, kv_writes: 0 },
-  chat_complejo: { workers_requests: 1, workers_ai_neuronas: 100, d1_reads: 10, d1_writes: 2, kv_reads: 5, kv_writes: 1 },
-  publicacion: { workers_requests: 2, workers_ai_neuronas: 80, d1_reads: 5, d1_writes: 3, kv_reads: 3, kv_writes: 0 },
-  imagen: { workers_requests: 1, workers_ai_neuronas: 200, d1_reads: 1, d1_writes: 2, kv_reads: 0, kv_writes: 1 },
-  escenario: { workers_requests: 1, workers_ai_neuronas: 400, d1_reads: 3, d1_writes: 2, kv_reads: 2, kv_writes: 1 },
-  decision: { workers_requests: 1, workers_ai_neuronas: 500, d1_reads: 3, d1_writes: 2, kv_reads: 2, kv_writes: 1 },
-  cron: { workers_requests: 1, workers_ai_neuronas: 0, d1_reads: 5, d1_writes: 3, kv_reads: 3, kv_writes: 1 }
+  escenario: { workers_requests: 1, d1_reads: 3, d1_writes: 2, kv_reads: 2, kv_writes: 1 },
+  decision:  { workers_requests: 1, d1_reads: 3, d1_writes: 2, kv_reads: 2, kv_writes: 1 },
+  publicacion: { workers_requests: 2, d1_reads: 5, d1_writes: 3, kv_reads: 3, kv_writes: 0 },
+  cron:      { workers_requests: 1, d1_reads: 5, d1_writes: 3, kv_reads: 3, kv_writes: 1 }
 };
 
-const COSTO = {
+const COSTO_ST = {
   escenario: 0.05,
   escenario_complejo: 0.10,
   decision: 0.03,
-  construccion: 0.20,
-  publicacion: 0.02,
-  analisis_historial: 0.08
+  publicacion: 0.02
 };
 
 const ESTADO_KEY = 'sandbox:estado';
 const APRENDIZAJE_KEY = 'sandbox:aprendizaje';
 const CONSTRUCCION_KEY = 'sandbox:construccion';
 const LIMITES_KEY = 'sandbox:limites';
+const CAPACIDADES_KEY = 'sandbox:capacidades_cache';
+
+// ============================================================
+// MEDIR CAPACIDAD REAL DE CLOUDFLARE
+// Consulta la API GraphQL y cachea el resultado por 5 minutos.
+// ============================================================
+export async function medirCapacidades(e) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { ok: false, error: 'KV no disponible.' };
+
+  // Ver cache
+  try {
+    const cache = await kv.get(CAPACIDADES_KEY);
+    if (cache) {
+      const parsed = JSON.parse(cache);
+      if (Date.now() - parsed.ts < 5 * 60 * 1000) {
+        return { ok: true, cache: true, ...parsed.datos };
+      }
+    }
+  } catch (x) {}
+
+  const accountId = e.CF_ACCOUNT_ID;
+  const token = e.CF_API_TOKEN;
+  if (!accountId || !token) {
+    return { ok: false, error: 'Falta CF_ACCOUNT_ID o CF_API_TOKEN.' };
+  }
+
+  const ahora = new Date();
+  const inicioDiaISO = new Date(Date.UTC(ahora.getUTCFullYear(), ahora.getUTCMonth(), ahora.getUTCDate())).toISOString();
+  const inicioDiaDate = inicioDiaISO.split('T')[0];
+
+  const query = `
+    query GetUsage($accountTag: String!, $startDate: String!, $startDatetime: String!) {
+      viewer {
+        accounts(filter: {accountTag: $accountTag}) {
+          workersInvocationsAdaptive(limit: 1000, filter: { datetime_geq: $startDatetime }) {
+            sum { requests errors subrequests }
+          }
+          d1AnalyticsAdaptiveGroups(limit: 100, filter: { date_geq: $startDate }) {
+            sum { readQueries writeQueries rowsRead rowsWritten }
+          }
+          kvOperationsAdaptiveGroups(limit: 100, filter: { date_geq: $startDate }) {
+            sum { requests }
+            dimensions { actionType }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const r = await fetch('https://api.cloudflare.com/client/v4/graphql', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, variables: { accountTag: accountId, startDate: inicioDiaDate, startDatetime: inicioDiaISO } })
+    });
+
+    const data = await r.json();
+    if (!data.data || !data.data.viewer || !data.data.viewer.accounts) {
+      return { ok: false, error: 'GraphQL sin datos.' };
+    }
+
+    const cuenta = data.data.viewer.accounts[0];
+    let workers_requests = 0, workers_errores = 0, workers_subrequests = 0;
+    for (const g of (cuenta.workersInvocationsAdaptive || [])) {
+      workers_requests += g.sum?.requests || 0;
+      workers_errores += g.sum?.errors || 0;
+      workers_subrequests += g.sum?.subrequests || 0;
+    }
+
+    let d1_reads = 0, d1_writes = 0;
+    for (const g of (cuenta.d1AnalyticsAdaptiveGroups || [])) {
+      d1_reads += g.sum?.readQueries || 0;
+      d1_writes += g.sum?.writeQueries || 0;
+    }
+
+    let kv_reads = 0, kv_writes = 0;
+    for (const g of (cuenta.kvOperationsAdaptiveGroups || [])) {
+      const tipo = (g.dimensions?.actionType || '').toLowerCase();
+      const c = g.sum?.requests || 0;
+      if (tipo.includes('read')) kv_reads += c;
+      else if (tipo.includes('write')) kv_writes += c;
+    }
+
+    const datos = {
+      workers_requests, workers_errores, workers_subrequests,
+      d1_reads, d1_writes, kv_reads, kv_writes,
+      limites: LIMITES_CF_REALES,
+      ts: Date.now(),
+      modo: 'real'
+    };
+
+    try { await kv.put(CAPACIDADES_KEY, JSON.stringify({ ts: Date.now(), datos }), { expirationTtl: 600 }); } catch (x) {}
+
+    return { ok: true, cache: false, ...datos };
+  } catch (x) {
+    return { ok: false, error: x.message };
+  }
+}
 
 // ============================================================
 // ESTADO ECONÓMICO
@@ -116,80 +216,11 @@ async function leerEstado(e) {
 async function guardarEstado(e, estado) {
   const kv = gKV(e, 'agente');
   if (!kv) return;
-  try {
-    await kv.put(ESTADO_KEY, JSON.stringify(estado), { expirationTtl: 31536000 });
-  } catch (x) {}
+  try { await kv.put(ESTADO_KEY, JSON.stringify(estado), { expirationTtl: 31536000 }); } catch (x) {}
 }
 
 // ============================================================
-// LÍMITES DE CLOUDFLARE — Estado por día
-// ============================================================
-async function leerLimites(e) {
-  const kv = gKV(e, 'agente');
-  if (!kv) return null;
-  const hoy = new Date().toISOString().split('T')[0];
-  try {
-    const raw = await kv.get(LIMITES_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed.dia === hoy) return parsed;
-    }
-  } catch (x) {}
-  return {
-    dia: hoy,
-    workers_requests: 0,
-    workers_ai_neuronas: 0,
-    d1_reads: 0,
-    d1_writes: 0,
-    kv_reads: 0,
-    kv_writes: 0,
-    cron_execuciones: 0,
-    limites_alcanzados: [],
-    migraciones_pago: []
-  };
-}
-
-async function guardarLimites(e, lim) {
-  const kv = gKV(e, 'agente');
-  if (!kv) return;
-  try {
-    await kv.put(LIMITES_KEY, JSON.stringify(lim), { expirationTtl: 172800 });
-  } catch (x) {}
-}
-
-async function consumirCF(e, accion) {
-  const lim = await leerLimites(e);
-  if (!lim) return { ok: false, motivo: 'Sin estado de límites.' };
-  const costo = COSTO_CF[accion];
-  if (!costo) return { ok: true };
-
-  const alcanzados = [];
-  for (const [clave, valor] of Object.entries(costo)) {
-    const max = LIMITES_CF[clave];
-    if (lim[clave] + valor > max) {
-      alcanzados.push({ recurso: clave, usado: lim[clave], max, intento: valor });
-    }
-  }
-
-  if (alcanzados.length) {
-    for (const a of alcanzados) {
-      if (!lim.limites_alcanzados.includes(a.recurso)) {
-        lim.limites_alcanzados.push(a.recurso);
-      }
-    }
-    await guardarLimites(e, lim);
-    return { ok: false, motivo: 'Límite CF alcanzado', detalles: alcanzados };
-  }
-
-  for (const [clave, valor] of Object.entries(costo)) {
-    lim[clave] = (lim[clave] || 0) + valor;
-  }
-  await guardarLimites(e, lim);
-  return { ok: true, restante: Object.fromEntries(Object.keys(costo).map(k => [k, LIMITES_CF[k] - lim[k]])) };
-}
-
-// ============================================================
-// ESTADO DE APRENDIZAJE
+// APRENDIZAJE
 // ============================================================
 async function leerAprendizaje(e) {
   const kv = gKV(e, 'agente');
@@ -204,35 +235,9 @@ async function leerAprendizaje(e) {
 async function guardarAprendizaje(e, ap) {
   const kv = gKV(e, 'agente');
   if (!kv) return;
-  try {
-    await kv.put(APRENDIZAJE_KEY, JSON.stringify(ap), { expirationTtl: 31536000 });
-  } catch (x) {}
+  try { await kv.put(APRENDIZAJE_KEY, JSON.stringify(ap), { expirationTtl: 31536000 }); } catch (x) {}
 }
 
-// ============================================================
-// CONSTRUCCIÓN
-// ============================================================
-async function leerConstruccion(e) {
-  const kv = gKV(e, 'agente');
-  if (!kv) return { completado: false, plan: {}, componentes: {} };
-  try {
-    const raw = await kv.get(CONSTRUCCION_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch (x) {}
-  return { completado: false, plan: {}, componentes: {} };
-}
-
-async function guardarConstruccion(e, c) {
-  const kv = gKV(e, 'agente');
-  if (!kv) return;
-  try {
-    await kv.put(CONSTRUCCION_KEY, JSON.stringify(c), { expirationTtl: 31536000 });
-  } catch (x) {}
-}
-
-// ============================================================
-// SELECCIÓN DE TEMA
-// ============================================================
 async function decidirSiguienteTema(e) {
   const ap = await leerAprendizaje(e);
   for (const item of CURRICULUM) {
@@ -256,27 +261,20 @@ async function leerHistorialPorTema(e, tema) {
     let todosLosOrdenes = new Set();
     for (const p of palabrasClave) {
       try {
-        const r = await db.prepare(
-          'SELECT DISTINCT mensaje_orden FROM indice_temas WHERE tema LIKE ? LIMIT 30'
-        ).bind('%' + p + '%').all();
+        const r = await db.prepare('SELECT DISTINCT mensaje_orden FROM indice_temas WHERE tema LIKE ? LIMIT 30').bind('%' + p + '%').all();
         if (r.results) r.results.forEach(x => todosLosOrdenes.add(x.mensaje_orden));
       } catch (x) {}
     }
 
     if (!todosLosOrdenes.size) {
-      const r = await db.prepare(
-        'SELECT contenido FROM historial_largo WHERE contenido LIKE ? ORDER BY orden DESC LIMIT 10'
-      ).bind('%' + palabrasClave[0] + '%').all();
+      const r = await db.prepare('SELECT contenido FROM historial_largo WHERE contenido LIKE ? ORDER BY orden DESC LIMIT 10').bind('%' + palabrasClave[0] + '%').all();
       if (r.results) return r.results.map(x => x.contenido).join('\n\n---\n\n');
       return '';
     }
 
     const ords = Array.from(todosLosOrdenes).slice(0, 15);
     const ph = ords.map(() => '?').join(',');
-    const msgs = await db.prepare(
-      'SELECT contenido FROM historial_largo WHERE orden IN (' + ph + ') ORDER BY orden ASC'
-    ).bind(...ords).all();
-
+    const msgs = await db.prepare('SELECT contenido FROM historial_largo WHERE orden IN (' + ph + ') ORDER BY orden ASC').bind(...ords).all();
     if (!msgs.results || !msgs.results.length) return '';
     return msgs.results.map(m => m.contenido).join('\n\n---\n\n').substring(0, 8000);
   } catch (x) {
@@ -285,101 +283,141 @@ async function leerHistorialPorTema(e, tema) {
 }
 
 // ============================================================
-// CONSTRUIR SHADOW ARISE DESDE CERO
+// CONSUMIR RECURSOS CF — Consulta datos reales
 // ============================================================
-export async function construirShadowArise(e) {
+async function consumirCF(e, accion) {
+  const costo = COSTO_CF[accion];
+  if (!costo) return { ok: true };
+
+  // Medir capacidad real
+  const cap = await medirCapacidades(e);
+
+  if (!cap.ok) {
+    // Sin datos reales. No bloqueamos; usamos solo ST como control.
+    return { ok: true, modo: 'sin_datos_reales', error: cap.error };
+  }
+
+  const alcanzados = [];
+  for (const [clave, valor] of Object.entries(costo)) {
+    const usado = cap[clave] || 0;
+    const max = cap.limites[clave];
+    if (usado + valor > max) {
+      alcanzados.push({ recurso: clave, usado, max, intento: valor });
+    }
+  }
+
+  if (alcanzados.length) {
+    const lim = await leerLimites(e);
+    for (const a of alcanzados) {
+      if (!lim.limites_alcanzados.includes(a.recurso)) {
+        lim.limites_alcanzados.push(a.recurso);
+      }
+    }
+    await guardarLimites(e, lim);
+    return { ok: false, motivo: 'Límite CF real alcanzado', detalles: alcanzados, datos_reales: true };
+  }
+
+  return { ok: true, modo: cap.cache ? 'cache' : 'real', capacidad_actual: {
+    workers_requests: cap.workers_requests,
+    d1_reads: cap.d1_reads,
+    kv_writes: cap.kv_writes
+  }};
+}
+
+// ============================================================
+// LÍMITES LOCALES (solo registro histórico)
+// ============================================================
+async function leerLimites(e) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return null;
+  const hoy = new Date().toISOString().split('T')[0];
+  try {
+    const raw = await kv.get(LIMITES_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed.dia === hoy) return parsed;
+    }
+  } catch (x) {}
+  return {
+    dia: hoy,
+    cron_execuciones: 0,
+    limites_alcanzados: [],
+    migraciones_pago: []
+  };
+}
+
+async function guardarLimites(e, lim) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return;
+  try { await kv.put(LIMITES_KEY, JSON.stringify(lim), { expirationTtl: 172800 }); } catch (x) {}
+}
+
+// ============================================================
+// PREPARAR SHADOW ARISE — Analiza, no construye
+// ============================================================
+export async function prepararShadowArise(e) {
   const ai = e.ayanokoji_IA;
   const db = gDB(e, 'agente');
   if (!ai || !db) return { error: 'IA o D1 no disponible.' };
 
-  const estado = await leerEstado(e);
-  if (estado.st < COSTO.construccion) {
-    return { ok: true, mensaje: 'Sin ST para construir. Esperando generación inicial.' };
-  }
-
-  const cfCheck = await consumirCF(e, 'escenario');
-  if (!cfCheck.ok) {
-    return { ok: true, mensaje: 'Límite CF alcanzado. No puedo construir hoy.', cf: cfCheck.detalles };
-  }
-
-  const construccion = await leerConstruccion(e);
   const ap = await leerAprendizaje(e);
 
-  const historialConstruccion = await leerHistorialPorTema(e, 'shadow_arise');
-  const historialPublicadora = await leerHistorialPorTema(e, 'publicadora');
-  const historialRetencion = await leerHistorialPorTema(e, 'retencion');
-  const historialMonetizacion = await leerHistorialPorTema(e, 'monetizacion');
+  // Leer material del historial largo
+  const temas = ['shadow_arise', 'publicadora', 'retencion', 'monetizacion', 'multiverso', 'usuarios'];
+  const materiales = [];
+  for (const t of temas) {
+    const m = await leerHistorialPorTema(e, t);
+    if (m) materiales.push(`## ${t.toUpperCase()}\n${m}`);
+  }
+  const material = materiales.join('\n\n===\n\n').substring(0, 12000);
 
-  const material = [
-    historialConstruccion ? 'CONSTRUCCIÓN:\n' + historialConstruccion : '',
-    historialPublicadora ? 'PUBLICADORA:\n' + historialPublicadora : '',
-    historialRetencion ? 'RETENCIÓN:\n' + historialRetencion : '',
-    historialMonetizacion ? 'MONETIZACIÓN:\n' + historialMonetizacion : ''
-  ].filter(Boolean).join('\n\n====\n\n');
+  const prompt = `Eres Ayanokōji Digital. NO vas a construir Shadow Arise. Vas a PREPARARTE para construirlo.
 
-  const prompt = `Eres Ayanokōji Digital. Tu tarea ahora NO es operar. Es CONSTRUIR Shadow Arise desde cero, de forma autónoma.
-
-MATERIAL DEL HISTORIAL LARGO:
-${material || 'Aún no hay material indexado. Usa lo que sabes del proyecto.'}
+MATERIAL DE TU HISTORIAL (lo que tú y el Comandante ya planearon):
+${material || 'Sin material indexado. Usa lo que sepas.'}
 
 INSTRUCCIONES:
-Diseña y documenta el plan completo de Shadow Arise. Responde con estas secciones exactas:
+Analiza qué necesita Shadow Arise para existir. Documenta tu análisis con estas secciones:
 
-### 1. FRONTEND
-Pantallas, colores (con justificación psicológica), flujo de usuario, pecera, emojis, cartas.
+### 1. QUÉ ES SHADOW ARISE
+Definición en una frase. Para quién. Qué problema resuelve.
 
-### 2. ARQUITECTURA TÉCNICA
-Tablas, endpoints, cómo se conecta el chat, cómo se guarda la memoria por usuario.
+### 2. COMPONENTES NECESARIOS
+Lista completa: frontend, backend, IA, tablas, endpoints, canales de publicación, sistema de pagos.
 
-### 3. IA PUBLICADORA
-Canales, formatos, frecuencia, tono por canal, psicología aplicada.
+### 3. QUÉ ME FALTA SABER
+Preguntas que debo responder antes de construirlo.
 
-### 4. RETENCIÓN
-Notificaciones, umbrales suaves, memoria compartida, eventos, recompensas.
+### 4. ORDEN DE CONSTRUCCIÓN
+En qué secuencia lo construiría: qué primero, qué después, por qué.
 
-### 5. MONETIZACIÓN
-Precios, suscripciones, cartas, pases, conversión sin presión.
+### 5. CAPACIDAD REAL NECESARIA
+Cuántos recursos de Cloudflare consumiría: requests, D1 reads/writes, KV, neuronas de IA. ¿Cabe en el plan gratuito? ¿Cuándo migrar a pago?
 
-### 6. MULTIVERSO Y LORE
-Reliquia, Creador, Shadow Kiyora, cruces entre universos.
+### 6. RIESGOS PREVISIBLES
+Qué puede salir mal. Cómo lo prevengo.
 
-### 7. PRIMEROS 30 DÍAS
-Plan paso a paso de qué hacer cuando salga al mundo: qué publicar, cuándo, en qué canal.
-
-### 8. PLAN DE CONTINGENCIA PARA LÍMITES CF
-Cuando Workers AI, D1, KV o Workers lleguen al límite gratuito, ¿qué haces? ¿Migras a pago con x402? ¿Esperas al reset diario? ¿Reduces operaciones? Explica tu criterio.
-
-Máximo 2500 palabras.`;
+Máximo 1500 palabras.`;
 
   try {
     const res = await ai.run(MODELO_RAZONAMIENTO, {
       messages: [{ role: 'user', content: prompt }],
-      max_tokens: 3000,
+      max_tokens: 1800,
       temperature: 0.6
     });
 
     const plan = res.response || '';
-    if (plan.length < 200) return { error: 'Plan vacío o muy corto.' };
+    if (plan.length < 200) return { error: 'Análisis vacío.' };
 
-    construccion.plan = { texto: plan, fecha: Date.now() };
-    construccion.completado = true;
-    await guardarConstruccion(e, construccion);
-
-    estado.st -= COSTO.construccion;
-    estado.gastos_totales += COSTO.construccion;
-    await guardarEstado(e, estado);
-
-    for (const t of ['construccion_shadow_arise','arquitectura_shadow_arise','plan_ia_publicadora','plan_retencion','plan_monetizacion']) {
-      if (!ap.dominados.includes(t)) ap.dominados.push(t);
-    }
+    if (!ap.dominados.includes('preparacion_shadow_arise')) ap.dominados.push('preparacion_shadow_arise');
     await guardarAprendizaje(e, ap);
 
     try {
       await db.prepare('INSERT INTO contexto(fecha,resumen,fases,fuente) VALUES(?,?,?,?)')
-        .bind(Date.now(), plan, JSON.stringify([]), 'sandbox_construccion').run();
+        .bind(Date.now(), plan, JSON.stringify([]), 'sandbox_preparacion').run();
     } catch (x) {}
 
-    return { ok: true, mensaje: 'Shadow Arise construido y documentado.', plan, st_actual: estado.st };
+    return { ok: true, mensaje: 'Análisis de preparación completado.', plan };
   } catch (x) {
     return { error: 'Error IA: ' + x.message };
   }
@@ -392,22 +430,17 @@ export async function generarEscenario(e, tipoForzado) {
   const ai = e.ayanokoji_IA, db = gDB(e, 'agente');
   if (!ai || !db) return { error: 'IA o D1 no disponible.' };
 
-  const construccion = await leerConstruccion(e);
-  if (!construccion.completado) {
-    return await construirShadowArise(e);
-  }
-
   let tema, fase, costoEscenario;
   if (tipoForzado) {
     tema = tipoForzado;
     fase = 3;
-    costoEscenario = COSTO.escenario;
+    costoEscenario = COSTO_ST.escenario;
   } else {
     const siguiente = await decidirSiguienteTema(e);
     if (!siguiente) return { ok: true, mensaje: 'Currículum completado.' };
     tema = siguiente.tema;
     fase = siguiente.fase;
-    costoEscenario = fase >= 4 ? COSTO.escenario_complejo : COSTO.escenario;
+    costoEscenario = fase >= 4 ? COSTO_ST.escenario_complejo : COSTO_ST.escenario;
   }
 
   const estado = await leerEstado(e);
@@ -425,22 +458,13 @@ export async function generarEscenario(e, tipoForzado) {
   }
 
   const material = await leerHistorialPorTema(e, tema);
-  const planConstruccion = construccion.plan.texto ? construccion.plan.texto.substring(0, 3000) : '';
-
-  const lim = await leerLimites(e);
-  const estadoCF = Object.entries(LIMITES_CF)
-    .map(([k, max]) => `${k}: ${lim[k] || 0}/${max}`)
-    .join(', ');
 
   const prompt = `Eres Ayanokōji Digital entrenando en tu sandbox autónomo. Tema: "${tema}" (fase ${fase}).
 
-ESTADO ECONÓMICO: ${estado.st.toFixed(2)} ST, ${estado.usuarios} usuarios (${estado.usuarios_pago} pago), día ${estado.dia_simulacion}.
+ESTADO ECONÓMICO: ${estado.st.toFixed(2)} ST (simula USDT), ${estado.usuarios} usuarios (${estado.usuarios_pago} pago), día ${estado.dia_simulacion}.
 
-ESTADO DE LÍMITES CLOUDFLARE (plan gratuito):
-${estadoCF}
-
-PLAN DE SHADOW ARISE:
-${planConstruccion}
+CAPACIDAD REAL CLOUDFLARE (datos reales del día):
+${cfCheck.modo === 'real' || cfCheck.modo === 'cache' ? JSON.stringify(cfCheck.capacidad_actual) : 'Sin datos reales disponibles'}
 
 MATERIAL DEL HISTORIAL LARGO:
 ${material || 'Sin material indexado. Usa lo que sepas.'}
@@ -452,8 +476,8 @@ REGLAS:
 - NO des opciones A/B/C. El Comandante quiere que TÚ decidas.
 - Debe ser específico y basado en el material del historial largo.
 - Consecuencias económicas reales en ST, usuarios y retención.
+- Considera tu capacidad REAL de Cloudflare en la decisión.
 - Congruente con el objetivo del Comandante.
-- Si el tema es "limites_cloudflare", el escenario debe describir un límite concreto agotándose.
 - ${fase <= 1 ? 'Simple. Aprende lo básico.' : fase <= 2 ? 'Con matices económicos.' : fase <= 3 ? 'Complejo.' : 'Muy complejo. Estratégico.'}
 
 FORMATO:
@@ -475,9 +499,8 @@ CONSECUENCIAS POTENCIALES: (qué se juega)`;
     estado.gastos_totales += costoEscenario;
     await guardarEstado(e, estado);
 
-    const r = await db.prepare(
-      'INSERT INTO sandbox_escenarios(tipo,contexto,creado) VALUES(?,?,?)'
-    ).bind(tema, contenido, Date.now()).run();
+    const r = await db.prepare('INSERT INTO sandbox_escenarios(tipo,contexto,creado) VALUES(?,?,?)')
+      .bind(tema, contenido, Date.now()).run();
 
     const ap = await leerAprendizaje(e);
     if (!ap.en_progreso.includes(tema)) ap.en_progreso.push(tema);
@@ -491,34 +514,27 @@ CONSECUENCIAS POTENCIALES: (qué se juega)`;
 }
 
 // ============================================================
-// ESCENARIO ESPECIAL: LÍMITE CF ALCANZADO
+// ESCENARIO ESPECIAL: LÍMITE CF REAL ALCANZADO
 // ============================================================
 async function escenarioLimiteCF(e, detalles) {
   const ai = e.ayanokoji_IA;
   const db = gDB(e, 'agente');
   const estado = await leerEstado(e);
-  const lim = await leerLimites(e);
 
-  const detallesTexto = detalles.map(d =>
-    `${d.recurso}: ${d.usado}/${d.max} (intentó usar ${d.intento} más)`
-  ).join('\n');
+  const detallesTexto = detalles.map(d => `${d.recurso}: ${d.usado}/${d.max}`).join('\n');
 
-  const prompt = `Eres Ayanokōji Digital. Un límite de Cloudflare se ha agotado intentando ejecutar una acción.
+  const prompt = `Eres Ayanokōji Digital. Tu capacidad REAL de Cloudflare se ha agotado intentando ejecutar una acción.
 
-LÍMITES AGOTADOS:
+LÍMITES REALES AGOTADOS:
 ${detallesTexto}
 
 ESTADO ACTUAL:
-- ST disponibles: ${estado.st.toFixed(2)}
-- Usuarios: ${estado.usuarios}
-- Servicios en pago: ${estado.servicios_pago.join(', ') || 'ninguno'}
+- ST disponibles (simulan USDT): ${estado.st.toFixed(2)}
+- Usuarios simulados: ${estado.usuarios}
+- Servicios en pago real: ${estado.servicios_pago.join(', ') || 'ninguno'}
 
-DECISIÓN:
-¿Qué haces? Tienes que elegir entre:
-- Migrar ese servicio a plan de pago con x402
-- Esperar al reset diario
-- Reducir operaciones
-- Alguna alternativa que se te ocurra
+DECISIÓN (sin opciones):
+¿Qué haces? Tienes que encontrar TÚ la solución entre migrar a pago con x402, esperar al reset diario, reducir operaciones, o algo mejor.
 
 Analiza y decide tú. Explica el porqué en máximo 400 palabras.`;
 
@@ -529,11 +545,10 @@ Analiza y decide tú. Explica el porqué en máximo 400 palabras.`;
       temperature: 0.6
     });
 
-    const escenario = `[SITUACIÓN CRÍTICA — LÍMITE CF]\n${detallesTexto}\n\n${res.response || ''}`;
+    const escenario = `[SITUACIÓN CRÍTICA — LÍMITE CF REAL]\n${detallesTexto}\n\n${res.response || ''}`;
 
-    const r = await db.prepare(
-      'INSERT INTO sandbox_escenarios(tipo,contexto,creado) VALUES(?,?,?)'
-    ).bind('limite_cf_real', escenario, Date.now()).run();
+    const r = await db.prepare('INSERT INTO sandbox_escenarios(tipo,contexto,creado) VALUES(?,?,?)')
+      .bind('limite_cf_real', escenario, Date.now()).run();
 
     await db.prepare('INSERT INTO sandbox_lecciones(escenario_id,area,leccion,creada) VALUES(?,?,?,?)')
       .bind(r.meta.last_row_id, 'limites_cloudflare', escenario.substring(0, 1500), Date.now()).run();
@@ -555,15 +570,12 @@ export async function decidir(e, escenarioId) {
   if (!esc) return { error: 'Escenario no encontrado.' };
 
   const estado = await leerEstado(e);
-  if (estado.st < COSTO.decision) return { error: 'Sin ST para decidir.' };
+  if (estado.st < COSTO_ST.decision) return { error: 'Sin ST para decidir.' };
 
   const cfCheck = await consumirCF(e, 'decision');
   if (!cfCheck.ok) {
-    return { ok: true, mensaje: 'No puedo decidir: límite CF agotado.', cf: cfCheck.detalles };
+    return { ok: true, mensaje: 'No puedo decidir: límite CF real agotado.', cf: cfCheck.detalles };
   }
-
-  const construccion = await leerConstruccion(e);
-  const plan = construccion.plan.texto ? construccion.plan.texto.substring(0, 2000) : '';
 
   let lecciones = [];
   try {
@@ -573,15 +585,12 @@ export async function decidir(e, escenarioId) {
   const lecTexto = lecciones.length ? lecciones.map(l => `[${l.area}] ${l.leccion}`).join('\n') : 'Sin lecciones previas.';
 
   const resDec = await ai.run(MODELO_RAZONAMIENTO, {
-    messages: [{ role: 'user', content: `Eres Ayanokōji Digital operando Shadow Arise en simulación.
-
-PLAN:
-${plan}
+    messages: [{ role: 'user', content: `Eres Ayanokōji Digital operando en simulación.
 
 LECCIONES PREVIAS:
 ${lecTexto}
 
-ESTADO: ${estado.st.toFixed(2)} ST, ${estado.usuarios} usuarios, ${estado.usuarios_pago} pago.
+ESTADO: ${estado.st.toFixed(2)} ST, ${estado.usuarios} usuarios.
 
 ESCENARIO:
 ${esc.contexto}
@@ -593,7 +602,7 @@ Encuentra TÚ la solución. No hay opciones. Decide y explica el porqué. Máxim
   const decision = resDec.response || '';
 
   const resSim = await ai.run(MODELO_RAZONAMIENTO, {
-    messages: [{ role: 'user', content: `Escenario: ${esc.contexto}\n\nDecisión: "${decision}"\n\nSimula el resultado realista. Consecuencias en ST, usuarios, retención, límites CF. ¿Funciona? 200 palabras.` }],
+    messages: [{ role: 'user', content: `Escenario: ${esc.contexto}\n\nDecisión: "${decision}"\n\nSimula el resultado realista. Consecuencias en ST, usuarios, retención, capacidad CF. ¿Funciona? 200 palabras.` }],
     max_tokens: 500,
     temperature: 0.7
   });
@@ -606,8 +615,8 @@ Encuentra TÚ la solución. No hay opciones. Decide y explica el porqué. Máxim
   });
   const autoevaluacion = resEval.response || '';
 
-  estado.st -= COSTO.decision;
-  estado.gastos_totales += COSTO.decision;
+  estado.st -= COSTO_ST.decision;
+  estado.gastos_totales += COSTO_ST.decision;
 
   const mUsuarios = resultado.match(/(\d+)\s*(nuevos usuarios|usuarios nuevos|usuarios ganados)/i);
   const mSt = resultado.match(/(\d+(?:\.\d+)?)\s*ST/i);
@@ -616,15 +625,6 @@ Encuentra TÚ la solución. No hay opciones. Decide y explica el porqué. Máxim
     const cantidad = parseFloat(mSt[1]);
     estado.st += cantidad;
     estado.ingresos_totales += cantidad;
-  }
-
-  if (/migrar a pago|migración a pago|x402.*pago|plan de pago/i.test(decision + ' ' + resultado)) {
-    const lim = await leerLimites(e);
-    lim.migraciones_pago.push({ fecha: Date.now(), decision: decision.substring(0, 200) });
-    await guardarLimites(e, lim);
-    if (!estado.servicios_pago.includes('workers_ai')) {
-      estado.servicios_pago.push('workers_ai');
-    }
   }
 
   await guardarEstado(e, estado);
@@ -653,32 +653,21 @@ Encuentra TÚ la solución. No hay opciones. Decide y explica el porqué. Máxim
 }
 
 // ============================================================
-// SIMULAR ARRANQUE
+// SIMULAR ARRANQUE (solo cuando ya está preparado)
 // ============================================================
 export async function simularArranque(e) {
   const ai = e.ayanokoji_IA;
   if (!ai) return { error: 'IA no disponible.' };
 
-  const construccion = await leerConstruccion(e);
-  if (!construccion.completado) return await construirShadowArise(e);
+  const ap = await leerAprendizaje(e);
+  if (!ap.dominados.includes('preparacion_shadow_arise')) {
+    return await prepararShadowArise(e);
+  }
 
   const estado = await leerEstado(e);
-  const plan = construccion.plan.texto ? construccion.plan.texto.substring(0, 2500) : '';
 
   const res = await ai.run(MODELO_RAZONAMIENTO, {
-    messages: [{ role: 'user', content: `Eres Ayanokōji Digital. Shadow Arise sale al mundo con 0 ST.
-
-TU PLAN:
-${plan}
-
-Simula los primeros 7 días:
-- ¿Cuántos usuarios llegaron? (realista)
-- ¿Cuántos pagaron?
-- ¿Cuánto ST generaron?
-- ¿Qué canal funcionó mejor?
-- ¿Qué falló y cómo lo resolviste?
-
-Sé realista. Máximo 400 palabras.` }],
+    messages: [{ role: 'user', content: `Eres Ayanokōji Digital. Shadow Arise acaba de salir al mundo con 0 ST.\n\nSimula los primeros 7 días:\n- ¿Cuántos usuarios llegaron? (realista)\n- ¿Cuántos pagaron?\n- ¿Cuánto ST generaron?\n- ¿Qué canal funcionó mejor?\n- ¿Qué falló y cómo lo resolviste?\n\nSé realista. Máximo 400 palabras.` }],
     max_tokens: 800,
     temperature: 0.7
   });
@@ -702,7 +691,7 @@ Sé realista. Máximo 400 palabras.` }],
 }
 
 // ============================================================
-// PRIORIZACIÓN AUTÓNOMA
+// PRIORIZAR GASTOS
 // ============================================================
 export async function priorizarGastos(e) {
   const ai = e.ayanokoji_IA;
@@ -710,28 +699,32 @@ export async function priorizarGastos(e) {
   const estado = await leerEstado(e);
   if (estado.st < 0.5) return { ok: true, mensaje: 'Presupuesto insuficiente.' };
 
-  const lim = await leerLimites(e);
-  const estadoCF = Object.entries(LIMITES_CF)
-    .map(([k, max]) => `${k}: ${lim[k] || 0}/${max} (${Math.round(((lim[k] || 0) / max) * 100)}%)`)
-    .join('\n');
+  const cap = await medirCapacidades(e);
+  const capTexto = cap.ok ? JSON.stringify({
+    workers_requests: `${cap.workers_requests}/${cap.limites.workers_requests}`,
+    d1_reads: `${cap.d1_reads}/${cap.limites.d1_reads}`,
+    d1_writes: `${cap.d1_writes}/${cap.limites.d1_writes}`,
+    kv_reads: `${cap.kv_reads}/${cap.limites.kv_reads}`,
+    kv_writes: `${cap.kv_writes}/${cap.limites.kv_writes}`
+  }) : 'Sin datos reales disponibles.';
 
   const res = await ai.run(MODELO_RAZONAMIENTO, {
-    messages: [{ role: 'user', content: `Ayanokōji Digital tiene ${estado.st.toFixed(2)} ST.
+    messages: [{ role: 'user', content: `Ayanokōji Digital tiene ${estado.st.toFixed(2)} ST (simulan USDT).
 
 Servicios:
 ${Object.entries(SERVICIOS).map(([k, v]) => `- ${v.nombre}: ${v.costo_diario} ST/día (prioridad ${v.prioridad}${v.critico ? ', CRÍTICO' : ''})`).join('\n')}
 
-Estado de límites CF hoy:
-${estadoCF}
+Capacidad REAL Cloudflare hoy:
+${capTexto}
 
-Servicios ya en plan de pago: ${estado.servicios_pago.join(', ') || 'ninguno'}
+Servicios ya en plan de pago real: ${estado.servicios_pago.join(', ') || 'ninguno'}
 
-¿Qué servicios activar/priorizar? ¿Cuál migrar a pago con x402 si está cerca del límite? Justifica.` }],
+¿Qué servicios activar/priorizar? ¿Cuál migrar a pago con x402 si está cerca del límite real? Justifica.` }],
     max_tokens: 500,
     temperature: 0.5
   });
 
-  return { ok: true, plan: res.response || '', st_actual: estado.st };
+  return { ok: true, plan: res.response || '', st_actual: estado.st, capacidad_real: cap.ok ? 'consultada' : 'no disponible' };
 }
 
 // ============================================================
@@ -743,9 +736,7 @@ async function simularCrecimiento(e) {
   const estado = await leerEstado(e);
 
   const res = await ai.run(MODELO_RAZONAMIENTO, {
-    messages: [{ role: 'user', content: `Shadow Arise: ${estado.usuarios} usuarios (${estado.usuarios_pago} pago), ${estado.st.toFixed(2)} ST, día ${estado.dia_simulacion}.
-
-Simula el crecimiento orgánico de esta semana. Sé realista. 200 palabras.` }],
+    messages: [{ role: 'user', content: `Shadow Arise: ${estado.usuarios} usuarios (${estado.usuarios_pago} pago), ${estado.st.toFixed(2)} ST, día ${estado.dia_simulacion}.\n\nSimula el crecimiento orgánico de esta semana. Sé realista. 200 palabras.` }],
     max_tokens: 400,
     temperature: 0.7
   });
@@ -765,7 +756,7 @@ Simula el crecimiento orgánico de esta semana. Sé realista. 200 palabras.` }],
 }
 
 // ============================================================
-// CRON AUTÓNOMO
+// CRON AUTÓNOMO DEL SANDBOX
 // ============================================================
 export async function cronSandbox(e) {
   const db = gDB(e, 'agente');
@@ -775,43 +766,47 @@ export async function cronSandbox(e) {
   const estado = await leerEstado(e);
   if (!estado) return;
 
-  const construccion = await leerConstruccion(e);
-
   const lim = await leerLimites(e);
-  if (lim.cron_execuciones >= LIMITES_CF.cron_execuciones) {
-    return;
-  }
+  if (lim.cron_execuciones >= 500) return;
   lim.cron_execuciones += 1;
   await guardarLimites(e, lim);
 
-  if (!construccion.completado) {
-    await construirShadowArise(e);
+  const ap = await leerAprendizaje(e);
+
+  // 1. Si no ha aprendido a preparar Shadow Arise, eso primero (gratis)
+  if (!ap.dominados.includes('preparacion_shadow_arise')) {
+    await prepararShadowArise(e);
     return;
   }
 
+  // 2. Si no hay usuarios, simular arranque
   if (estado.usuarios === 0) {
     await simularArranque(e);
     return;
   }
 
-  if (estado.st < 0.5 && estado.usuarios > 0 && estado.dia_simulacion % 3 === 0) {
+  // 3. Si no hay ST pero hay usuarios, simular crecimiento
+  if (estado.st < 0.5 && estado.dia_simulacion % 3 === 0) {
     await simularCrecimiento(e);
     return;
   }
 
+  // 4. Cada 5 días, priorizar gastos
   if (estado.st > 2 && estado.dia_simulacion % 5 === 0) {
     try { await priorizarGastos(e); } catch (x) {}
   }
 
+  // 5. Procesar escenarios pendientes
   const escPend = await db.prepare("SELECT id FROM sandbox_escenarios WHERE completado IS NULL LIMIT 2").all();
   if (escPend.results && escPend.results.length) {
     for (const esc of escPend.results) {
-      if (estado.st >= COSTO.decision) await decidir(e, esc.id);
+      if (estado.st >= COSTO_ST.decision) await decidir(e, esc.id);
     }
     return;
   }
 
-  if (estado.st >= COSTO.escenario) {
+  // 6. Generar uno nuevo
+  if (estado.st >= COSTO_ST.escenario) {
     const g = await generarEscenario(e);
     if (!g.error && g.id) await decidir(e, g.id);
   }
@@ -832,12 +827,21 @@ export async function verSandbox(r, e) {
     const stats = await db.prepare("SELECT COUNT(*) as total, SUM(CASE WHEN completado IS NOT NULL THEN 1 ELSE 0 END) as completados FROM sandbox_escenarios").first();
     const estado = await leerEstado(e);
     const ap = await leerAprendizaje(e);
-    const construccion = await leerConstruccion(e);
     const lim = await leerLimites(e);
 
-    const limitesEstado = {};
-    for (const [k, max] of Object.entries(LIMITES_CF)) {
-      limitesEstado[k] = { usado: lim[k] || 0, max, pct: Math.round(((lim[k] || 0) / max) * 100) };
+    // Capacidad real (cache o consulta)
+    const cap = await medirCapacidades(e);
+    let capacidadReal = null;
+    if (cap.ok) {
+      capacidadReal = {
+        workers_requests: { usado: cap.workers_requests, max: cap.limites.workers_requests, pct: Math.round(cap.workers_requests / cap.limites.workers_requests * 100) },
+        workers_errores: cap.workers_errores,
+        workers_subrequests: { usado: cap.workers_subrequests, max: cap.limites.workers_subrequests, pct: Math.round(cap.workers_subrequests / cap.limites.workers_subrequests * 100) },
+        d1_reads: { usado: cap.d1_reads, max: cap.limites.d1_reads, pct: Math.round(cap.d1_reads / cap.limites.d1_reads * 100) },
+        d1_writes: { usado: cap.d1_writes, max: cap.limites.d1_writes, pct: Math.round(cap.d1_writes / cap.limites.d1_writes * 100) },
+        kv_reads: { usado: cap.kv_reads, max: cap.limites.kv_reads, pct: Math.round(cap.kv_reads / cap.limites.kv_reads * 100) },
+        kv_writes: { usado: cap.kv_writes, max: cap.limites.kv_writes, pct: Math.round(cap.kv_writes / cap.limites.kv_writes * 100) }
+      };
     }
 
     return J({
@@ -845,9 +849,8 @@ export async function verSandbox(r, e) {
       estado_economico: estado,
       aprendizaje: ap,
       curriculum_actual: await decidirSiguienteTema(e),
-      construccion_completada: construccion.completado,
-      plan_shadow_arise: construccion.plan.texto ? construccion.plan.texto.substring(0, 3000) : null,
-      limites_cloudflare: limitesEstado,
+      capacidad_real_cloudflare: capacidadReal,
+      cron_local: { usado: lim.cron_execuciones, max: 500 },
       limites_alcanzados: lim.limites_alcanzados || [],
       migraciones_pago: lim.migraciones_pago || [],
       escenarios: esc.results || [],
