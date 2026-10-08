@@ -675,7 +675,7 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '9.2' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '9.3' });
 
     // ============ USO REAL ============
     if (p === '/api/uso_real' && r.method === 'GET') {
@@ -847,11 +847,11 @@ export default {
       });
     }
 
-    // Sandbox
-    if (p === '/api/sandbox/construir' && r.method === 'POST') {
+    // ============ SANDBOX ============
+    if (p === '/api/sandbox/preparar' && r.method === 'POST') {
       const m = await opcional('sandbox');
       if (!m) return J({ error: 'sandbox.js no instalado.' });
-      return J(await m.construirShadowArise(e));
+      return J(await m.prepararShadowArise(e));
     }
     if (p === '/api/sandbox/simular_arranque' && r.method === 'POST') {
       const m = await opcional('sandbox');
@@ -885,7 +885,7 @@ export default {
       return m.verSandbox(r, e);
     }
 
-    // Publisher
+    // ============ PUBLISHER ============
     if (p === '/api/publicar' && r.method === 'POST') {
       const m = await opcional('publisher');
       if (!m) return J({ error: 'publisher.js no instalado.' });
@@ -915,7 +915,7 @@ export default {
       return J({ total: r1.results.length, publicaciones: r1.results });
     }
 
-    // Autonomía
+    // ============ AUTONOMÍA ============
     if (p === '/api/workers' && r.method === 'GET') {
       const m = await opcional('autonomia');
       if (!m) return J({ error: 'autonomia.js no instalado.' });
@@ -974,7 +974,7 @@ export default {
       return J({ total: r1.results.length, acciones: r1.results });
     }
 
-    // Feed y notificaciones
+    // ============ FEED Y NOTIFICACIONES ============
     if (p === '/feed') {
       const m = await opcional('social');
       if (!m) return new Response('social.js no instalado', { status: 503 });
