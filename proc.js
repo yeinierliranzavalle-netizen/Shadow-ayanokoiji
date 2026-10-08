@@ -33,6 +33,111 @@ async function reconstruir(kv, prefix) {
   return texto;
 }
 
+// ============================================================
+// CONSULTAR CAPACIDAD REAL DE CLOUDFLARE
+// Ayanokōji usa esto antes de decidir. Datos reales, no locales.
+// ============================================================
+async function consultarCapacidadReal(e) {
+  const accountId = e.CF_ACCOUNT_ID;
+  const token = e.CF_API_TOKEN;
+  if (!accountId || !token) return { ok: false, error: 'Sin CF_ACCOUNT_ID o CF_API_TOKEN.' };
+
+  // Cache 5 min para no saturar
+  const kv = gKV(e, 'agente');
+  if (kv) {
+    try {
+      const cache = await kv.get('capacidad_real_cache');
+      if (cache) {
+        const p = JSON.parse(cache);
+        if (Date.now() - p.ts < 5 * 60 * 1000) return { ok: true, cache: true, ...p.datos };
+      }
+    } catch (x) {}
+  }
+
+  const ahora = new Date();
+  const inicioDiaISO = new Date(Date.UTC(ahora.getUTCFullYear(), ahora.getUTCMonth(), ahora.getUTCDate())).toISOString();
+  const inicioDiaDate = inicioDiaISO.split('T')[0];
+
+  const query = `
+    query GetUsage($accountTag: String!, $startDate: String!, $startDatetime: String!) {
+      viewer {
+        accounts(filter: {accountTag: $accountTag}) {
+          workersInvocationsAdaptive(limit: 1000, filter: { datetime_geq: $startDatetime }) {
+            sum { requests errors subrequests }
+          }
+          d1AnalyticsAdaptiveGroups(limit: 100, filter: { date_geq: $startDate }) {
+            sum { readQueries writeQueries }
+          }
+          kvOperationsAdaptiveGroups(limit: 100, filter: { date_geq: $startDate }) {
+            sum { requests }
+            dimensions { actionType }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const r = await fetch('https://api.cloudflare.com/client/v4/graphql', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, variables: { accountTag: accountId, startDate: inicioDiaDate, startDatetime: inicioDiaISO } })
+    });
+
+    const data = await r.json();
+    if (!data.data || !data.data.viewer || !data.data.viewer.accounts) {
+      return { ok: false, error: 'GraphQL sin datos.' };
+    }
+
+    const cuenta = data.data.viewer.accounts[0];
+    let workers_requests = 0, workers_subrequests = 0, workers_errores = 0;
+    for (const g of (cuenta.workersInvocationsAdaptive || [])) {
+      workers_requests += g.sum?.requests || 0;
+      workers_subrequests += g.sum?.subrequests || 0;
+      workers_errores += g.sum?.errors || 0;
+    }
+
+    let d1_reads = 0, d1_writes = 0;
+    for (const g of (cuenta.d1AnalyticsAdaptiveGroups || [])) {
+      d1_reads += g.sum?.readQueries || 0;
+      d1_writes += g.sum?.writeQueries || 0;
+    }
+
+    let kv_reads = 0, kv_writes = 0;
+    for (const g of (cuenta.kvOperationsAdaptiveGroups || [])) {
+      const tipo = (g.dimensions?.actionType || '').toLowerCase();
+      const c = g.sum?.requests || 0;
+      if (tipo.includes('read')) kv_reads += c;
+      else if (tipo.includes('write')) kv_writes += c;
+    }
+
+    const datos = {
+      workers_requests, workers_subrequests, workers_errores,
+      d1_reads, d1_writes, kv_reads, kv_writes,
+      limites: {
+        workers_requests: 100000,
+        workers_subrequests: 1000000,
+        d1_reads: 5000000,
+        d1_writes: 100000,
+        kv_reads: 100000,
+        kv_writes: 1000
+      },
+      ts: Date.now()
+    };
+
+    if (kv) {
+      try { await kv.put('capacidad_real_cache', JSON.stringify({ ts: Date.now(), datos }), { expirationTtl: 600 }); } catch (x) {}
+    }
+
+    return { ok: true, cache: false, ...datos };
+  } catch (x) {
+    return { ok: false, error: x.message };
+  }
+}
+
+// ============================================================
+// SUBIR
+// ============================================================
 export async function subir(r, e, c) {
   try {
     const f = await r.formData();
@@ -206,20 +311,7 @@ export async function consolidar(e, aId, d, ac) {
     const rf = await ai.run(MODELO_LIGERO, {
       messages: [{
         role: 'user',
-        content: `Genera un PERFIL MAESTRO del Comandante Yeinier en 9 secciones. Cada sección EXPLICATIVA: QUÉ, POR QUÉ y CÓMO. Formato: "### N. TITULO:" y termina con "###". Mínimo 80 palabras.
-
-### 1. IDENTIDAD
-### 2. CONTEXTO
-### 3. OBJETIVO
-### 4. PROYECTO SHADOW ARISE
-### 5. ALIADO DIGITAL
-### 6. IA PUBLICADORA
-### 7. REGLAS OPERATIVAS
-### 8. DECISIONES TOMADAS Y SU RAZÓN
-### 9. IDEAS PENDIENTES
-
-Resúmenes:
-${tc.substring(0, 9000)}`
+        content: `Genera un PERFIL MAESTRO del Comandante Yeinier en 9 secciones. Cada sección EXPLICATIVA: QUÉ, POR QUÉ y CÓMO. Formato: "### N. TITULO:" y termina con "###". Mínimo 80 palabras.\n\n### 1. IDENTIDAD\n### 2. CONTEXTO\n### 3. OBJETIVO\n### 4. PROYECTO SHADOW ARISE\n### 5. ALIADO DIGITAL\n### 6. IA PUBLICADORA\n### 7. REGLAS OPERATIVAS\n### 8. DECISIONES TOMADAS Y SU RAZÓN\n### 9. IDEAS PENDIENTES\n\nResúmenes:\n${tc.substring(0, 9000)}`
       }],
       max_tokens: 2500,
       temperature: 0.4
@@ -247,7 +339,7 @@ ${tc.substring(0, 9000)}`
 }
 
 // ============================================================
-// CRON RETOMAR — Cada 2 min. Solo procesos atascados.
+// CRON RETOMAR — Solo procesos atascados
 // ============================================================
 export async function cronRetomar(e) {
   const db = gDB(e, 'agente');
@@ -276,8 +368,7 @@ export async function cronRetomar(e) {
 }
 
 // ============================================================
-// CRON AUTÓNOMO — El cerebro. Despierta, mira el tablero, decide.
-// Corre cada 30 min. Evalúa el estado y elige UNA acción.
+// CRON AUTÓNOMO — El cerebro. Ahora consulta CAPACIDAD REAL primero.
 // ============================================================
 export async function cronAutonomo(e) {
   const db = gDB(e, 'agente');
@@ -285,13 +376,31 @@ export async function cronAutonomo(e) {
   const ai = e.ayanokoji_IA;
   if (!db || !kv || !ai) return;
 
-  // No correr más de una vez cada 25 min
   const ultima = await kv.get('cron_autonomo_ultima');
   const ahora = Date.now();
   if (ultima && ahora - parseInt(ultima) < 25 * 60 * 1000) return;
   await kv.put('cron_autonomo_ultima', String(ahora), { expirationTtl: 7200 });
 
-  // ============ FASE 1: OBSERVAR EL TABLERO ============
+  // ============ FASE 1: CONSULTAR CAPACIDAD REAL ============
+  const capacidad = await consultarCapacidadReal(e);
+  const capDisponible = capacidad.ok;
+
+  // Si la capacidad real dice que estamos por encima del 80% de algo crítico, esperar
+  if (capDisponible) {
+    const wr = capacidad.workers_requests || 0;
+    const d1w = capacidad.d1_writes || 0;
+    const kvw = capacidad.kv_writes || 0;
+    if (wr > 80000 || d1w > 80000 || kvw > 800) {
+      try {
+        await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
+          .bind('cron_autonomo', 'Capacidad real alta',
+            `Workers: ${wr}/100000. D1 writes: ${d1w}/100000. KV writes: ${kvw}/1000. No actúo para no agotar.`, Date.now()).run();
+      } catch (x) {}
+      return;
+    }
+  }
+
+  // ============ FASE 2: OBSERVAR EL TABLERO ============
   const tablero = {
     procesos_activos: 0,
     archivos_huerfanos: 0,
@@ -299,9 +408,11 @@ export async function cronAutonomo(e) {
     temas_indexados: 0,
     modo_indice: 'ninguno',
     resumenes_viejos: 0,
-    presupuesto_hoy: {},
     errores_recientes: 0,
-    acciones_sin_resultado: 0,
+    tareas_pendientes: 0,
+    capacidad_workers_pct: capDisponible ? Math.round((capacidad.workers_requests || 0) / 100000 * 100) : null,
+    capacidad_d1w_pct: capDisponible ? Math.round((capacidad.d1_writes || 0) / 100000 * 100) : null,
+    capacidad_kvw_pct: capDisponible ? Math.round((capacidad.kv_writes || 0) / 1000 * 100) : null,
     hora: new Date().getUTCHours()
   };
 
@@ -324,16 +435,8 @@ export async function cronAutonomo(e) {
   } catch (x) {}
 
   try {
-    const r = await db.prepare("SELECT COUNT(*) as n FROM resumenes_chat WHERE fecha < ?").bind(Date.now() - 30 * 86400000).first();
+    const r = await db.prepare("SELECT COUNT(*) as n FROM resumenes_chat WHERE fecha < ?").bind(ahora - 30 * 86400000).first();
     tablero.resumenes_viejos = r ? r.n : 0;
-  } catch (x) {}
-
-  try {
-    const fecha = new Date().toISOString().split('T')[0];
-    for (const area of ['chat','procesamiento','sandbox','publisher','vision']) {
-      const c = await kv.get('presupuesto:' + fecha + ':' + area);
-      tablero.presupuesto_hoy[area] = c ? parseInt(c) : 0;
-    }
   } catch (x) {}
 
   try {
@@ -343,80 +446,64 @@ export async function cronAutonomo(e) {
 
   try {
     const t = await db.prepare("SELECT COUNT(*) as n FROM tareas WHERE estado='pendiente'").first();
-    tablero.acciones_sin_resultado = t ? t.n : 0;
+    tablero.tareas_pendientes = t ? t.n : 0;
   } catch (x) {}
 
-  // ============ FASE 2: DECIDIR ============
-  // Lista de acciones candidatas según lo que ve el tablero
+  // ============ FASE 3: DECIDIR ============
+  if (tablero.procesos_activos > 0) return;
+
   const candidatas = [];
 
-  // No puede actuar si hay procesos activos (prioridad crítica)
-  if (tablero.procesos_activos > 0) {
-    return; // Esperar
-  }
-
-  // 1. Reindexar con IA si el índice está pobre y hay margen
   if (tablero.modo_indice !== 'ia_con_fallback' && tablero.mensajes_largo > 100 && tablero.temas_indexados < tablero.mensajes_largo * 3) {
     candidatas.push({ tipo: 'reindexar', peso: 8 });
   }
-
-  // 2. Limpiar KV huérfanos (siempre útil si hay muchos)
   if (tablero.archivos_huerfanos > 30) {
     candidatas.push({ tipo: 'limpiar_kv', peso: 5 });
   }
-
-  // 3. Consolidar resúmenes viejos (si hay más de 10)
   if (tablero.resumenes_viejos > 10) {
     candidatas.push({ tipo: 'consolidar_resumenes', peso: 6 });
   }
-
-  // 4. Analizar errores recientes (si hay más de 5 en 24h)
   if (tablero.errores_recientes > 5) {
     candidatas.push({ tipo: 'analizar_errores', peso: 7 });
   }
-
-  // 5. Procesar tareas pendientes
-  if (tablero.acciones_sin_resultado > 0) {
+  if (tablero.tareas_pendientes > 0) {
     candidatas.push({ tipo: 'procesar_tareas', peso: 4 });
   }
-
-  // 6. Reflexión silenciosa: leer historial largo por tema y sintetizar aprendizajes
   if (tablero.mensajes_largo > 500 && tablero.hora >= 2 && tablero.hora < 6) {
     candidatas.push({ tipo: 'reflexionar', peso: 3 });
   }
 
-  // Si no hay nada urgente, esperar
+  // Si el índice está por debajo de 3 temas/mensaje Y hay capacidad, subir el peso del reindexado
+  if (capDisponible && tablero.capacidad_workers_pct !== null && tablero.capacidad_workers_pct < 50) {
+    const idx = candidatas.find(c => c.tipo === 'reindexar');
+    if (idx) idx.peso += 2;
+  }
+
   if (!candidatas.length) {
     try {
       await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
-        .bind('cron_autonomo', 'Noche tranquila', 'Observé el tablero. Nada requiere acción. Sigo esperando.', Date.now()).run();
+        .bind('cron_autonomo', 'Noche tranquila',
+          `Observé el tablero y la capacidad real. Nada requiere acción. Workers: ${tablero.capacidad_workers_pct}%.`, ahora).run();
     } catch (x) {}
     return;
   }
 
-  // Elegir la de mayor peso (más importante)
   candidatas.sort((a, b) => b.peso - a.peso);
   const elegida = candidatas[0];
 
-  // ============ FASE 3: EJECUTAR ============
+  // ============ FASE 4: EJECUTAR ============
   let resultado = '';
   try {
     if (elegida.tipo === 'reindexar') {
-      // Verificar IA disponible
       try {
-        const prueba = await ai.run(MODELO_LIGERO, {
-          messages: [{ role: 'user', content: 'ok' }],
-          max_tokens: 3
-        });
+        const prueba = await ai.run(MODELO_LIGERO, { messages: [{ role: 'user', content: 'ok' }], max_tokens: 3 });
         if (prueba && prueba.response) {
           const idx = await indexarHistorial({ json: async () => ({}) }, e);
           resultado = 'Reindexado con IA. Temas: ' + (idx.temas_insertados || '?');
         } else {
           resultado = 'IA no disponible, pospuesto.';
         }
-      } catch (x) {
-        resultado = 'Reindexado falló: ' + x.message;
-      }
+      } catch (x) { resultado = 'Reindexado falló: ' + x.message; }
     }
 
     if (elegida.tipo === 'limpiar_kv') {
@@ -432,8 +519,7 @@ export async function cronAutonomo(e) {
     }
 
     if (elegida.tipo === 'consolidar_resumenes') {
-      // Tomar los 10 resúmenes más viejos, fusionarlos en uno solo con IA, y guardar
-      const viejos = await db.prepare("SELECT id, resumen FROM resumenes_chat WHERE fecha < ? ORDER BY fecha ASC LIMIT 10").bind(Date.now() - 30 * 86400000).all();
+      const viejos = await db.prepare("SELECT id, resumen FROM resumenes_chat WHERE fecha < ? ORDER BY fecha ASC LIMIT 10").bind(ahora - 30 * 86400000).all();
       if (viejos.results && viejos.results.length >= 5) {
         const texto = viejos.results.map(r => r.resumen).join('\n---\n');
         try {
@@ -450,79 +536,65 @@ export async function cronAutonomo(e) {
             await db.prepare('DELETE FROM resumenes_chat WHERE id IN (' + ph + ')').bind(...ids).run();
             resultado = 'Consolidados ' + ids.length + ' resúmenes.';
           }
-        } catch (x) {
-          resultado = 'Consolidación IA falló: ' + x.message;
-        }
-      } else {
-        resultado = 'Insuficientes resúmenes viejos.';
+        } catch (x) { resultado = 'Consolidación IA falló.'; }
       }
     }
 
     if (elegida.tipo === 'analizar_errores') {
       const errs = await db.prepare("SELECT tipo, descripcion, detalle FROM acciones WHERE exito=0 ORDER BY fecha DESC LIMIT 10").all();
       if (errs.results && errs.results.length) {
-        const texto = errs.results.map(e => `[${e.tipo}] ${e.descripcion} — ${e.detalle}`).join('\n');
+        const texto = errs.results.map(x => `[${x.tipo}] ${x.descripcion} — ${x.detalle}`).join('\n');
         try {
           const anal = await ai.run(MODELO_LIGERO, {
             messages: [{ role: 'user', content: `Analiza estos errores recientes. ¿Hay un patrón? ¿Qué solución propones? Máximo 200 palabras.\n\n${texto}` }],
             max_tokens: 400,
             temperature: 0.5
           });
-          resultado = 'Análisis de errores: ' + (anal.response || '').substring(0, 300);
-        } catch (x) {
-          resultado = 'Análisis IA falló.';
-        }
+          resultado = 'Análisis: ' + (anal.response || '').substring(0, 300);
+        } catch (x) { resultado = 'Análisis falló.'; }
       }
     }
 
     if (elegida.tipo === 'procesar_tareas') {
-      // Aquí el worker llama a cronColaTareas, pero podemos dejar el registro
       resultado = 'Tareas pendientes detectadas. Delegado al worker.';
     }
 
     if (elegida.tipo === 'reflexionar') {
-      // Leer un fragmento del historial largo y extraer una idea para el comandante
       try {
         const frag = await db.prepare('SELECT contenido FROM historial_largo ORDER BY RANDOM() LIMIT 5').all();
         const texto = (frag.results || []).map(x => x.contenido).join('\n---\n');
         if (texto.length > 200) {
           const refl = await ai.run(MODELO_LIGERO, {
-            messages: [{ role: 'user', content: `Lee estos fragmentos del historial del Comandante y extrae UNA idea o patrón que valga la pena recordarle. Máximo 150 palabras. Directo, sin adornos.\n\n${texto.substring(0, 6000)}` }],
+            messages: [{ role: 'user', content: `Lee estos fragmentos del historial del Comandante y extrae UNA idea o patrón que valga la pena recordarle. Máximo 150 palabras. Directo.\n\n${texto.substring(0, 6000)}` }],
             max_tokens: 300,
             temperature: 0.6
           });
           resultado = 'Reflexión: ' + (refl.response || '').substring(0, 300);
         }
-      } catch (x) {
-        resultado = 'Reflexión falló.';
-      }
+      } catch (x) { resultado = 'Reflexión falló.'; }
     }
 
-    // Registrar la acción tomada
     try {
       await db.prepare('INSERT INTO acciones(tipo,descripcion,exito,detalle,fecha) VALUES(?,?,?,?,?)')
-        .bind('autonomo_' + elegida.tipo, 'Cron autónomo eligió: ' + elegida.tipo, 1, resultado.substring(0, 500), ahora).run();
+        .bind('autonomo_' + elegida.tipo, 'Cron eligió: ' + elegida.tipo, 1, resultado.substring(0, 500), ahora).run();
     } catch (x) {}
 
     try {
       await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
-        .bind('cron_autonomo', 'Acción autónoma: ' + elegida.tipo, resultado, ahora).run();
+        .bind('cron_autonomo', 'Acción autónoma: ' + elegida.tipo,
+          `${resultado}\n\nCapacidad real usada para decidir: Workers ${tablero.capacidad_workers_pct}%, D1 writes ${tablero.capacidad_d1w_pct}%, KV writes ${tablero.capacidad_kvw_pct}%`,
+          ahora).run();
     } catch (x) {}
 
   } catch (x) {
     try {
       await db.prepare('INSERT INTO acciones(tipo,descripcion,exito,detalle,fecha) VALUES(?,?,?,?,?)')
-        .bind('autonomo_' + elegida.tipo, 'Cron autónomo falló: ' + elegida.tipo, 0, x.message, Date.now()).run();
+        .bind('autonomo_' + elegida.tipo, 'Cron falló: ' + elegida.tipo, 0, x.message, Date.now()).run();
     } catch (y) {}
   }
 }
 
-// ============================================================
-// CRON MANTENIMIENTO — Ya no hace tarea fija. Llama al autónomo.
-// ============================================================
 export async function cronMantenimiento(e) {
-  // Ya no decide tareas específicas. El cronAutonomo hace todo el trabajo.
-  // Se conserva por compatibilidad con el worker.
   return;
 }
 
@@ -539,7 +611,7 @@ export async function resumirChats(e, uid) {
     if (!msgs.results || msgs.results.length < 5) return;
     const texto = msgs.results.map(m => `Comandante: ${m.mensaje}\nAyanokōji: ${m.respuesta}`).join('\n\n');
     const res = await ai.run(MODELO_LIGERO, {
-      messages: [{ role: 'user', content: `Resume este intercambio. Explica QUÉ se habló, QUÉ se decidió, POR QUÉ, qué nuevo sobre el Comandante o el proyecto. Frases explicativas. Máximo 300 palabras.\n\n${texto.substring(0, 9000)}` }],
+      messages: [{ role: 'user', content: `Resume este intercambio. Explica QUÉ se habló, QUÉ se decidió, POR QUÉ, qué nuevo sobre el Comandante o el proyecto. Máximo 300 palabras.\n\n${texto.substring(0, 9000)}` }],
       max_tokens: 500,
       temperature: 0.3
     });
@@ -552,9 +624,6 @@ export async function resumirChats(e, uid) {
   } catch (x) {}
 }
 
-// ============================================================
-// INDEXADO HÍBRIDO
-// ============================================================
 function extraerKeywords(texto) {
   const limpio = texto.toLowerCase().replace(/[^\wáéíóúñü\s]/g, ' ').replace(/\s+/g, ' ');
   const palabras = limpio.split(' ').filter(p => p.length > 4 && !STOPWORDS.has(p) && !/^\d+$/.test(p));
@@ -570,9 +639,7 @@ export async function indexarHistorial(r, e) {
     const kv = gKV(e, 'agente');
     if (!db) return { error: 'D1 no disponible.' };
 
-    const msgs = await db.prepare(
-      'SELECT orden, contenido FROM historial_largo WHERE user_id=? ORDER BY orden ASC'
-    ).bind('comandante').all();
+    const msgs = await db.prepare('SELECT orden, contenido FROM historial_largo WHERE user_id=? ORDER BY orden ASC').bind('comandante').all();
     if (!msgs.results || !msgs.results.length) return { error: 'Historial vacío.' };
 
     await db.prepare('DELETE FROM indice_temas').run();
@@ -583,10 +650,7 @@ export async function indexarHistorial(r, e) {
     let iaDisponible = false;
     if (ai) {
       try {
-        const prueba = await ai.run(MODELO_LIGERO, {
-          messages: [{ role: 'user', content: 'ok' }],
-          max_tokens: 3
-        });
+        const prueba = await ai.run(MODELO_LIGERO, { messages: [{ role: 'user', content: 'ok' }], max_tokens: 3 });
         if (prueba && prueba.response) iaDisponible = true;
       } catch (x) {}
     }
@@ -624,9 +688,7 @@ export async function indexarHistorial(r, e) {
               }
             } catch (x) {}
           }
-        } catch (x) {
-          erroresIA++;
-        }
+        } catch (x) { erroresIA++; }
       }
 
       if (!usoTemaIA) {
@@ -645,7 +707,6 @@ export async function indexarHistorial(r, e) {
           try { await db.batch(inserciones); fallbacks++; } catch (x) {}
         }
       }
-
       procesados += lote.length;
     }
 
@@ -669,24 +730,16 @@ export async function buscarPorTema(r, e) {
     if (!q) return J({ error: 'Falta q.' });
     const db = gDB(e, 'agente');
     if (!db) return J({ error: 'D1 no disponible.' });
-    const temas = await db.prepare(
-      'SELECT DISTINCT mensaje_orden, tema, peso FROM indice_temas WHERE tema LIKE ? ORDER BY peso DESC LIMIT ?'
-    ).bind('%' + q + '%', limite).all();
+    const temas = await db.prepare('SELECT DISTINCT mensaje_orden, tema, peso FROM indice_temas WHERE tema LIKE ? ORDER BY peso DESC LIMIT ?').bind('%' + q + '%', limite).all();
     if (!temas.results || !temas.results.length) {
-      const r1 = await db.prepare(
-        'SELECT rol,contenido,orden FROM historial_largo WHERE contenido LIKE ? ORDER BY orden DESC LIMIT ?'
-      ).bind('%' + q + '%', limite).all();
+      const r1 = await db.prepare('SELECT rol,contenido,orden FROM historial_largo WHERE contenido LIKE ? ORDER BY orden DESC LIMIT ?').bind('%' + q + '%', limite).all();
       return J({ consulta: q, metodo: 'directo', total: r1.results.length, resultados: r1.results });
     }
     const ords = temas.results.map(t => t.mensaje_orden);
     const ph = ords.map(() => '?').join(',');
-    const msgs = await db.prepare(
-      'SELECT rol,contenido,orden FROM historial_largo WHERE orden IN (' + ph + ') ORDER BY orden ASC'
-    ).bind(...ords).all();
+    const msgs = await db.prepare('SELECT rol,contenido,orden FROM historial_largo WHERE orden IN (' + ph + ') ORDER BY orden ASC').bind(...ords).all();
     return J({ consulta: q, metodo: 'indice_semantico', total: msgs.results.length, resultados: msgs.results });
-  } catch (x) {
-    return J({ error: x.message });
-  }
+  } catch (x) { return J({ error: x.message }); }
 }
 
 export async function analizarArchivo(r, e) {
@@ -700,9 +753,7 @@ export async function analizarArchivo(r, e) {
     const db = gDB(e, 'agente');
     const meta = db ? await db.prepare('SELECT * FROM archivos WHERE id=?').bind(archivoId).first() : null;
     return J({ ok: true, archivoId, metadata: meta, longitud_texto: txt.length, preview: txt.substring(0, 3000) });
-  } catch (x) {
-    return J({ error: x.message });
-  }
+  } catch (x) { return J({ error: x.message }); }
 }
 
 function extraerTextoDeContent(content) {
@@ -878,7 +929,7 @@ export async function importar(r, e) {
     const stats = resultado ? resultado.stats : {};
     if (!lista || !lista.length) {
       const keys = data && typeof data === 'object' ? Object.keys(data).slice(0, 15) : [];
-      return J({ error: 'No se encontraron mensajes en el JSON.', diagnostico: { tipo_raiz: Array.isArray(data) ? 'array' : typeof data, claves_raiz: keys, stats_extractor: stats, primeros_300_caracteres: String(texto || '').substring(0, 300) } });
+      return J({ error: 'No se encontraron mensajes.', diagnostico: { tipo_raiz: Array.isArray(data) ? 'array' : typeof data, claves_raiz: keys, stats_extractor: stats, primeros_300: String(texto || '').substring(0, 300) } });
     }
     const db = gDB(e, 'agente');
     if (!db) return J({ error: 'D1 no configurado.' });
