@@ -19,14 +19,12 @@ const MAX_CHARS_PERFIL_BASE = 3000;
 const MAX_CHARS_CONTEXTO = 3000;
 
 // ============================================================
-// MONITOR REAL DE CLOUDFLARE — Usa CF_API_TOKEN
+// MONITOR REAL DE CLOUDFLARE
 // ============================================================
 async function consultarUsoReal(e) {
   const accountId = e.CF_ACCOUNT_ID;
   const token = e.CF_API_TOKEN;
-  if (!accountId || !token) {
-    return { ok: false, error: 'Falta CF_ACCOUNT_ID o CF_API_TOKEN.' };
-  }
+  if (!accountId || !token) return { ok: false, error: 'Falta CF_ACCOUNT_ID o CF_API_TOKEN.' };
 
   const ahora = new Date();
   const inicioDiaISO = new Date(Date.UTC(ahora.getUTCFullYear(), ahora.getUTCMonth(), ahora.getUTCDate())).toISOString();
@@ -36,19 +34,13 @@ async function consultarUsoReal(e) {
     query GetFullUsage($accountTag: String!, $startDate: String!, $startDatetime: String!) {
       viewer {
         accounts(filter: {accountTag: $accountTag}) {
-          workersInvocationsAdaptive(limit: 1000, filter: {
-            datetime_geq: $startDatetime
-          }) {
+          workersInvocationsAdaptive(limit: 1000, filter: { datetime_geq: $startDatetime }) {
             sum { requests errors subrequests }
           }
-          d1AnalyticsAdaptiveGroups(limit: 100, filter: {
-            date_geq: $startDate
-          }) {
+          d1AnalyticsAdaptiveGroups(limit: 100, filter: { date_geq: $startDate }) {
             sum { readQueries writeQueries rowsRead rowsWritten }
           }
-          kvOperationsAdaptiveGroups(limit: 100, filter: {
-            date_geq: $startDate
-          }) {
+          kvOperationsAdaptiveGroups(limit: 100, filter: { date_geq: $startDate }) {
             sum { requests }
             dimensions { actionType }
           }
@@ -60,22 +52,11 @@ async function consultarUsoReal(e) {
   try {
     const r = await fetch('https://api.cloudflare.com/client/v4/graphql', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        query,
-        variables: {
-          accountTag: accountId,
-          startDate: inicioDiaDate,
-          startDatetime: inicioDiaISO
-        }
-      })
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, variables: { accountTag: accountId, startDate: inicioDiaDate, startDatetime: inicioDiaISO } })
     });
 
     const data = await r.json();
-
     if (!data.data || !data.data.viewer || !data.data.viewer.accounts) {
       const fallback = await consultarSoloWorkers(accountId, token, inicioDiaISO);
       fallback.raw = data;
@@ -83,18 +64,15 @@ async function consultarUsoReal(e) {
     }
 
     const cuenta = data.data.viewer.accounts[0];
-
     let requests = 0, errores = 0, subrequests = 0;
-    const workerGroups = cuenta.workersInvocationsAdaptive || [];
-    for (const g of workerGroups) {
+    for (const g of (cuenta.workersInvocationsAdaptive || [])) {
       requests += g.sum?.requests || 0;
       errores += g.sum?.errors || 0;
       subrequests += g.sum?.subrequests || 0;
     }
 
     let d1_reads = 0, d1_writes = 0, d1_rows_read = 0, d1_rows_written = 0;
-    const d1Groups = cuenta.d1AnalyticsAdaptiveGroups || [];
-    for (const g of d1Groups) {
+    for (const g of (cuenta.d1AnalyticsAdaptiveGroups || [])) {
       d1_reads += g.sum?.readQueries || 0;
       d1_writes += g.sum?.writeQueries || 0;
       d1_rows_read += g.sum?.rowsRead || 0;
@@ -102,8 +80,7 @@ async function consultarUsoReal(e) {
     }
 
     let kv_reads = 0, kv_writes = 0, kv_deletes = 0, kv_lists = 0;
-    const kvGroups = cuenta.kvOperationsAdaptiveGroups || [];
-    for (const g of kvGroups) {
+    for (const g of (cuenta.kvOperationsAdaptiveGroups || [])) {
       const tipo = (g.dimensions?.actionType || '').toLowerCase();
       const cantidad = g.sum?.requests || 0;
       if (tipo.includes('read') || tipo === 'read') kv_reads += cantidad;
@@ -114,17 +91,9 @@ async function consultarUsoReal(e) {
 
     return {
       ok: true,
-      workers_requests: requests,
-      workers_errores: errores,
-      workers_subrequests: subrequests,
-      d1_reads,
-      d1_writes,
-      d1_rows_read,
-      d1_rows_written,
-      kv_reads,
-      kv_writes,
-      kv_deletes,
-      kv_lists,
+      workers_requests: requests, workers_errores: errores, workers_subrequests: subrequests,
+      d1_reads, d1_writes, d1_rows_read, d1_rows_written,
+      kv_reads, kv_writes, kv_deletes, kv_lists,
       consultado_en: Date.now()
     };
   } catch (x) {
@@ -139,9 +108,7 @@ async function consultarSoloWorkers(accountId, token, inicioDiaISO) {
     query GetUsage($accountTag: String!, $datetimeStart: String!) {
       viewer {
         accounts(filter: {accountTag: $accountTag}) {
-          workersInvocationsAdaptive(limit: 1000, filter: {
-            datetime_geq: $datetimeStart
-          }) {
+          workersInvocationsAdaptive(limit: 1000, filter: { datetime_geq: $datetimeStart }) {
             sum { requests errors subrequests }
           }
         }
@@ -151,19 +118,11 @@ async function consultarSoloWorkers(accountId, token, inicioDiaISO) {
   try {
     const r = await fetch('https://api.cloudflare.com/client/v4/graphql', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        query,
-        variables: { accountTag: accountId, datetimeStart: inicioDiaISO }
-      })
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, variables: { accountTag: accountId, datetimeStart: inicioDiaISO } })
     });
     const data = await r.json();
-    if (!data.data || !data.data.viewer || !data.data.viewer.accounts) {
-      return { ok: false, error: 'GraphQL sin datos.', raw: data };
-    }
+    if (!data.data || !data.data.viewer || !data.data.viewer.accounts) return { ok: false, error: 'GraphQL sin datos.', raw: data };
     const groups = data.data.viewer.accounts[0].workersInvocationsAdaptive || [];
     let requests = 0, errores = 0, subrequests = 0;
     for (const g of groups) {
@@ -172,18 +131,11 @@ async function consultarSoloWorkers(accountId, token, inicioDiaISO) {
       subrequests += g.sum?.subrequests || 0;
     }
     return {
-      ok: true,
-      workers_requests: requests,
-      workers_errores: errores,
-      workers_subrequests: subrequests,
-      d1_reads: null, d1_writes: null,
-      kv_reads: null, kv_writes: null,
-      consultado_en: Date.now(),
-      modo: 'solo_workers'
+      ok: true, workers_requests: requests, workers_errores: errores, workers_subrequests: subrequests,
+      d1_reads: null, d1_writes: null, kv_reads: null, kv_writes: null,
+      consultado_en: Date.now(), modo: 'solo_workers'
     };
-  } catch (x) {
-    return { ok: false, error: x.message };
-  }
+  } catch (x) { return { ok: false, error: x.message }; }
 }
 
 // ============================================================
@@ -273,9 +225,7 @@ async function chat(r, e, c) {
     let ventana = [];
     if (e.DB) {
       try {
-        const r1 = await e.DB.prepare(
-          'SELECT rol, contenido FROM historial_largo WHERE user_id=? ORDER BY orden DESC LIMIT ?'
-        ).bind(uid, VENTANA_SEGURA).all();
+        const r1 = await e.DB.prepare('SELECT rol, contenido FROM historial_largo WHERE user_id=? ORDER BY orden DESC LIMIT ?').bind(uid, VENTANA_SEGURA).all();
         if (r1.results) {
           ventana = r1.results.reverse().map(x => ({
             role: x.rol === 'assistant' ? 'assistant' : 'user',
@@ -286,9 +236,7 @@ async function chat(r, e, c) {
     }
     if (!ventana.length && e.DB) {
       try {
-        const r1 = await e.DB.prepare(
-          "SELECT mensaje,respuesta FROM historial WHERE user_id=? ORDER BY fecha DESC LIMIT 15"
-        ).bind(uid).all();
+        const r1 = await e.DB.prepare("SELECT mensaje,respuesta FROM historial WHERE user_id=? ORDER BY fecha DESC LIMIT 15").bind(uid).all();
         if (r1.results) {
           ventana = r1.results.reverse().flatMap(x => [
             { role: 'user', content: (x.mensaje || '').substring(0, MAX_CHARS_MENSAJE) },
@@ -345,11 +293,7 @@ async function chat(r, e, c) {
       { role: 'user', content: m }
     ];
 
-    const res = await e.ayanokoji_IA.run(MODELO, {
-      messages: mensajes,
-      max_tokens: 1000,
-      temperature: 0.7
-    });
+    const res = await e.ayanokoji_IA.run(MODELO, { messages: mensajes, max_tokens: 1000, temperature: 0.7 });
     let rp = res.response || 'Sin respuesta.';
 
     const afirmaAccion = /\b(he creado|he insertado|he guardado|he actualizado|he desplegado|he borrado|he añadido|ya está|ya se hizo|completado|ejecutado)\b/i.test(rp);
@@ -412,9 +356,7 @@ async function generarImagen(e, prompt, uid) {
     }
     const url = '/api/imagen/' + id;
     return { respuesta: `Imagen generada.\n\n![imagen](${url})\n\nID: \`${id}\``, id, url };
-  } catch (x) {
-    return { respuesta: 'Error: ' + x.message };
-  }
+  } catch (x) { return { respuesta: 'Error: ' + x.message }; }
 }
 
 async function rImagen(r, e, c) {
@@ -474,7 +416,7 @@ async function rElim(e, uid) {
   } catch (x) { return J({ respuesta: 'Error: ' + x.message }); }
 }
 
-// ============ D1 / KV GENÉRICOS ============
+// ============ D1 / KV ============
 async function d1(r, e) {
   try {
     const { accion, tabla, datos, condicion, destino } = await r.json();
@@ -675,7 +617,7 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '9.3' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '9.4' });
 
     // ============ USO REAL ============
     if (p === '/api/uso_real' && r.method === 'GET') {
@@ -688,20 +630,14 @@ export default {
       const uso = await consultarUsoReal(e);
       const db = gDB(e, 'agente');
       const kv = gKV(e, 'agente');
-
-      let procesosActivos = 0;
-      let totalMensajes = 0;
-      let totalTemas = 0;
-      let modoIndice = 'ninguno';
+      let procesosActivos = 0, totalMensajes = 0, totalTemas = 0, modoIndice = 'ninguno';
 
       if (db) {
         try { const p1 = await db.prepare("SELECT COUNT(*) as n FROM procesos WHERE estado IN ('procesando','pendiente')").first(); procesosActivos = p1 ? p1.n : 0; } catch (x) {}
         try { const p2 = await db.prepare('SELECT COUNT(*) as n FROM historial_largo').first(); totalMensajes = p2 ? p2.n : 0; } catch (x) {}
         try { const p3 = await db.prepare('SELECT COUNT(*) as n FROM indice_temas').first(); totalTemas = p3 ? p3.n : 0; } catch (x) {}
       }
-      if (kv) {
-        try { modoIndice = await kv.get('indice:ultimo_modo') || 'ninguno'; } catch (x) {}
-      }
+      if (kv) { try { modoIndice = await kv.get('indice:ultimo_modo') || 'ninguno'; } catch (x) {} }
 
       const wr = uso.workers_requests || 0;
       const d1r = uso.d1_reads || 0;
@@ -720,15 +656,10 @@ export default {
       };
 
       return J({
-        ok: true,
-        consulta_real: uso.ok,
-        error_consulta: uso.error || null,
+        ok: true, consulta_real: uso.ok, error_consulta: uso.error || null,
         fecha_consulta: new Date().toISOString(),
-        limites_cloudflare: lim,
-        procesos_activos: procesosActivos,
-        mensajes_historial: totalMensajes,
-        temas_indexados: totalTemas,
-        modo_indice: modoIndice
+        limites_cloudflare: lim, procesos_activos: procesosActivos,
+        mensajes_historial: totalMensajes, temas_indexados: totalTemas, modo_indice: modoIndice
       });
     }
 
@@ -736,8 +667,7 @@ export default {
     if (p === '/api/corregir' && r.method === 'POST') {
       const { correccion } = await r.json();
       const db = gDB(e, 'agente');
-      await db.prepare('INSERT INTO correcciones_voz(contexto, correccion, fecha) VALUES(?,?,?)')
-        .bind('general', correccion, Date.now()).run();
+      await db.prepare('INSERT INTO correcciones_voz(contexto, correccion, fecha) VALUES(?,?,?)').bind('general', correccion, Date.now()).run();
       return J({ ok: true, mensaje: 'Corrección guardada como capa. Núcleo intacto.' });
     }
 
@@ -765,6 +695,19 @@ export default {
       const r1 = await db.prepare('INSERT INTO estrategias(nombre,tipo,contenido,prioridad,creada,actualizada) VALUES(?,?,?,?,?,?)')
         .bind(b.nombre, b.tipo, b.contenido, b.prioridad || 5, Date.now(), Date.now()).run();
       return J({ ok: true, id: r1.meta.last_row_id });
+    }
+
+    // ============ ELIMINAR ESTRATEGIA ============
+    if (p.startsWith('/api/estrategias/') && r.method === 'DELETE') {
+      const id = p.replace('/api/estrategias/', '');
+      const db = gDB(e, 'agente');
+      if (!db) return J({ error: 'D1 no configurado.' });
+      try {
+        await db.prepare('DELETE FROM estrategias WHERE id=?').bind(id).run();
+        return J({ ok: true, eliminada: id });
+      } catch (x) {
+        return J({ error: x.message });
+      }
     }
 
     if (p === '/api/decisiones' && r.method === 'GET') {
@@ -807,20 +750,13 @@ export default {
         try { const t = await db.prepare('SELECT COALESCE(SUM(ingresos_usdt),0) as t FROM metricas_diarias').first(); ingresos = t ? parseFloat(t.t) : 0; } catch (x) {}
 
         const conv = ut > 0 ? ((up / ut) * 100).toFixed(1) : 0;
-
         let topP = null;
         try { topP = await db.prepare("SELECT personaje_favorito as p, COUNT(*) as n FROM usuarios WHERE personaje_favorito IS NOT NULL GROUP BY personaje_favorito ORDER BY n DESC LIMIT 1").first(); } catch (x) {}
-
         let recientes = [];
         try { const r = await db.prepare('SELECT * FROM metricas_diarias ORDER BY fecha DESC LIMIT 7').all(); recientes = r.results || []; } catch (x) {}
-
         const ret = recientes.length ? { d1: recientes[0].retencion_d1 || 0, d7: recientes[0].retencion_d7 || 0, d30: 0 } : { d1: 0, d7: 0, d30: 0 };
-
         const escala = ut === 0 ? 0 : ut < 50 ? 1 : ut < 500 ? 2 : ut < 5000 ? 3 : 4;
-
-        const resumen = ut === 0
-          ? 'Shadow Arise no está operativo aún. El sistema está listo para recibir usuarios.'
-          : `Shadow Arise lleva ${ut} usuarios registrados. ${up} están pagando (${conv}%). Retención día 1: ${ret.d1}%.`;
+        const resumen = ut === 0 ? 'Shadow Arise no está operativo aún.' : `Shadow Arise lleva ${ut} usuarios. ${up} pagando (${conv}%).`;
 
         return J({
           stats: {
@@ -832,53 +768,62 @@ export default {
             personaje_top: topP ? topP.p : '—', personaje_retencion: topP ? topP.p : '—'
           },
           escala: { actual: escala, pasos: ['Prototipo','Beta cerrada','Lanzamiento público','Tracción','Escala'] },
-          metricas_recientes: recientes,
-          resumen_ayanokoji: resumen
+          metricas_recientes: recientes, resumen_ayanokoji: resumen
         });
       } catch (x) { return J({ error: x.message }); }
     }
 
     if (p === '/api/componentes' && r.method === 'GET') {
       return J({
-        pestanas: ['chat','sandbox','shadow','stats','decisiones','ideas','bandeja'],
+        pestanas: ['chat','sandbox','estrategias','shadow','stats','decisiones','ideas','bandeja'],
         botones: ['subir','imagen','indexar','migrar','diagnostico','procesos','contexto','corregir','limpiar'],
         acciones_chat: ['enviar_mensaje','cargar_historial','corregir_voz','generar_imagen'],
-        acciones_auto: ['indexar','migrar','analizar','encolar','publicar']
+        acciones_auto: ['indexar','migrar','analizar','encolar','publicar','simular_estrategia','ejecutar_etapa','test_500']
       });
     }
 
     // ============ SANDBOX ============
+    if (p === '/api/sandbox/etapa' && r.method === 'POST') {
+      const m = await opcional('sandbox');
+      if (!m) return J({ error: 'sandbox.js no instalado.' });
+      const b = await r.json();
+      if (!b.etapa_id) return J({ error: 'Falta etapa_id.' });
+      return J(await m.ejecutarEtapa(e, b.etapa_id, b.dia || 1));
+    }
+
+    if (p === '/api/sandbox/test_500' && r.method === 'POST') {
+      const m = await opcional('sandbox');
+      if (!m) return J({ error: 'sandbox.js no instalado.' });
+      const b = await r.json();
+      return J(await m.test500Usuarios(e, b.dia || 1));
+    }
+
+    if (p === '/api/sandbox/simular_estrategia' && r.method === 'POST') {
+      const m = await opcional('sandbox');
+      if (!m) return J({ error: 'sandbox.js no instalado.' });
+      const b = await r.json();
+      if (!b.estrategia_id) return J({ error: 'Falta estrategia_id.' });
+      return J(await m.simularEstrategia(e, b.estrategia_id));
+    }
+
     if (p === '/api/sandbox/preparar' && r.method === 'POST') {
       const m = await opcional('sandbox');
       if (!m) return J({ error: 'sandbox.js no instalado.' });
       return J(await m.prepararShadowArise(e));
     }
-    if (p === '/api/sandbox/simular_arranque' && r.method === 'POST') {
-      const m = await opcional('sandbox');
-      if (!m) return J({ error: 'sandbox.js no instalado.' });
-      return J(await m.simularArranque(e));
-    }
+
     if (p === '/api/simular_precio' && r.method === 'POST') {
       const m = await opcional('sandbox');
       if (!m) return J({ error: 'sandbox.js no instalado.' });
       return m.simularPrecio(r, e);
     }
+
     if (p === '/api/promover_leccion' && r.method === 'POST') {
       const m = await opcional('sandbox');
       if (!m) return J({ error: 'sandbox.js no instalado.' });
       return m.promoverLeccion(r, e);
     }
-    if (p === '/api/sandbox' && r.method === 'POST') {
-      const m = await opcional('sandbox');
-      if (!m) return J({ error: 'sandbox.js no instalado.' });
-      return J(await m.generarEscenario(e));
-    }
-    if (p === '/api/sandbox/decidir' && r.method === 'POST') {
-      const m = await opcional('sandbox');
-      if (!m) return J({ error: 'sandbox.js no instalado.' });
-      const { id } = await r.json();
-      return J(await m.decidir(e, id));
-    }
+
     if (p === '/api/sandbox' && r.method === 'GET') {
       const m = await opcional('sandbox');
       if (!m) return J({ escenarios: [], lecciones: [] });
@@ -974,7 +919,7 @@ export default {
       return J({ total: r1.results.length, acciones: r1.results });
     }
 
-    // ============ FEED Y NOTIFICACIONES ============
+    // ============ FEED ============
     if (p === '/feed') {
       const m = await opcional('social');
       if (!m) return new Response('social.js no instalado', { status: 503 });
