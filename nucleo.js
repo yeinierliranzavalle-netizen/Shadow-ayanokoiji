@@ -1,12 +1,21 @@
 // nucleo.js — El motor de Ayanokōji Digital
 import { IDENTIDAD } from './identidad.js';
 
-// Mapa de áreas → archivos. Para auto-mejora por área.
+// ============================================================
+// MAPA DE ÁREAS → ARCHIVOS
+// Para auto-mejora por área. Cuando el Comandante dice "mejora las
+// notificaciones", el sistema identifica `social.js` y actúa.
+// ============================================================
 export const AREAS = {
+  // --- social.js ---
   notificaciones: 'social.js',
   feed: 'social.js',
   rss: 'social.js',
   bandeja: 'social.js',
+  suscripciones: 'social.js',
+  push: 'social.js',
+
+  // --- publisher.js ---
   publicaciones: 'publisher.js',
   contenido: 'publisher.js',
   canales: 'publisher.js',
@@ -14,29 +23,100 @@ export const AREAS = {
   discord: 'publisher.js',
   mastodon: 'publisher.js',
   bluesky: 'publisher.js',
+  plantillas: 'publisher.js',
+  imagenes_publicacion: 'publisher.js',
+
+  // --- sandbox.js ---
   sandbox: 'sandbox.js',
-  decisiones: 'sandbox.js',
+  simulacion: 'sandbox.js',
+  simulaciones: 'sandbox.js',
+  curriculum: 'sandbox.js',
+  curriculo: 'sandbox.js',
+  perfiles: 'sandbox.js',
+  arquetipos: 'sandbox.js',
+  personalidades_usuario: 'sandbox.js',
+  psicologia_usuario: 'sandbox.js',
+  estrategias_sim: 'sandbox.js',
+  estrategia_simulada: 'sandbox.js',
+  test_500: 'sandbox.js',
+  test_usuarios: 'sandbox.js',
+  metricas_sandbox: 'sandbox.js',
+  tasa_aciertos: 'sandbox.js',
+  tasa_clics: 'sandbox.js',
+  ctr: 'sandbox.js',
+  conversion: 'sandbox.js',
+  indice_fanaticos: 'sandbox.js',
+  cost_to_failure: 'sandbox.js',
+  ctf: 'sandbox.js',
   escenarios: 'sandbox.js',
+  lecciones: 'sandbox.js',
+
+  // --- autonomia.js ---
   autonomia: 'autonomia.js',
   workers: 'autonomia.js',
   auto_mejora: 'autonomia.js',
   tareas: 'autonomia.js',
   estrategias: 'autonomia.js',
+  decisiones_autonomas: 'autonomia.js',
+  snapshots: 'autonomia.js',
+  revertir: 'autonomia.js',
+  informe: 'autonomia.js',
+  cola_tareas: 'autonomia.js',
+
+  // --- proc.js ---
   procesamiento: 'proc.js',
   resumenes: 'proc.js',
+  resumenes_chat: 'proc.js',
   historial_largo: 'proc.js',
   importar: 'proc.js',
   indice: 'proc.js',
+  indice_temas: 'proc.js',
+  indexar: 'proc.js',
+  buscar_tema: 'proc.js',
+  cron_retomar: 'proc.js',
+  cron_autonomo: 'proc.js',
+
+  // --- worker.js ---
   chat: 'worker.js',
   vision: 'worker.js',
   imagenes: 'worker.js',
   x402: 'worker.js',
   conciencia: 'worker.js',
   shadow: 'worker.js',
+  shadow_stats: 'worker.js',
+  capacidades: 'worker.js',
+  uso_real: 'worker.js',
+  monitor_cloudflare: 'worker.js',
+  cors: 'worker.js',
+  rutas: 'worker.js',
+
+  // --- identidad.js ---
   identidad: 'identidad.js',
   voz: 'identidad.js',
+  tono: 'identidad.js',
+  lore: 'identidad.js',
+
+  // --- nucleo.js ---
   nucleo: 'nucleo.js',
-  motor: 'nucleo.js'
+  motor: 'nucleo.js',
+  areas: 'nucleo.js',
+  intencion: 'nucleo.js',
+  system_prompt: 'nucleo.js',
+
+  // --- shared.js ---
+  esquema: 'shared.js',
+  migracion: 'shared.js',
+  tabla: 'shared.js',
+  base_datos: 'shared.js',
+
+  // --- presupuesto.js ---
+  presupuesto: 'presupuesto.js',
+  cuotas: 'presupuesto.js',
+  limites: 'presupuesto.js',
+
+  // --- notify.js ---
+  telegram: 'notify.js',
+  avisos_telegram: 'notify.js'
 };
 
 // ============================================================
@@ -46,7 +126,7 @@ export function detectarIntencion(texto) {
   const t = texto.toLowerCase();
   if (/\b(sube|subir|guarda|guardar|memoriza|recuerda|almacena|archiva|inserta|añade)\b/.test(t) && /\b(nucleo|núcleo|memoria|cerebro|ti|contexto|tabla|kv|d1)\b/.test(t)) return 'guardar_datos';
   if (/\b(resume|resumir|resumen|sintetiza|condensa)\b/.test(t)) return 'resumir';
-  if (/\b(mejora|mejorar|optimiza|optimizar|actualiza|actualizar)\b/.test(t) && /\b(codigo|código|nucleo|núcleo|worker|ti mismo|area|área|modulo|módulo)\b/.test(t)) return 'mejorar_area';
+  if (/\b(mejora|mejorar|optimiza|optimizar|actualiza|actualizar)\b/.test(t) && /\b(codigo|código|nucleo|núcleo|worker|ti mismo|area|área|modulo|módulo|sandbox|publisher|autonomia|social|proc)\b/.test(t)) return 'mejorar_area';
   if (/\b(crea|crear|nuevo|genera)\b/.test(t) && /\b(worker|index|pagina|página|sitio|app)\b/.test(t)) return 'crear';
   if (/\b(imagen|foto|dibujo|ilustracion|ilustración|render)\b/.test(t)) return 'imagen';
   if (/\b(analiza|analizar|lee|revisa)\b/.test(t) && /\b(archivo|esto|contexto|json)\b/.test(t)) return 'analizar';
@@ -58,7 +138,7 @@ export function detectarIntencion(texto) {
 }
 
 // ============================================================
-// SYSTEM PROMPT — construye la voz completa de Ayanokōji
+// SYSTEM PROMPT — La voz completa de Ayanokōji
 // ============================================================
 export function construirSystemPrompt(ctx, f, rec, perfilBase, correcciones, estrategias, conciencia) {
   const V = IDENTIDAD.vision;
