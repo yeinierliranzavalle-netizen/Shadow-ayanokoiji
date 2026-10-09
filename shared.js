@@ -132,7 +132,7 @@ export async function migrar(e, forzar = false) {
 
   if (kv && !forzar) {
     try {
-      const hecho = await kv.get('migrado_v12');
+      const hecho = await kv.get('migrado_v13');
       if (hecho === 'ok') return { ok: true, cached: true };
     } catch (x) {}
   }
@@ -205,7 +205,7 @@ export async function migrar(e, forzar = false) {
 
   try {
     const cnt = await db.prepare('SELECT COUNT(*) as n FROM estrategias').first();
-    if (cnt && cnt.n > 10) {
+    if (cnt && cnt.n > 20) {
       await db.prepare('DELETE FROM estrategias WHERE id NOT IN (SELECT MIN(id) FROM estrategias GROUP BY nombre)').run();
       resultado.limpiezas.push('estrategias duplicadas');
     }
@@ -244,7 +244,7 @@ export async function migrar(e, forzar = false) {
   }
 
   if (kv && resultado.errores.length === 0) {
-    try { await kv.put('migrado_v12', 'ok', { expirationTtl: 3600 }); } catch (x) {}
+    try { await kv.put('migrado_v13', 'ok', { expirationTtl: 3600 }); } catch (x) {}
   }
 
   return resultado;
