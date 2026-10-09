@@ -663,6 +663,133 @@ export default {
       });
     }
 
+    // ============ ACTIVIDAD EN VIVO ============
+    if (p === '/api/actividad' && r.method === 'GET') {
+      const db = gDB(e, 'agente');
+      const kv = gKV(e, 'agente');
+      if (!db) return J({ error: 'Sin D1.' });
+
+      const salida = { ok: true, estado: 'operando', etapa_actual: null, ultima_accion: null, ultimo_cron_hace: null, acciones: [] };
+
+      try {
+        const a = await db.prepare('SELECT tipo, descripcion, exito, detalle, fecha FROM acciones ORDER BY fecha DESC LIMIT 50').all();
+        salida.acciones = a.results || [];
+        if (salida.acciones.length) {
+          salida.ultima_accion = salida.acciones[0].tipo;
+          const hace = Math.round((Date.now() - salida.acciones[0].fecha) / 60000);
+          salida.ultima_accion_hace = hace + ' min';
+        }
+      } catch (x) {}
+
+      if (kv) {
+        try {
+          const u = await kv.get('cron_autonomo_ultima');
+          if (u) {
+            const hace = Math.round((Date.now() - parseInt(u)) / 60000);
+            salida.ultimo_cron_hace = hace + ' min';
+          }
+        } catch (x) {}
+      }
+
+      try {
+        const sb = await opcional('sandbox');
+        if (sb && sb.estadoActual) {
+          salida.etapa_actual = await sb.estadoActual(e);
+        } else {
+          if (kv) {
+            const progreso = JSON.parse(await kv.get('sandbox:progreso') || '{}');
+            if (progreso.en_progreso && Object.keys(progreso.en_progreso).length) {
+              const [id, info] = Object.entries(progreso.en_progreso)[0];
+              salida.etapa_actual = { id, fase: 0, prioridad: 5, dia: info.dia_actual || 1, dias: info.dias_total || 1, descripcion: '', metrica: '', umbral: '' };
+            }
+          }
+        }
+      } catch (x) {}
+
+      return J(salida);
+    }
+
+    // ============ PERFIL BASE ============
+    if (p === '/api/perfil_base/construir' && r.method === 'POST') {
+      const db = gDB(e, 'agente');
+      const kv = gKV(e, 'agente');
+      const ai = e.ayanokoji_IA;
+      if (!db || !kv || !ai) return J({ error: 'Falta DB, KV o IA.' });
+
+      const fuentes = [];
+
+      try {
+        const c = await db.prepare('SELECT resumen FROM contexto ORDER BY fecha DESC LIMIT 5').all();
+        if (c.results) c.results.forEach(r => fuentes.push(r.resumen));
+      } catch (x) {}
+
+      try {
+        const r = await db.prepare("SELECT resumen FROM contexto WHERE fuente LIKE 'relectura%' ORDER BY fecha DESC LIMIT 10").all();
+        if (r.results) r.results.forEach(x => fuentes.push(x.resumen));
+      } catch (x) {}
+
+      try {
+        const s = await db.prepare("SELECT nombre, contenido FROM estrategias WHERE estado='activa'").all();
+        if (s.results) fuentes.push('ESTRATEGIAS:\n' + s.results.map(x => `- ${x.nombre}: ${x.contenido}`).join('\n'));
+      } catch (x) {}
+
+      try {
+        const c = await db.prepare('SELECT correccion FROM correcciones_voz ORDER BY fecha DESC LIMIT 20').all();
+        if (c.results && c.results.length) fuentes.push('CORRECCIONES DE VOZ:\n' + c.results.map(x => '- ' + x.correccion).join('\n'));
+      } catch (x) {}
+
+      const material = fuentes.join('\n\n===\n\n').substring(0, 25000);
+
+      const prompt = `Eres Ayanokōji Digital. Vas a construir el PERFIL BASE del Comandante Yeinier.
+
+Es la verdad absoluta sobre él. Se inyecta SIEMPRE en cada conversación. Debe ser exacto, denso, sin relleno.
+
+MATERIAL (contexto, relecturas, estrategias, correcciones):
+${material}
+
+GENERA el perfil base con esta estructura exacta:
+
+### QUIÉN ES
+Nombre, edad, ubicación, esencia. Máx 150 palabras.
+
+### CÓMO PIENSA
+Forma de analizar, qué le importa, qué le teme, cómo decide. Máx 200 palabras.
+
+### NUESTRA RELACIÓN
+Cómo interactuamos, qué esperas de mí, cómo debo sonar, qué no debo hacer. Máx 250 palabras.
+
+### PROYECTO SHADOW ARISE
+Qué es, estado, meta. Máx 200 palabras.
+
+### MOMENTOS MEMORABLES
+5-8 momentos clave que definieron nuestra conversación. Específicos, no genéricos. Máx 300 palabras.
+
+### REGLAS OPERATIVAS
+Qué hago sin preguntar, qué consulto, qué nunca toco. Máx 150 palabras.
+
+### LO QUE DEBO RECORDAR SIEMPRE
+3-5 cosas que no puedo olvidar bajo ninguna circunstancia. Máx 150 palabras.
+
+Sin relleno. Sin generalidades. Todo específico del Comandante.`;
+
+      try {
+        const res = await ai.run(MODELO_RAZONAMIENTO, {
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 3500,
+          temperature: 0.4
+        });
+        const perfil = res.response || '';
+        if (perfil.length < 500) return J({ error: 'Perfil demasiado corto.', longitud: perfil.length });
+
+        await kv.put('perfil_base', perfil);
+        await kv.put('perfil_base_fecha', String(Date.now()));
+
+        return J({ ok: true, longitud: perfil.length, perfil });
+      } catch (x) {
+        return J({ error: x.message });
+      }
+    }
+
     // ============ CORRECCIONES ============
     if (p === '/api/corregir' && r.method === 'POST') {
       const { correccion } = await r.json();
@@ -775,7 +902,7 @@ export default {
 
     if (p === '/api/componentes' && r.method === 'GET') {
       return J({
-        pestanas: ['chat','sandbox','estrategias','shadow','stats','decisiones','ideas','bandeja'],
+        pestanas: ['chat','sandbox','estrategias','shadow','stats','actividad','decisiones','ideas','bandeja'],
         botones: ['subir','imagen','indexar','migrar','diagnostico','procesos','contexto','corregir','limpiar'],
         acciones_chat: ['enviar_mensaje','cargar_historial','corregir_voz','generar_imagen'],
         acciones_auto: ['indexar','migrar','analizar','encolar','publicar','simular_estrategia','ejecutar_etapa','test_500']
