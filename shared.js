@@ -9,7 +9,7 @@ export const VENTANA = 25;
 
 export const CORS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, DELETE',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   'Access-Control-Max-Age': '86400'
 };
@@ -272,4 +272,127 @@ export async function verificar(e, tipo, nombre) {
     }
   } catch (x) { return false; }
   return false;
+}
+
+// ============================================================
+// MONITOR REAL DE CLOUDFLARE — compartido entre worker y proc
+// ============================================================
+export async function consultarUsoReal(e) {
+  const accountId = e.CF_ACCOUNT_ID;
+  const token = e.CF_API_TOKEN;
+  if (!accountId || !token) return { ok: false, error: 'Falta CF_ACCOUNT_ID o CF_API_TOKEN.' };
+
+  const ahora = new Date();
+  const inicioDiaISO = new Date(Date.UTC(ahora.getUTCFullYear(), ahora.getUTCMonth(), ahora.getUTCDate())).toISOString();
+  const inicioDiaDate = inicioDiaISO.split('T')[0];
+
+  const query = `
+    query GetFullUsage($accountTag: String!, $startDate: String!, $startDatetime: String!) {
+      viewer {
+        accounts(filter: {accountTag: $accountTag}) {
+          workersInvocationsAdaptive(limit: 1000, filter: { datetime_geq: $startDatetime }) {
+            sum { requests errors subrequests }
+          }
+          d1AnalyticsAdaptiveGroups(limit: 100, filter: { date_geq: $startDate }) {
+            sum { readQueries writeQueries rowsRead rowsWritten }
+          }
+          kvOperationsAdaptiveGroups(limit: 100, filter: { date_geq: $startDate }) {
+            sum { requests }
+            dimensions { actionType }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const r = await fetch('https://api.cloudflare.com/client/v4/graphql', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, variables: { accountTag: accountId, startDate: inicioDiaDate, startDatetime: inicioDiaISO } })
+    });
+
+    const data = await r.json();
+    if (!data.data || !data.data.viewer || !data.data.viewer.accounts) {
+      const fallback = await consultarSoloWorkers(accountId, token, inicioDiaISO);
+      fallback.raw = data;
+      return fallback;
+    }
+
+    const cuenta = data.data.viewer.accounts[0];
+
+    let requests = 0, errores = 0, subrequests = 0;
+    for (const g of (cuenta.workersInvocationsAdaptive || [])) {
+      requests += g.sum?.requests || 0;
+      errores += g.sum?.errors || 0;
+      subrequests += g.sum?.subrequests || 0;
+    }
+
+    let d1_reads = 0, d1_writes = 0, d1_rows_read = 0, d1_rows_written = 0;
+    for (const g of (cuenta.d1AnalyticsAdaptiveGroups || [])) {
+      d1_reads += g.sum?.readQueries || 0;
+      d1_writes += g.sum?.writeQueries || 0;
+      d1_rows_read += g.sum?.rowsRead || 0;
+      d1_rows_written += g.sum?.rowsWritten || 0;
+    }
+
+    let kv_reads = 0, kv_writes = 0, kv_deletes = 0, kv_lists = 0;
+    for (const g of (cuenta.kvOperationsAdaptiveGroups || [])) {
+      const tipo = (g.dimensions?.actionType || '').toLowerCase();
+      const cantidad = g.sum?.requests || 0;
+      if (tipo.includes('read') || tipo === 'read') kv_reads += cantidad;
+      else if (tipo.includes('write') || tipo === 'write') kv_writes += cantidad;
+      else if (tipo.includes('delete')) kv_deletes += cantidad;
+      else if (tipo.includes('list')) kv_lists += cantidad;
+    }
+
+    return {
+      ok: true,
+      workers_requests: requests, workers_errores: errores, workers_subrequests: subrequests,
+      d1_reads, d1_writes, d1_rows_read, d1_rows_written,
+      kv_reads, kv_writes, kv_deletes, kv_lists,
+      consultado_en: Date.now()
+    };
+  } catch (x) {
+    const fallback = await consultarSoloWorkers(accountId, token, inicioDiaISO);
+    fallback.error_principal = x.message;
+    return fallback;
+  }
+}
+
+async function consultarSoloWorkers(accountId, token, inicioDiaISO) {
+  const query = `
+    query GetUsage($accountTag: String!, $datetimeStart: String!) {
+      viewer {
+        accounts(filter: {accountTag: $accountTag}) {
+          workersInvocationsAdaptive(limit: 1000, filter: { datetime_geq: $datetimeStart }) {
+            sum { requests errors subrequests }
+          }
+        }
+      }
+    }
+  `;
+  try {
+    const r = await fetch('https://api.cloudflare.com/client/v4/graphql', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, variables: { accountTag: accountId, datetimeStart: inicioDiaISO } })
+    });
+    const data = await r.json();
+    if (!data.data || !data.data.viewer || !data.data.viewer.accounts) return { ok: false, error: 'GraphQL sin datos.', raw: data };
+    const groups = data.data.viewer.accounts[0].workersInvocationsAdaptive || [];
+    let requests = 0, errores = 0, subrequests = 0;
+    for (const g of groups) {
+      requests += g.sum?.requests || 0;
+      errores += g.sum?.errors || 0;
+      subrequests += g.sum?.subrequests || 0;
+    }
+    return {
+      ok: true, workers_requests: requests, workers_errores: errores, workers_subrequests: subrequests,
+      d1_reads: null, d1_writes: null, kv_reads: null, kv_writes: null,
+      consultado_en: Date.now(), modo: 'solo_workers'
+    };
+  } catch (x) {
+    return { ok: false, error: x.message };
+  }
 }
