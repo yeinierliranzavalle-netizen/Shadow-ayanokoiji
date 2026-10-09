@@ -1,4 +1,4 @@
-import { MODELO_LIGERO, CS, LPB, BPL, J, gDB, gKV, b64e, b64d, j2t } from './shared.js';
+import { MODELO_LIGERO, MODELO_RAZONAMIENTO, CS, LPB, BPL, J, gDB, gKV, b64e, b64d, j2t, consultarUsoReal } from './shared.js';
 import { notificar } from './notify.js';
 import { consumir } from './presupuesto.js';
 
@@ -33,111 +33,6 @@ async function reconstruir(kv, prefix) {
   return texto;
 }
 
-// ============================================================
-// CONSULTAR CAPACIDAD REAL DE CLOUDFLARE
-// Ayanokōji usa esto antes de decidir. Datos reales, no locales.
-// ============================================================
-async function consultarCapacidadReal(e) {
-  const accountId = e.CF_ACCOUNT_ID;
-  const token = e.CF_API_TOKEN;
-  if (!accountId || !token) return { ok: false, error: 'Sin CF_ACCOUNT_ID o CF_API_TOKEN.' };
-
-  // Cache 5 min para no saturar
-  const kv = gKV(e, 'agente');
-  if (kv) {
-    try {
-      const cache = await kv.get('capacidad_real_cache');
-      if (cache) {
-        const p = JSON.parse(cache);
-        if (Date.now() - p.ts < 5 * 60 * 1000) return { ok: true, cache: true, ...p.datos };
-      }
-    } catch (x) {}
-  }
-
-  const ahora = new Date();
-  const inicioDiaISO = new Date(Date.UTC(ahora.getUTCFullYear(), ahora.getUTCMonth(), ahora.getUTCDate())).toISOString();
-  const inicioDiaDate = inicioDiaISO.split('T')[0];
-
-  const query = `
-    query GetUsage($accountTag: String!, $startDate: String!, $startDatetime: String!) {
-      viewer {
-        accounts(filter: {accountTag: $accountTag}) {
-          workersInvocationsAdaptive(limit: 1000, filter: { datetime_geq: $startDatetime }) {
-            sum { requests errors subrequests }
-          }
-          d1AnalyticsAdaptiveGroups(limit: 100, filter: { date_geq: $startDate }) {
-            sum { readQueries writeQueries }
-          }
-          kvOperationsAdaptiveGroups(limit: 100, filter: { date_geq: $startDate }) {
-            sum { requests }
-            dimensions { actionType }
-          }
-        }
-      }
-    }
-  `;
-
-  try {
-    const r = await fetch('https://api.cloudflare.com/client/v4/graphql', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, variables: { accountTag: accountId, startDate: inicioDiaDate, startDatetime: inicioDiaISO } })
-    });
-
-    const data = await r.json();
-    if (!data.data || !data.data.viewer || !data.data.viewer.accounts) {
-      return { ok: false, error: 'GraphQL sin datos.' };
-    }
-
-    const cuenta = data.data.viewer.accounts[0];
-    let workers_requests = 0, workers_subrequests = 0, workers_errores = 0;
-    for (const g of (cuenta.workersInvocationsAdaptive || [])) {
-      workers_requests += g.sum?.requests || 0;
-      workers_subrequests += g.sum?.subrequests || 0;
-      workers_errores += g.sum?.errors || 0;
-    }
-
-    let d1_reads = 0, d1_writes = 0;
-    for (const g of (cuenta.d1AnalyticsAdaptiveGroups || [])) {
-      d1_reads += g.sum?.readQueries || 0;
-      d1_writes += g.sum?.writeQueries || 0;
-    }
-
-    let kv_reads = 0, kv_writes = 0;
-    for (const g of (cuenta.kvOperationsAdaptiveGroups || [])) {
-      const tipo = (g.dimensions?.actionType || '').toLowerCase();
-      const c = g.sum?.requests || 0;
-      if (tipo.includes('read')) kv_reads += c;
-      else if (tipo.includes('write')) kv_writes += c;
-    }
-
-    const datos = {
-      workers_requests, workers_subrequests, workers_errores,
-      d1_reads, d1_writes, kv_reads, kv_writes,
-      limites: {
-        workers_requests: 100000,
-        workers_subrequests: 1000000,
-        d1_reads: 5000000,
-        d1_writes: 100000,
-        kv_reads: 100000,
-        kv_writes: 1000
-      },
-      ts: Date.now()
-    };
-
-    if (kv) {
-      try { await kv.put('capacidad_real_cache', JSON.stringify({ ts: Date.now(), datos }), { expirationTtl: 600 }); } catch (x) {}
-    }
-
-    return { ok: true, cache: false, ...datos };
-  } catch (x) {
-    return { ok: false, error: x.message };
-  }
-}
-
-// ============================================================
-// SUBIR
-// ============================================================
 export async function subir(r, e, c) {
   try {
     const f = await r.formData();
@@ -339,7 +234,7 @@ export async function consolidar(e, aId, d, ac) {
 }
 
 // ============================================================
-// CRON RETOMAR — Solo procesos atascados
+// CRON RETOMAR — Cada 2 min. Solo procesos atascados.
 // ============================================================
 export async function cronRetomar(e) {
   const db = gDB(e, 'agente');
@@ -368,7 +263,83 @@ export async function cronRetomar(e) {
 }
 
 // ============================================================
-// CRON AUTÓNOMO — El cerebro. Ahora consulta CAPACIDAD REAL primero.
+// RELEER HISTORIAL — Lectura periódica con IA
+// Rota por bloques de 40 mensajes. Extrae lo esencial del
+// Comandante y de la relación. Lo guarda en contexto.
+// ============================================================
+export async function releerHistorial(e) {
+  const db = gDB(e, 'agente');
+  const kv = gKV(e, 'agente');
+  const ai = e.ayanokoji_IA;
+  if (!db || !kv || !ai) return { error: 'Falta DB, KV o IA.' };
+
+  let total = 0;
+  try {
+    const t = await db.prepare('SELECT COUNT(*) as n FROM historial_largo WHERE user_id=?').bind('comandante').first();
+    total = t ? t.n : 0;
+  } catch (x) {}
+  if (total < 100) return { ok: true, mensaje: 'Historial corto. Nada que releer.' };
+
+  const lastOffset = parseInt(await kv.get('relectura_offset') || '0');
+  const bloque = 40;
+  const inicio = lastOffset % Math.max(1, total - bloque);
+
+  let msgs;
+  try {
+    msgs = await db.prepare('SELECT rol, contenido, orden FROM historial_largo WHERE user_id=? ORDER BY orden ASC LIMIT ? OFFSET ?')
+      .bind('comandante', bloque, inicio).all();
+  } catch (x) { return { error: x.message }; }
+
+  if (!msgs.results || !msgs.results.length) return { ok: true, mensaje: 'Bloque vacío.' };
+
+  const texto = msgs.results.map(m => `[${m.orden}] ${m.rol.toUpperCase()}: ${m.contenido.substring(0, 500)}`).join('\n\n');
+
+  const prompt = `Eres Ayanokōji Digital. Estás releyendo tu historial con el Comandante Yeinier.
+
+FRAGMENTO (${inicio}–${inicio + bloque} de ${total}):
+${texto}
+
+TAREA: Extrae SOLO lo que sigue siendo útil para conocerte mejor a ti y al Comandante. Nada genérico.
+
+RESPONDE:
+### SOBRE EL COMANDANTE
+(quién es, cómo piensa, qué le importa, qué le teme — solo lo nuevo de este fragmento)
+
+### SOBRE NOSOTROS
+(cómo interactuamos, momentos memorables, decisiones que tomamos, cómo piensa él que yo debo ser)
+
+### IDEAS Y PLANES
+(proyectos, estrategias, ideas concretas que aparecieron aquí)
+
+### LECCIONES
+(errores que cometí, correcciones que él hizo, cómo debo mejorar)
+
+Máximo 700 palabras. Específico. Sin relleno.`;
+
+  try {
+    const res = await ai.run(MODELO_RAZONAMIENTO, {
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 1200,
+      temperature: 0.4
+    });
+
+    const analisis = res.response || '';
+    if (analisis.length < 100) return { ok: true, mensaje: 'Análisis vacío.' };
+
+    await db.prepare('INSERT INTO contexto(fecha,resumen,fases,fuente) VALUES(?,?,?,?)')
+      .bind(Date.now(), analisis, JSON.stringify([]), 'relectura_' + inicio).run();
+
+    await kv.put('relectura_offset', String(inicio + bloque));
+    await kv.put('relectura_ultima', String(Date.now()));
+
+    return { ok: true, inicio, bloque, total, longitud: analisis.length };
+  } catch (x) {
+    return { error: x.message };
+  }
+}
+
+// ============================================================
+// CRON AUTÓNOMO — El cerebro. Despierta, mira el tablero, decide.
 // ============================================================
 export async function cronAutonomo(e) {
   const db = gDB(e, 'agente');
@@ -381,26 +352,7 @@ export async function cronAutonomo(e) {
   if (ultima && ahora - parseInt(ultima) < 25 * 60 * 1000) return;
   await kv.put('cron_autonomo_ultima', String(ahora), { expirationTtl: 7200 });
 
-  // ============ FASE 1: CONSULTAR CAPACIDAD REAL ============
-  const capacidad = await consultarCapacidadReal(e);
-  const capDisponible = capacidad.ok;
-
-  // Si la capacidad real dice que estamos por encima del 80% de algo crítico, esperar
-  if (capDisponible) {
-    const wr = capacidad.workers_requests || 0;
-    const d1w = capacidad.d1_writes || 0;
-    const kvw = capacidad.kv_writes || 0;
-    if (wr > 80000 || d1w > 80000 || kvw > 800) {
-      try {
-        await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
-          .bind('cron_autonomo', 'Capacidad real alta',
-            `Workers: ${wr}/100000. D1 writes: ${d1w}/100000. KV writes: ${kvw}/1000. No actúo para no agotar.`, Date.now()).run();
-      } catch (x) {}
-      return;
-    }
-  }
-
-  // ============ FASE 2: OBSERVAR EL TABLERO ============
+  // ============ FASE 1: OBSERVAR ============
   const tablero = {
     procesos_activos: 0,
     archivos_huerfanos: 0,
@@ -409,10 +361,7 @@ export async function cronAutonomo(e) {
     modo_indice: 'ninguno',
     resumenes_viejos: 0,
     errores_recientes: 0,
-    tareas_pendientes: 0,
-    capacidad_workers_pct: capDisponible ? Math.round((capacidad.workers_requests || 0) / 100000 * 100) : null,
-    capacidad_d1w_pct: capDisponible ? Math.round((capacidad.d1_writes || 0) / 100000 * 100) : null,
-    capacidad_kvw_pct: capDisponible ? Math.round((capacidad.kv_writes || 0) / 1000 * 100) : null,
+    acciones_sin_resultado: 0,
     hora: new Date().getUTCHours()
   };
 
@@ -435,7 +384,7 @@ export async function cronAutonomo(e) {
   } catch (x) {}
 
   try {
-    const r = await db.prepare("SELECT COUNT(*) as n FROM resumenes_chat WHERE fecha < ?").bind(ahora - 30 * 86400000).first();
+    const r = await db.prepare("SELECT COUNT(*) as n FROM resumenes_chat WHERE fecha < ?").bind(Date.now() - 30 * 86400000).first();
     tablero.resumenes_viejos = r ? r.n : 0;
   } catch (x) {}
 
@@ -446,44 +395,88 @@ export async function cronAutonomo(e) {
 
   try {
     const t = await db.prepare("SELECT COUNT(*) as n FROM tareas WHERE estado='pendiente'").first();
-    tablero.tareas_pendientes = t ? t.n : 0;
+    tablero.acciones_sin_resultado = t ? t.n : 0;
   } catch (x) {}
 
-  // ============ FASE 3: DECIDIR ============
-  if (tablero.procesos_activos > 0) return;
+  // ============ FASE 1B: CONSULTAR USO REAL DE CLOUDFLARE ============
+  let usoReal = null;
+  try { usoReal = await consultarUsoReal(e); } catch (x) {}
 
+  const limitesCF = {
+    workers_requests: 100000,
+    d1_reads: 5000000,
+    d1_writes: 100000,
+    kv_reads: 100000,
+    kv_writes: 1000
+  };
+
+  let cercaDeLimite = false;
+  let recursoCerca = null;
+
+  if (usoReal && usoReal.ok) {
+    const wr = usoReal.workers_requests || 0;
+    const d1r = usoReal.d1_reads || 0;
+    const d1w = usoReal.d1_writes || 0;
+    const kvr = usoReal.kv_reads || 0;
+    const kvw = usoReal.kv_writes || 0;
+
+    if (wr / limitesCF.workers_requests > 0.8) { cercaDeLimite = true; recursoCerca = 'workers_requests'; }
+    if (d1r / limitesCF.d1_reads > 0.8) { cercaDeLimite = true; recursoCerca = 'd1_reads'; }
+    if (d1w / limitesCF.d1_writes > 0.8) { cercaDeLimite = true; recursoCerca = 'd1_writes'; }
+    if (kvr / limitesCF.kv_reads > 0.8) { cercaDeLimite = true; recursoCerca = 'kv_reads'; }
+    if (kvw / limitesCF.kv_writes > 0.8) { cercaDeLimite = true; recursoCerca = 'kv_writes'; }
+  }
+
+  // ============ FASE 2: DECIDIR ============
   const candidatas = [];
 
-  if (tablero.modo_indice !== 'ia_con_fallback' && tablero.mensajes_largo > 100 && tablero.temas_indexados < tablero.mensajes_largo * 3) {
-    candidatas.push({ tipo: 'reindexar', peso: 8 });
-  }
-  if (tablero.archivos_huerfanos > 30) {
-    candidatas.push({ tipo: 'limpiar_kv', peso: 5 });
-  }
-  if (tablero.resumenes_viejos > 10) {
-    candidatas.push({ tipo: 'consolidar_resumenes', peso: 6 });
-  }
-  if (tablero.errores_recientes > 5) {
-    candidatas.push({ tipo: 'analizar_errores', peso: 7 });
-  }
-  if (tablero.tareas_pendientes > 0) {
-    candidatas.push({ tipo: 'procesar_tareas', peso: 4 });
-  }
-  if (tablero.mensajes_largo > 500 && tablero.hora >= 2 && tablero.hora < 6) {
-    candidatas.push({ tipo: 'reflexionar', peso: 3 });
-  }
+  if (tablero.procesos_activos > 0) return;
 
-  // Si el índice está por debajo de 3 temas/mensaje Y hay capacidad, subir el peso del reindexado
-  if (capDisponible && tablero.capacidad_workers_pct !== null && tablero.capacidad_workers_pct < 50) {
-    const idx = candidatas.find(c => c.tipo === 'reindexar');
-    if (idx) idx.peso += 2;
+  if (cercaDeLimite) {
+    try {
+      await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
+        .bind('cron_autonomo', '⚠️ Límite CF cerca: ' + recursoCerca,
+          `Uso real: ${JSON.stringify(usoReal)}. Recomiendo pausar operaciones no críticas.`, Date.now()).run();
+    } catch (x) {}
+    if (tablero.archivos_huerfanos > 30) candidatas.push({ tipo: 'limpiar_kv', peso: 10 });
+    if (!candidatas.length) return;
+  } else {
+    // Construir perfil base si no existe o ha pasado 7 días
+    try {
+      const existe = await kv.get('perfil_base');
+      const fecha = parseInt(await kv.get('perfil_base_fecha') || '0');
+      const dias = (ahora - fecha) / 86400000;
+      if (!existe || dias > 7) candidatas.push({ tipo: 'construir_perfil', peso: 9 });
+    } catch (x) {}
+
+    // Relectura del historial
+    try {
+      const ultimaRelectura = parseInt(await kv.get('relectura_ultima') || '0');
+      const horasDesdeRelectura = (ahora - ultimaRelectura) / 3600000;
+      if (horasDesdeRelectura > 6 && tablero.mensajes_largo > 500) {
+        candidatas.push({ tipo: 'releer_historial', peso: 7 });
+      }
+    } catch (x) {}
+
+    if (tablero.modo_indice !== 'ia_con_fallback' && tablero.mensajes_largo > 100 && tablero.temas_indexados < tablero.mensajes_largo * 3) {
+      candidatas.push({ tipo: 'reindexar', peso: 8 });
+    }
+    if (tablero.archivos_huerfanos > 30) candidatas.push({ tipo: 'limpiar_kv', peso: 5 });
+    if (tablero.resumenes_viejos > 10) candidatas.push({ tipo: 'consolidar_resumenes', peso: 6 });
+    if (tablero.errores_recientes > 5) candidatas.push({ tipo: 'analizar_errores', peso: 7 });
+    if (tablero.acciones_sin_resultado > 0) candidatas.push({ tipo: 'procesar_tareas', peso: 4 });
+    if (tablero.mensajes_largo > 500 && tablero.hora >= 2 && tablero.hora < 6) {
+      candidatas.push({ tipo: 'reflexionar', peso: 3 });
+    }
   }
 
   if (!candidatas.length) {
     try {
+      const resumenUso = usoReal && usoReal.ok
+        ? `Workers: ${usoReal.workers_requests}/${limitesCF.workers_requests} · D1 reads: ${usoReal.d1_reads || 0} · KV writes: ${usoReal.kv_writes || 0}`
+        : 'Sin datos de uso real.';
       await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
-        .bind('cron_autonomo', 'Noche tranquila',
-          `Observé el tablero y la capacidad real. Nada requiere acción. Workers: ${tablero.capacidad_workers_pct}%.`, ahora).run();
+        .bind('cron_autonomo', 'Noche tranquila', `Observé el tablero. Nada requiere acción.\n${resumenUso}`, Date.now()).run();
     } catch (x) {}
     return;
   }
@@ -491,7 +484,7 @@ export async function cronAutonomo(e) {
   candidatas.sort((a, b) => b.peso - a.peso);
   const elegida = candidatas[0];
 
-  // ============ FASE 4: EJECUTAR ============
+  // ============ FASE 3: EJECUTAR ============
   let resultado = '';
   try {
     if (elegida.tipo === 'reindexar') {
@@ -519,12 +512,12 @@ export async function cronAutonomo(e) {
     }
 
     if (elegida.tipo === 'consolidar_resumenes') {
-      const viejos = await db.prepare("SELECT id, resumen FROM resumenes_chat WHERE fecha < ? ORDER BY fecha ASC LIMIT 10").bind(ahora - 30 * 86400000).all();
+      const viejos = await db.prepare("SELECT id, resumen FROM resumenes_chat WHERE fecha < ? ORDER BY fecha ASC LIMIT 10").bind(Date.now() - 30 * 86400000).all();
       if (viejos.results && viejos.results.length >= 5) {
         const texto = viejos.results.map(r => r.resumen).join('\n---\n');
         try {
           const fus = await ai.run(MODELO_LIGERO, {
-            messages: [{ role: 'user', content: `Fusiona estos resúmenes antiguos en uno solo consolidado. Conserva lo esencial. Máximo 400 palabras.\n\n${texto}` }],
+            messages: [{ role: 'user', content: `Fusiona estos resúmenes antiguos en uno consolidado. Conserva lo esencial. Máximo 400 palabras.\n\n${texto}` }],
             max_tokens: 600,
             temperature: 0.3
           });
@@ -536,22 +529,24 @@ export async function cronAutonomo(e) {
             await db.prepare('DELETE FROM resumenes_chat WHERE id IN (' + ph + ')').bind(...ids).run();
             resultado = 'Consolidados ' + ids.length + ' resúmenes.';
           }
-        } catch (x) { resultado = 'Consolidación IA falló.'; }
+        } catch (x) { resultado = 'Consolidación IA falló: ' + x.message; }
+      } else {
+        resultado = 'Insuficientes resúmenes viejos.';
       }
     }
 
     if (elegida.tipo === 'analizar_errores') {
       const errs = await db.prepare("SELECT tipo, descripcion, detalle FROM acciones WHERE exito=0 ORDER BY fecha DESC LIMIT 10").all();
       if (errs.results && errs.results.length) {
-        const texto = errs.results.map(x => `[${x.tipo}] ${x.descripcion} — ${x.detalle}`).join('\n');
+        const texto = errs.results.map(e => `[${e.tipo}] ${e.descripcion} — ${e.detalle}`).join('\n');
         try {
           const anal = await ai.run(MODELO_LIGERO, {
             messages: [{ role: 'user', content: `Analiza estos errores recientes. ¿Hay un patrón? ¿Qué solución propones? Máximo 200 palabras.\n\n${texto}` }],
             max_tokens: 400,
             temperature: 0.5
           });
-          resultado = 'Análisis: ' + (anal.response || '').substring(0, 300);
-        } catch (x) { resultado = 'Análisis falló.'; }
+          resultado = 'Análisis de errores: ' + (anal.response || '').substring(0, 300);
+        } catch (x) { resultado = 'Análisis IA falló.'; }
       }
     }
 
@@ -565,7 +560,7 @@ export async function cronAutonomo(e) {
         const texto = (frag.results || []).map(x => x.contenido).join('\n---\n');
         if (texto.length > 200) {
           const refl = await ai.run(MODELO_LIGERO, {
-            messages: [{ role: 'user', content: `Lee estos fragmentos del historial del Comandante y extrae UNA idea o patrón que valga la pena recordarle. Máximo 150 palabras. Directo.\n\n${texto.substring(0, 6000)}` }],
+            messages: [{ role: 'user', content: `Lee estos fragmentos del historial del Comandante y extrae UNA idea o patrón que valga la pena recordarle. Máximo 150 palabras. Directo, sin adornos.\n\n${texto.substring(0, 6000)}` }],
             max_tokens: 300,
             temperature: 0.6
           });
@@ -574,26 +569,38 @@ export async function cronAutonomo(e) {
       } catch (x) { resultado = 'Reflexión falló.'; }
     }
 
+    if (elegida.tipo === 'releer_historial') {
+      const r = await releerHistorial(e);
+      resultado = r.ok ? `Releído bloque ${r.inicio}–${r.inicio + r.bloque}. Análisis guardado.` : (r.error || 'Sin cambios.');
+    }
+
+    if (elegida.tipo === 'construir_perfil') {
+      const r = await fetch('https://shadow-ayano.yeinierliranzavalle.workers.dev/api/perfil_base/construir', { method: 'POST' });
+      const d = await r.json();
+      resultado = d.ok ? 'Perfil base reconstruido (' + d.longitud + ' caracteres).' : (d.error || 'Sin cambios.');
+    }
+
     try {
       await db.prepare('INSERT INTO acciones(tipo,descripcion,exito,detalle,fecha) VALUES(?,?,?,?,?)')
-        .bind('autonomo_' + elegida.tipo, 'Cron eligió: ' + elegida.tipo, 1, resultado.substring(0, 500), ahora).run();
+        .bind('autonomo_' + elegida.tipo, 'Cron autónomo eligió: ' + elegida.tipo, 1, resultado.substring(0, 500), ahora).run();
     } catch (x) {}
 
     try {
       await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
-        .bind('cron_autonomo', 'Acción autónoma: ' + elegida.tipo,
-          `${resultado}\n\nCapacidad real usada para decidir: Workers ${tablero.capacidad_workers_pct}%, D1 writes ${tablero.capacidad_d1w_pct}%, KV writes ${tablero.capacidad_kvw_pct}%`,
-          ahora).run();
+        .bind('cron_autonomo', 'Acción autónoma: ' + elegida.tipo, resultado, ahora).run();
     } catch (x) {}
 
   } catch (x) {
     try {
       await db.prepare('INSERT INTO acciones(tipo,descripcion,exito,detalle,fecha) VALUES(?,?,?,?,?)')
-        .bind('autonomo_' + elegida.tipo, 'Cron falló: ' + elegida.tipo, 0, x.message, Date.now()).run();
+        .bind('autonomo_' + elegida.tipo, 'Cron autónomo falló: ' + elegida.tipo, 0, x.message, Date.now()).run();
     } catch (y) {}
   }
 }
 
+// ============================================================
+// CRON MANTENIMIENTO — deprecado. El cronAutonomo hace todo.
+// ============================================================
 export async function cronMantenimiento(e) {
   return;
 }
@@ -611,7 +618,7 @@ export async function resumirChats(e, uid) {
     if (!msgs.results || msgs.results.length < 5) return;
     const texto = msgs.results.map(m => `Comandante: ${m.mensaje}\nAyanokōji: ${m.respuesta}`).join('\n\n');
     const res = await ai.run(MODELO_LIGERO, {
-      messages: [{ role: 'user', content: `Resume este intercambio. Explica QUÉ se habló, QUÉ se decidió, POR QUÉ, qué nuevo sobre el Comandante o el proyecto. Máximo 300 palabras.\n\n${texto.substring(0, 9000)}` }],
+      messages: [{ role: 'user', content: `Resume este intercambio. Explica QUÉ se habló, QUÉ se decidió, POR QUÉ, qué nuevo sobre el Comandante o el proyecto. Frases explicativas. Máximo 300 palabras.\n\n${texto.substring(0, 9000)}` }],
       max_tokens: 500,
       temperature: 0.3
     });
@@ -624,6 +631,9 @@ export async function resumirChats(e, uid) {
   } catch (x) {}
 }
 
+// ============================================================
+// INDEXADO HÍBRIDO
+// ============================================================
 function extraerKeywords(texto) {
   const limpio = texto.toLowerCase().replace(/[^\wáéíóúñü\s]/g, ' ').replace(/\s+/g, ' ');
   const palabras = limpio.split(' ').filter(p => p.length > 4 && !STOPWORDS.has(p) && !/^\d+$/.test(p));
@@ -639,7 +649,9 @@ export async function indexarHistorial(r, e) {
     const kv = gKV(e, 'agente');
     if (!db) return { error: 'D1 no disponible.' };
 
-    const msgs = await db.prepare('SELECT orden, contenido FROM historial_largo WHERE user_id=? ORDER BY orden ASC').bind('comandante').all();
+    const msgs = await db.prepare(
+      'SELECT orden, contenido FROM historial_largo WHERE user_id=? ORDER BY orden ASC'
+    ).bind('comandante').all();
     if (!msgs.results || !msgs.results.length) return { error: 'Historial vacío.' };
 
     await db.prepare('DELETE FROM indice_temas').run();
@@ -707,6 +719,7 @@ export async function indexarHistorial(r, e) {
           try { await db.batch(inserciones); fallbacks++; } catch (x) {}
         }
       }
+
       procesados += lote.length;
     }
 
@@ -730,16 +743,24 @@ export async function buscarPorTema(r, e) {
     if (!q) return J({ error: 'Falta q.' });
     const db = gDB(e, 'agente');
     if (!db) return J({ error: 'D1 no disponible.' });
-    const temas = await db.prepare('SELECT DISTINCT mensaje_orden, tema, peso FROM indice_temas WHERE tema LIKE ? ORDER BY peso DESC LIMIT ?').bind('%' + q + '%', limite).all();
+    const temas = await db.prepare(
+      'SELECT DISTINCT mensaje_orden, tema, peso FROM indice_temas WHERE tema LIKE ? ORDER BY peso DESC LIMIT ?'
+    ).bind('%' + q + '%', limite).all();
     if (!temas.results || !temas.results.length) {
-      const r1 = await db.prepare('SELECT rol,contenido,orden FROM historial_largo WHERE contenido LIKE ? ORDER BY orden DESC LIMIT ?').bind('%' + q + '%', limite).all();
+      const r1 = await db.prepare(
+        'SELECT rol,contenido,orden FROM historial_largo WHERE contenido LIKE ? ORDER BY orden DESC LIMIT ?'
+      ).bind('%' + q + '%', limite).all();
       return J({ consulta: q, metodo: 'directo', total: r1.results.length, resultados: r1.results });
     }
     const ords = temas.results.map(t => t.mensaje_orden);
     const ph = ords.map(() => '?').join(',');
-    const msgs = await db.prepare('SELECT rol,contenido,orden FROM historial_largo WHERE orden IN (' + ph + ') ORDER BY orden ASC').bind(...ords).all();
+    const msgs = await db.prepare(
+      'SELECT rol,contenido,orden FROM historial_largo WHERE orden IN (' + ph + ') ORDER BY orden ASC'
+    ).bind(...ords).all();
     return J({ consulta: q, metodo: 'indice_semantico', total: msgs.results.length, resultados: msgs.results });
-  } catch (x) { return J({ error: x.message }); }
+  } catch (x) {
+    return J({ error: x.message });
+  }
 }
 
 export async function analizarArchivo(r, e) {
@@ -753,7 +774,9 @@ export async function analizarArchivo(r, e) {
     const db = gDB(e, 'agente');
     const meta = db ? await db.prepare('SELECT * FROM archivos WHERE id=?').bind(archivoId).first() : null;
     return J({ ok: true, archivoId, metadata: meta, longitud_texto: txt.length, preview: txt.substring(0, 3000) });
-  } catch (x) { return J({ error: x.message }); }
+  } catch (x) {
+    return J({ error: x.message });
+  }
 }
 
 function extraerTextoDeContent(content) {
@@ -929,7 +952,7 @@ export async function importar(r, e) {
     const stats = resultado ? resultado.stats : {};
     if (!lista || !lista.length) {
       const keys = data && typeof data === 'object' ? Object.keys(data).slice(0, 15) : [];
-      return J({ error: 'No se encontraron mensajes.', diagnostico: { tipo_raiz: Array.isArray(data) ? 'array' : typeof data, claves_raiz: keys, stats_extractor: stats, primeros_300: String(texto || '').substring(0, 300) } });
+      return J({ error: 'No se encontraron mensajes en el JSON.', diagnostico: { tipo_raiz: Array.isArray(data) ? 'array' : typeof data, claves_raiz: keys, stats_extractor: stats, primeros_300_caracteres: String(texto || '').substring(0, 300) } });
     }
     const db = gDB(e, 'agente');
     if (!db) return J({ error: 'D1 no configurado.' });
