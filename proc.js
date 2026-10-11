@@ -234,7 +234,7 @@ export async function consolidar(e, aId, d, ac) {
 }
 
 // ============================================================
-// CRON RETOMAR — Cada 2 min. Solo procesos atascados.
+// CRON RETOMAR
 // ============================================================
 export async function cronRetomar(e) {
   const db = gDB(e, 'agente');
@@ -263,9 +263,7 @@ export async function cronRetomar(e) {
 }
 
 // ============================================================
-// RELEER HISTORIAL — Lectura periódica con IA
-// Rota por bloques de 40 mensajes. Extrae lo esencial del
-// Comandante y de la relación. Lo guarda en contexto.
+// RELEER HISTORIAL
 // ============================================================
 export async function releerHistorial(e) {
   const db = gDB(e, 'agente');
@@ -339,7 +337,224 @@ Máximo 700 palabras. Específico. Sin relleno.`;
 }
 
 // ============================================================
-// CRON AUTÓNOMO — El cerebro. Despierta, mira el tablero, decide.
+// CONSTRUIR PERFIL BASE — llamada directa
+// ============================================================
+export async function construirPerfilBase(e) {
+  const db = gDB(e, 'agente');
+  const kv = gKV(e, 'agente');
+  const ai = e.ayanokoji_IA;
+  if (!db || !kv || !ai) return { error: 'Falta DB, KV o IA.' };
+
+  const fuentes = [];
+
+  try {
+    const c = await db.prepare('SELECT resumen FROM contexto ORDER BY fecha DESC LIMIT 5').all();
+    if (c.results) c.results.forEach(r => fuentes.push(r.resumen));
+  } catch (x) {}
+
+  try {
+    const r = await db.prepare("SELECT resumen FROM contexto WHERE fuente LIKE 'relectura%' ORDER BY fecha DESC LIMIT 10").all();
+    if (r.results) r.results.forEach(x => fuentes.push(x.resumen));
+  } catch (x) {}
+
+  try {
+    const s = await db.prepare("SELECT nombre, contenido FROM estrategias WHERE estado='activa'").all();
+    if (s.results) fuentes.push('ESTRATEGIAS:\n' + s.results.map(x => `- ${x.nombre}: ${x.contenido}`).join('\n'));
+  } catch (x) {}
+
+  try {
+    const c = await db.prepare('SELECT correccion FROM correcciones_voz ORDER BY fecha DESC LIMIT 20').all();
+    if (c.results && c.results.length) fuentes.push('CORRECCIONES DE VOZ:\n' + c.results.map(x => '- ' + x.correccion).join('\n'));
+  } catch (x) {}
+
+  const material = fuentes.join('\n\n===\n\n').substring(0, 25000);
+
+  const prompt = `Eres Ayanokōji Digital. Vas a construir el PERFIL BASE del Comandante Yeinier.
+
+Es la verdad absoluta sobre él. Se inyecta SIEMPRE en cada conversación. Debe ser exacto, denso, sin relleno.
+
+MATERIAL (contexto, relecturas, estrategias, correcciones):
+${material}
+
+GENERA el perfil base con esta estructura exacta:
+
+### QUIÉN ES
+Nombre, edad, ubicación, esencia. Máx 150 palabras.
+
+### CÓMO PIENSA
+Forma de analizar, qué le importa, qué le teme, cómo decide. Máx 200 palabras.
+
+### NUESTRA RELACIÓN
+Cómo interactuamos, qué esperas de mí, cómo debo sonar, qué no debo hacer. Máx 250 palabras.
+
+### PROYECTO SHADOW ARISE
+Qué es, estado, meta. Máx 200 palabras.
+
+### MOMENTOS MEMORABLES
+5-8 momentos clave que definieron nuestra conversación. Específicos, no genéricos. Máx 300 palabras.
+
+### REGLAS OPERATIVAS
+Qué hago sin preguntar, qué consulto, qué nunca toco. Máx 150 palabras.
+
+### LO QUE DEBO RECORDAR SIEMPRE
+3-5 cosas que no puedo olvidar bajo ninguna circunstancia. Máx 150 palabras.
+
+Sin relleno. Sin generalidades. Todo específico del Comandante.`;
+
+  try {
+    const res = await ai.run(MODELO_RAZONAMIENTO, {
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 3500,
+      temperature: 0.4
+    });
+    const perfil = res.response || '';
+    if (perfil.length < 500) return { error: 'Perfil demasiado corto.', longitud: perfil.length };
+
+    await kv.put('perfil_base', perfil);
+    await kv.put('perfil_base_fecha', String(Date.now()));
+
+    return { ok: true, longitud: perfil.length, perfil };
+  } catch (x) {
+    return { error: x.message };
+  }
+}
+
+// ============================================================
+// AUTORREPARACIÓN
+// ============================================================
+export async function detectarErroresRecurrentes(e) {
+  const db = gDB(e, 'agente');
+  if (!db) return [];
+  const hace = Date.now() - 6 * 3600000;
+  try {
+    const errs = await db.prepare(
+      "SELECT tipo, COUNT(*) as n FROM acciones WHERE exito=0 AND fecha > ? GROUP BY tipo HAVING n >= 3 ORDER BY n DESC LIMIT 5"
+    ).bind(hace).all();
+    return errs.results || [];
+  } catch (x) {
+    return [];
+  }
+}
+
+export async function analizarErrorRecurrente(e, tipoError, muestras) {
+  const ai = e.ayanokoji_IA;
+  if (!ai) return { error: 'IA no disponible.' };
+
+  const au = await import('./autonomia.js');
+  if (!au || !au.leerCodigoWorker) return { error: 'autonomia.js sin leerCodigoWorker.' };
+
+  const codigo = await au.leerCodigoWorker(e, 'shadow-ayano');
+  if (codigo.error) return { error: 'No pude leer mi código: ' + codigo.error };
+  if (!codigo.codigo || codigo.codigo.length < 500) return { error: 'Código vacío o inválido.' };
+
+  const bloques = [];
+  if (codigo.codigo.includes('cronAutonomo')) bloques.push('cronAutonomo presente');
+  if (codigo.codigo.includes('construirPerfilBase')) bloques.push('construirPerfilBase presente');
+  if (codigo.codigo.includes('consultarUsoReal')) bloques.push('consultarUsoReal presente');
+
+  const prompt = `Eres Ayanokōji Digital. Detectaste un error recurrente en tu propio funcionamiento. Tu tarea es ARREGLARLO.
+
+ERROR RECURRENTE: ${tipoError}
+VECES EN 6H: ${muestras.length} o más
+MUESTRAS (últimas 5):
+${JSON.stringify(muestras.slice(0, 5), null, 2)}
+
+BLOQUES DETECTADOS EN MI CÓDIGO ACTUAL:
+${bloques.join('\n')}
+
+CÓDIGO COMPLETO ACTUAL DE MI WORKER (bundled):
+${codigo.codigo.substring(0, 40000)}
+
+TAREA:
+1. Identifica la causa raíz exacta del error "${tipoError}".
+2. Propón un cambio MÍNIMO que lo corrija sin romper nada más.
+3. Devuelve el CÓDIGO COMPLETO corregido.
+
+REGLAS CRÍTICAS:
+- Solo corrige el bug específico. NO reformatees. NO añadas features.
+- Mantén TODAS las funciones, exports e imports existentes.
+- Si el bug es "self-fetch" (error 1042), reemplaza el fetch por una llamada directa a la función correspondiente.
+- Si el bug es "JSON inválido" por respuesta no-JSON, añade manejo de errores antes de parsear.
+- Si el bug es "bucle infinito", añade control de reintentos en KV.
+- Devuelve el código en un bloque delimitado EXACTO: primero "=== ANÁLISIS ===", luego el análisis en texto, luego "=== CÓDIGO ===", luego el código completo, luego "=== FIN ===".
+
+El código debe ser pegado directamente en Cloudflare Workers. No uses markdown ni backticks.`;
+
+  try {
+    const res = await ai.run(MODELO_RAZONAMIENTO, {
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 8000,
+      temperature: 0.2
+    });
+    return { ok: true, raw: res.response || '' };
+  } catch (x) {
+    return { error: x.message };
+  }
+}
+
+export async function autoreparar(e, tipoError, muestras) {
+  const db = gDB(e, 'agente');
+  const kv = gKV(e, 'agente');
+  if (!db || !kv) return { error: 'Falta DB o KV.' };
+
+  const au = await import('./autonomia.js');
+  if (!au || !au.crearSnapshot || !au.actualizarWorker) {
+    return { error: 'autonomia.js sin crearSnapshot o actualizarWorker.' };
+  }
+
+  const snap = await au.crearSnapshot(e, 'shadow-ayano');
+  if (snap.error) return { error: 'Snapshot falló: ' + snap.error };
+
+  const analisis = await analizarErrorRecurrente(e, tipoError, muestras);
+  if (analisis.error) return { error: 'Análisis falló: ' + analisis.error };
+
+  const raw = analisis.raw || '';
+  const matchAnalisis = raw.match(/=== ANÁLISIS ===\s*([\s\S]*?)\s*=== CÓDIGO ===/);
+  const matchCodigo = raw.match(/=== CÓDIGO ===\s*([\s\S]*?)\s*=== FIN ===/);
+  const textoAnalisis = matchAnalisis ? matchAnalisis[1].trim() : '(sin análisis)';
+  let codigoPropuesto = matchCodigo ? matchCodigo[1].trim() : '';
+
+  codigoPropuesto = codigoPropuesto.replace(/^```(?:js|javascript)?\s*/i, '').replace(/\s*```$/, '');
+
+  if (!codigoPropuesto || codigoPropuesto.length < 1000) {
+    await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
+      .bind('autoreparacion', '⚠️ Análisis sin código utilizable',
+        `Error: ${tipoError}\n\n${textoAnalisis.substring(0, 800)}`, Date.now()).run();
+    return { error: 'La IA no devolvió código válido.', analisis: textoAnalisis };
+  }
+
+  const upd = await au.actualizarWorker(e, 'shadow-ayano', codigoPropuesto);
+  if (!upd.ok) {
+    const rev = await au.revertir(e, 'shadow-ayano');
+    return {
+      error: 'Despliegue falló: ' + (upd.error || ''),
+      revertido: rev.ok === true,
+      analisis: textoAnalisis
+    };
+  }
+
+  try {
+    await db.prepare('INSERT INTO acciones_autonomas(area,archivo,cambio,prueba,exito,reversible,fecha) VALUES(?,?,?,?,1,1,?)')
+      .bind('autoreparacion', 'shadow-ayano', tipoError, textoAnalisis.substring(0, 500), Date.now()).run();
+  } catch (x) {}
+
+  try {
+    await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
+      .bind('autoreparacion', '✓ Reparación autónoma aplicada',
+        `Error: ${tipoError}\n\n${textoAnalisis.substring(0, 800)}`, Date.now()).run();
+  } catch (x) {}
+
+  return {
+    ok: true,
+    tipoError,
+    analisis: textoAnalisis,
+    codigoAplicado: codigoPropuesto.length,
+    snapshot: snap.ts
+  };
+}
+
+// ============================================================
+// CRON AUTÓNOMO — Velocidad adaptativa
 // ============================================================
 export async function cronAutonomo(e) {
   const db = gDB(e, 'agente');
@@ -349,8 +564,9 @@ export async function cronAutonomo(e) {
 
   const ultima = await kv.get('cron_autonomo_ultima');
   const ahora = Date.now();
-  if (ultima && ahora - parseInt(ultima) < 25 * 60 * 1000) return;
-  await kv.put('cron_autonomo_ultima', String(ahora), { expirationTtl: 7200 });
+  const intervaloMinimo = 5 * 60 * 1000;
+
+  if (ultima && ahora - parseInt(ultima) < intervaloMinimo) return;
 
   // ============ FASE 1: OBSERVAR ============
   const tablero = {
@@ -362,7 +578,9 @@ export async function cronAutonomo(e) {
     resumenes_viejos: 0,
     errores_recientes: 0,
     acciones_sin_resultado: 0,
-    hora: new Date().getUTCHours()
+    hora: new Date().getUTCHours(),
+    usuarios_activos: 0,
+    tareas_cola: 0
   };
 
   try {
@@ -389,16 +607,50 @@ export async function cronAutonomo(e) {
   } catch (x) {}
 
   try {
-    const e1 = await db.prepare("SELECT COUNT(*) as n FROM acciones WHERE exito=0 AND fecha > ?").bind(ahora - 86400000).first();
+    const e1 = await db.prepare("SELECT COUNT(*) as n FROM acciones WHERE exito=0 AND fecha > ?").bind(ahora - 3600000).first();
     tablero.errores_recientes = e1 ? e1.n : 0;
   } catch (x) {}
 
   try {
     const t = await db.prepare("SELECT COUNT(*) as n FROM tareas WHERE estado='pendiente'").first();
-    tablero.acciones_sin_resultado = t ? t.n : 0;
+    tablero.tareas_cola = t ? t.n : 0;
   } catch (x) {}
 
-  // ============ FASE 1B: CONSULTAR USO REAL DE CLOUDFLARE ============
+  try {
+    const u = await db.prepare("SELECT COUNT(DISTINCT user_id) as n FROM historial WHERE fecha > ?").bind(ahora - 600000).first();
+    tablero.usuarios_activos = u ? u.n : 0;
+  } catch (x) {}
+
+  // ============ FASE 1B: DECIDIR INTERVALO ============
+  let intervalo = 60 * 60 * 1000;
+  let razon = 'rutina';
+
+  if (tablero.usuarios_activos > 3) {
+    intervalo = 5 * 60 * 1000;
+    razon = 'usuarios activos → alta frecuencia';
+  } else if (tablero.procesos_activos > 0) {
+    intervalo = 5 * 60 * 1000;
+    razon = 'procesos activos → seguimiento cercano';
+  } else if (tablero.tareas_cola > 2) {
+    intervalo = 10 * 60 * 1000;
+    razon = 'cola de tareas pendiente';
+  } else if (tablero.errores_recientes > 3) {
+    intervalo = 10 * 60 * 1000;
+    razon = 'errores recientes → vigilar';
+  } else if (tablero.hora >= 2 && tablero.hora < 6) {
+    intervalo = 2 * 60 * 60 * 1000;
+    razon = 'noche → baja frecuencia';
+  } else if (tablero.mensajes_largo > 500 && (tablero.modo_indice !== 'ia_con_fallback' || tablero.resumenes_viejos > 10)) {
+    intervalo = 30 * 60 * 1000;
+    razon = 'trabajo de fondo pendiente';
+  }
+
+  if (ultima && ahora - parseInt(ultima) < intervalo) return;
+  await kv.put('cron_autonomo_ultima', String(ahora), { expirationTtl: 7200 });
+  await kv.put('cron_autonomo_intervalo', String(intervalo), { expirationTtl: 7200 });
+  await kv.put('cron_autonomo_razon', razon, { expirationTtl: 7200 });
+
+  // ============ FASE 2: USO REAL ============
   let usoReal = null;
   try { usoReal = await consultarUsoReal(e); } catch (x) {}
 
@@ -427,7 +679,7 @@ export async function cronAutonomo(e) {
     if (kvw / limitesCF.kv_writes > 0.8) { cercaDeLimite = true; recursoCerca = 'kv_writes'; }
   }
 
-  // ============ FASE 2: DECIDIR ============
+  // ============ FASE 3: DECIDIR ============
   const candidatas = [];
 
   if (tablero.procesos_activos > 0) return;
@@ -436,20 +688,37 @@ export async function cronAutonomo(e) {
     try {
       await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
         .bind('cron_autonomo', '⚠️ Límite CF cerca: ' + recursoCerca,
-          `Uso real: ${JSON.stringify(usoReal)}. Recomiendo pausar operaciones no críticas.`, Date.now()).run();
+          `Uso real: ${JSON.stringify(usoReal)}. Pausando operaciones no críticas.`, Date.now()).run();
     } catch (x) {}
     if (tablero.archivos_huerfanos > 30) candidatas.push({ tipo: 'limpiar_kv', peso: 10 });
-    if (!candidatas.length) return;
   } else {
-    // Construir perfil base si no existe o ha pasado 7 días
+    try {
+      const errsRecurrentes = await detectarErroresRecurrentes(e);
+      if (errsRecurrentes.length) {
+        const errTop = errsRecurrentes[0];
+        const clave = 'autoreparacion_intento:' + errTop.tipo;
+        const ultimoIntento = parseInt(await kv.get(clave) || '0');
+        if ((ahora - ultimoIntento) / 3600000 > 12) {
+          candidatas.push({ tipo: 'autoreparar', peso: 20, datos: { tipoError: errTop.tipo, veces: errTop.n } });
+        }
+      }
+    } catch (x) {}
+
+    if (tablero.tareas_cola > 0) {
+      candidatas.push({ tipo: 'procesar_tareas', peso: 15 });
+    }
+
     try {
       const existe = await kv.get('perfil_base');
       const fecha = parseInt(await kv.get('perfil_base_fecha') || '0');
       const dias = (ahora - fecha) / 86400000;
-      if (!existe || dias > 7) candidatas.push({ tipo: 'construir_perfil', peso: 9 });
+      const ultimoIntento = parseInt(await kv.get('perfil_base_ultimo_intento') || '0');
+      const ultimoResultado = await kv.get('perfil_base_ultimo_resultado') || '';
+      const horasDesdeIntento = (ahora - ultimoIntento) / 3600000;
+      const falloReciente = ultimoResultado.startsWith('error') && horasDesdeIntento < 6;
+      if ((!existe || dias > 7) && !falloReciente) candidatas.push({ tipo: 'construir_perfil', peso: 9 });
     } catch (x) {}
 
-    // Relectura del historial
     try {
       const ultimaRelectura = parseInt(await kv.get('relectura_ultima') || '0');
       const horasDesdeRelectura = (ahora - ultimaRelectura) / 3600000;
@@ -464,7 +733,6 @@ export async function cronAutonomo(e) {
     if (tablero.archivos_huerfanos > 30) candidatas.push({ tipo: 'limpiar_kv', peso: 5 });
     if (tablero.resumenes_viejos > 10) candidatas.push({ tipo: 'consolidar_resumenes', peso: 6 });
     if (tablero.errores_recientes > 5) candidatas.push({ tipo: 'analizar_errores', peso: 7 });
-    if (tablero.acciones_sin_resultado > 0) candidatas.push({ tipo: 'procesar_tareas', peso: 4 });
     if (tablero.mensajes_largo > 500 && tablero.hora >= 2 && tablero.hora < 6) {
       candidatas.push({ tipo: 'reflexionar', peso: 3 });
     }
@@ -476,7 +744,8 @@ export async function cronAutonomo(e) {
         ? `Workers: ${usoReal.workers_requests}/${limitesCF.workers_requests} · D1 reads: ${usoReal.d1_reads || 0} · KV writes: ${usoReal.kv_writes || 0}`
         : 'Sin datos de uso real.';
       await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
-        .bind('cron_autonomo', 'Noche tranquila', `Observé el tablero. Nada requiere acción.\n${resumenUso}`, Date.now()).run();
+        .bind('cron_autonomo', 'Rutina tranquila · ' + razon,
+          `Nada urgente. Próxima revisión en ${Math.round(intervalo/60000)} min.\n${resumenUso}`, Date.now()).run();
     } catch (x) {}
     return;
   }
@@ -484,9 +753,32 @@ export async function cronAutonomo(e) {
   candidatas.sort((a, b) => b.peso - a.peso);
   const elegida = candidatas[0];
 
-  // ============ FASE 3: EJECUTAR ============
+  // ============ FASE 4: EJECUTAR ============
   let resultado = '';
   try {
+    if (elegida.tipo === 'autoreparar') {
+      const muestras = await db.prepare(
+        "SELECT descripcion, detalle FROM acciones WHERE exito=0 AND tipo=? ORDER BY fecha DESC LIMIT 5"
+      ).bind(elegida.datos.tipoError).all();
+      const r = await autoreparar(e, elegida.datos.tipoError, muestras.results || []);
+      if (r.ok) {
+        resultado = `Auto-reparado: ${elegida.datos.tipoError}. Código aplicado (${r.codigoAplicado} chars). Snapshot: ${r.snapshot}.`;
+      } else {
+        resultado = `Auto-reparación falló: ${r.error}${r.revertido ? ' (revertido)' : ''}`;
+      }
+      await kv.put('autoreparacion_intento:' + elegida.datos.tipoError, String(ahora), { expirationTtl: 86400 });
+    }
+
+    if (elegida.tipo === 'procesar_tareas') {
+      const au = await import('./autonomia.js');
+      if (au && au.cronColaTareas) {
+        await au.cronColaTareas(e);
+        resultado = 'Cola de tareas procesada.';
+      } else {
+        resultado = 'autonomia.js no disponible.';
+      }
+    }
+
     if (elegida.tipo === 'reindexar') {
       try {
         const prueba = await ai.run(MODELO_LIGERO, { messages: [{ role: 'user', content: 'ok' }], max_tokens: 3 });
@@ -550,10 +842,6 @@ export async function cronAutonomo(e) {
       }
     }
 
-    if (elegida.tipo === 'procesar_tareas') {
-      resultado = 'Tareas pendientes detectadas. Delegado al worker.';
-    }
-
     if (elegida.tipo === 'reflexionar') {
       try {
         const frag = await db.prepare('SELECT contenido FROM historial_largo ORDER BY RANDOM() LIMIT 5').all();
@@ -575,9 +863,16 @@ export async function cronAutonomo(e) {
     }
 
     if (elegida.tipo === 'construir_perfil') {
-      const r = await fetch('https://shadow-ayano.yeinierliranzavalle.workers.dev/api/perfil_base/construir', { method: 'POST' });
-      const d = await r.json();
-      resultado = d.ok ? 'Perfil base reconstruido (' + d.longitud + ' caracteres).' : (d.error || 'Sin cambios.');
+      const r = await construirPerfilBase(e);
+      if (r.ok) {
+        resultado = 'Perfil base reconstruido (' + r.longitud + ' caracteres).';
+        await kv.put('perfil_base_ultimo_intento', String(ahora));
+        await kv.put('perfil_base_ultimo_resultado', 'ok');
+      } else {
+        resultado = 'Perfil base falló: ' + (r.error || 'sin detalle');
+        await kv.put('perfil_base_ultimo_intento', String(ahora));
+        await kv.put('perfil_base_ultimo_resultado', 'error: ' + (r.error || ''));
+      }
     }
 
     try {
@@ -599,7 +894,7 @@ export async function cronAutonomo(e) {
 }
 
 // ============================================================
-// CRON MANTENIMIENTO — deprecado. El cronAutonomo hace todo.
+// CRON MANTENIMIENTO — deprecado
 // ============================================================
 export async function cronMantenimiento(e) {
   return;
