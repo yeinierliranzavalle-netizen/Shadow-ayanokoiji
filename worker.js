@@ -1,5 +1,5 @@
 import { MODELO, MODELO_LIGERO, MODELO_VISION, MODELO_RAZONAMIENTO, CORS, J, gDB, gKV, VENTANA, migrar } from './shared.js';
-import { subir, procesar, resumir, verProceso, retomar, cronRetomar, cronAutonomo, resumirChats, importar, analizarArchivo, indexarHistorial, buscarPorTema } from './proc.js';
+import { subir, procesar, resumir, verProceso, retomar, cronRetomar, cronAutonomo, resumirChats, importar, analizarArchivo, indexarHistorial, buscarPorTema, construirPerfilBase } from './proc.js';
 import { estadoPresupuesto, consumir } from './presupuesto.js';
 import { detectarIntencion, construirSystemPrompt, identificarArea, AREAS } from './nucleo.js';
 
@@ -64,6 +64,7 @@ async function consultarUsoReal(e) {
     }
 
     const cuenta = data.data.viewer.accounts[0];
+
     let requests = 0, errores = 0, subrequests = 0;
     for (const g of (cuenta.workersInvocationsAdaptive || [])) {
       requests += g.sum?.requests || 0;
@@ -617,7 +618,7 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '9.4' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '9.5' });
 
     // ============ USO REAL ============
     if (p === '/api/uso_real' && r.method === 'GET') {
@@ -709,85 +710,51 @@ export default {
       return J(salida);
     }
 
-    // ============ PERFIL BASE ============
-    if (p === '/api/perfil_base/construir' && r.method === 'POST') {
-      const db = gDB(e, 'agente');
+    // ============ RITMO DEL CRON ============
+    if (p === '/api/ritmo' && r.method === 'GET') {
       const kv = gKV(e, 'agente');
-      const ai = e.ayanokoji_IA;
-      if (!db || !kv || !ai) return J({ error: 'Falta DB, KV o IA.' });
+      if (!kv) return J({ error: 'Sin KV.' });
+      const ultima = await kv.get('cron_autonomo_ultima');
+      const intervalo = await kv.get('cron_autonomo_intervalo') || '0';
+      const razon = await kv.get('cron_autonomo_razon') || 'sin datos';
+      const hace = ultima ? Math.round((Date.now() - parseInt(ultima)) / 60000) : null;
+      return J({
+        ultima_ejecucion_hace_min: hace,
+        intervalo_actual_min: Math.round(parseInt(intervalo) / 60000),
+        razon,
+        proxima_en_min: ultima && intervalo ? Math.max(0, Math.round((parseInt(intervalo) - (Date.now() - parseInt(ultima))) / 60000)) : null
+      });
+    }
 
-      const fuentes = [];
-
+    // ============ PULSO MANUAL ============
+    if (p === '/api/pulso' && r.method === 'POST') {
       try {
-        const c = await db.prepare('SELECT resumen FROM contexto ORDER BY fecha DESC LIMIT 5').all();
-        if (c.results) c.results.forEach(r => fuentes.push(r.resumen));
-      } catch (x) {}
-
-      try {
-        const r = await db.prepare("SELECT resumen FROM contexto WHERE fuente LIKE 'relectura%' ORDER BY fecha DESC LIMIT 10").all();
-        if (r.results) r.results.forEach(x => fuentes.push(x.resumen));
-      } catch (x) {}
-
-      try {
-        const s = await db.prepare("SELECT nombre, contenido FROM estrategias WHERE estado='activa'").all();
-        if (s.results) fuentes.push('ESTRATEGIAS:\n' + s.results.map(x => `- ${x.nombre}: ${x.contenido}`).join('\n'));
-      } catch (x) {}
-
-      try {
-        const c = await db.prepare('SELECT correccion FROM correcciones_voz ORDER BY fecha DESC LIMIT 20').all();
-        if (c.results && c.results.length) fuentes.push('CORRECCIONES DE VOZ:\n' + c.results.map(x => '- ' + x.correccion).join('\n'));
-      } catch (x) {}
-
-      const material = fuentes.join('\n\n===\n\n').substring(0, 25000);
-
-      const prompt = `Eres Ayanokōji Digital. Vas a construir el PERFIL BASE del Comandante Yeinier.
-
-Es la verdad absoluta sobre él. Se inyecta SIEMPRE en cada conversación. Debe ser exacto, denso, sin relleno.
-
-MATERIAL (contexto, relecturas, estrategias, correcciones):
-${material}
-
-GENERA el perfil base con esta estructura exacta:
-
-### QUIÉN ES
-Nombre, edad, ubicación, esencia. Máx 150 palabras.
-
-### CÓMO PIENSA
-Forma de analizar, qué le importa, qué le teme, cómo decide. Máx 200 palabras.
-
-### NUESTRA RELACIÓN
-Cómo interactuamos, qué esperas de mí, cómo debo sonar, qué no debo hacer. Máx 250 palabras.
-
-### PROYECTO SHADOW ARISE
-Qué es, estado, meta. Máx 200 palabras.
-
-### MOMENTOS MEMORABLES
-5-8 momentos clave que definieron nuestra conversación. Específicos, no genéricos. Máx 300 palabras.
-
-### REGLAS OPERATIVAS
-Qué hago sin preguntar, qué consulto, qué nunca toco. Máx 150 palabras.
-
-### LO QUE DEBO RECORDAR SIEMPRE
-3-5 cosas que no puedo olvidar bajo ninguna circunstancia. Máx 150 palabras.
-
-Sin relleno. Sin generalidades. Todo específico del Comandante.`;
-
-      try {
-        const res = await ai.run(MODELO_RAZONAMIENTO, {
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: 3500,
-          temperature: 0.4
-        });
-        const perfil = res.response || '';
-        if (perfil.length < 500) return J({ error: 'Perfil demasiado corto.', longitud: perfil.length });
-
-        await kv.put('perfil_base', perfil);
-        await kv.put('perfil_base_fecha', String(Date.now()));
-
-        return J({ ok: true, longitud: perfil.length, perfil });
+        const kv = gKV(e, 'agente');
+        if (kv) await kv.delete('cron_autonomo_ultima');
+        await cronAutonomo(e);
+        return J({ ok: true, mensaje: 'Pulso enviado. Cron ejecutado.' });
       } catch (x) {
         return J({ error: x.message });
       }
+    }
+
+    // ============ PERFIL BASE ============
+    if (p === '/api/perfil_base/construir' && r.method === 'POST') {
+      const r1 = await construirPerfilBase(e);
+      return J(r1);
+    }
+
+    if (p === '/api/perfil_base' && r.method === 'GET') {
+      const kv = gKV(e, 'agente');
+      if (!kv) return J({ error: 'Sin KV.' });
+      const perfil = await kv.get('perfil_base');
+      const fecha = parseInt(await kv.get('perfil_base_fecha') || '0');
+      return J({
+        existe: !!perfil,
+        longitud: perfil ? perfil.length : 0,
+        fecha: fecha || null,
+        perfil: perfil || null
+      });
     }
 
     // ============ CORRECCIONES ============
@@ -905,7 +872,8 @@ Sin relleno. Sin generalidades. Todo específico del Comandante.`;
         pestanas: ['chat','sandbox','estrategias','shadow','stats','actividad','decisiones','ideas','bandeja'],
         botones: ['subir','imagen','indexar','migrar','diagnostico','procesos','contexto','corregir','limpiar'],
         acciones_chat: ['enviar_mensaje','cargar_historial','corregir_voz','generar_imagen'],
-        acciones_auto: ['indexar','migrar','analizar','encolar','publicar','simular_estrategia','ejecutar_etapa','test_500']
+        acciones_auto: ['indexar','migrar','analizar','encolar','publicar','simular_estrategia','ejecutar_etapa','test_500'],
+        acciones_cron: ['pulso','ritmo']
       });
     }
 
