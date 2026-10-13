@@ -1140,9 +1140,6 @@ async function erroresTardios(r, e) {
   } catch (x) { return J({ error: x.message }); }
 }
 
-// ============================================================
-// NUEVOS ENDPOINTS DE CÓDIGO Y HERRAMIENTAS
-// ============================================================
 async function codigoLeer(r, e) {
   try {
     const b = await r.json();
@@ -1224,6 +1221,28 @@ async function cancelarAprobacion(r, e) {
 }
 
 // ============================================================
+// DIAGNÓSTICO TEMPORAL — QUITAR DESPUÉS
+// ============================================================
+async function diagnosticoVariables(r, e) {
+  return J({
+    timestamp: new Date().toISOString(),
+    token_presente: !!e.GITHUB_TOKEN,
+    token_longitud: e.GITHUB_TOKEN ? e.GITHUB_TOKEN.length : 0,
+    token_prefijo: e.GITHUB_TOKEN ? e.GITHUB_TOKEN.substring(0, 11) : null,
+    repo_backend_presente: !!e.GITHUB_REPO_BACKEND,
+    repo_backend_valor: e.GITHUB_REPO_BACKEND || null,
+    repo_backend_tipo: typeof e.GITHUB_REPO_BACKEND,
+    repo_frontend_presente: !!e.GITHUB_REPO_FRONTEND,
+    repo_frontend_valor: e.GITHUB_REPO_FRONTEND || null,
+    branch_presente: !!e.GITHUB_BRANCH,
+    branch_valor: e.GITHUB_BRANCH || null,
+    todas_las_vars_github: Object.keys(e).filter(k => k.startsWith('GITHUB_')),
+    vars_con_guion: Object.keys(e).filter(k => k.startsWith('GITHUB-')),
+    prueba_github_api: null
+  });
+}
+
+// ============================================================
 // EXPORT PRINCIPAL
 // ============================================================
 export default {
@@ -1234,6 +1253,9 @@ export default {
     if (p.startsWith('/api/') || p === '/feed' || p === '/rss.xml') {
       try { await migrar(e); } catch (x) {}
     }
+
+    // === DIAGNÓSTICO (sin tocar D1, funciona aunque esté agotado) ===
+    if (p === '/api/_diag' && r.method === 'GET') return diagnosticoVariables(r, e);
 
     if (p.startsWith('/api/imagen/') && r.method === 'GET') return servirImagen(r, e);
 
@@ -1257,7 +1279,7 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '10.0' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '10.1' });
 
     if (p === '/api/uso_real' && r.method === 'GET') {
       const uso = await consultarUsoReal(e);
@@ -1626,7 +1648,6 @@ export default {
       return J({ total: r1.results.length, acciones: r1.results });
     }
 
-    // === ENDPOINTS NUEVOS DE CÓDIGO Y HERRAMIENTAS ===
     if (p === '/api/codigo/leer' && r.method === 'POST') return codigoLeer(r, e);
     if (p === '/api/codigo/listar' && r.method === 'POST') return codigoListar(r, e);
     if (p === '/api/codigo/escribir' && r.method === 'POST') return codigoEscribir(r, e);
