@@ -21,6 +21,39 @@ const MAX_CHARS_CONTEXTO = 3000;
 const MAX_ITERACIONES_TOOL = 3;
 const APROBACION_TTL = 600;
 
+// ============================================================
+// CACHÉ EN KV — Reduce consumo de D1 drásticamente
+// ============================================================
+async function conCache(e, clave, ttlSeg, fn) {
+  const kv = gKV(e, 'agente');
+  if (kv) {
+    try {
+      const cached = await kv.get('cache:' + clave);
+      if (cached) {
+        try { return JSON.parse(cached); } catch (x) {}
+      }
+    } catch (x) {}
+  }
+  try {
+    const dato = await fn();
+    if (kv && dato !== undefined && dato !== null) {
+      try { await kv.put('cache:' + clave, JSON.stringify(dato), { expirationTtl: ttlSeg }); } catch (x) {}
+    }
+    return dato;
+  } catch (x) {
+    return null;
+  }
+}
+
+async function invalidarCache(e, prefijo) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return;
+  try {
+    const lista = await kv.list({ prefix: 'cache:' + prefijo, limit: 1000 });
+    for (const k of lista.keys) await kv.delete(k.name);
+  } catch (x) {}
+}
+
 async function consultarUsoReal(e) {
   const accountId = e.CF_ACCOUNT_ID;
   const token = e.CF_API_TOKEN;
@@ -340,6 +373,7 @@ async function ejecutarHerramienta(e, inv, uid, c) {
         const fases = Array.isArray(p.fases) ? JSON.stringify(p.fases) : JSON.stringify([]);
         const r = await db.prepare('INSERT INTO contexto(fecha,resumen,fases,fuente) VALUES(?,?,?,?)')
           .bind(Date.now(), resumen, fases, p.fuente || 'ayanokoji_auto').run();
+        await invalidarCache(e, 'contexto:');
         return { ok: true, resultado: { id: r.meta.last_row_id } };
       }
       case 'indexar_historial': {
@@ -362,6 +396,7 @@ async function ejecutarHerramienta(e, inv, uid, c) {
         if (!p.nombre || !p.contenido) return { ok: false, error: 'Faltan nombre o contenido.' };
         const r = await db.prepare('INSERT INTO estrategias(nombre,tipo,contenido,prioridad,creada,actualizada) VALUES(?,?,?,?,?,?)')
           .bind(p.nombre, p.tipo || 'general', p.contenido, parseInt(p.prioridad) || 5, Date.now(), Date.now()).run();
+        await invalidarCache(e, 'estrategias:');
         return { ok: true, resultado: { id: r.meta.last_row_id } };
       }
       case 'listar_estrategias': {
@@ -374,6 +409,7 @@ async function ejecutarHerramienta(e, inv, uid, c) {
         const db = gDB(e, 'agente');
         if (!db) return { ok: false, error: 'D1 no disponible.' };
         await db.prepare('DELETE FROM estrategias WHERE id=?').bind(p.id).run();
+        await invalidarCache(e, 'estrategias:');
         return { ok: true, resultado: { eliminada: p.id } };
       }
       case 'registrar_decision': {
@@ -638,7 +674,7 @@ async function generarImagen(e, prompt, uid) {
 }
 
 // ============================================================
-// CHAT CON TOOL CALLING
+// CHAT CON TOOL CALLING Y CACHÉ
 // ============================================================
 async function chat(r, e, c) {
   try {
@@ -750,6 +786,7 @@ async function chat(r, e, c) {
       return J({ respuesta: 'Dime el área o el nombre del worker.', user_id: uid });
     }
 
+    // === LECTURAS CON CACHÉ (reduce D1 drásticamente) ===
     let perfilBase = '';
     if (e.KV) {
       try {
@@ -758,19 +795,20 @@ async function chat(r, e, c) {
       } catch (x) {}
     }
 
+    // Ventana desde caché o D1
     let ventana = [];
-    if (e.DB) {
+    const ventanaRaw = await conCache(e, `historial:${uid}:${VENTANA_SEGURA}`, 60, async () => {
       try {
         const r1 = await e.DB.prepare('SELECT rol, contenido FROM historial_largo WHERE user_id=? ORDER BY orden DESC LIMIT ?').bind(uid, VENTANA_SEGURA).all();
-        if (r1.results) {
-          ventana = r1.results.reverse().map(x => ({
-            role: x.rol === 'assistant' ? 'assistant' : 'user',
-            content: (x.contenido || '').substring(0, MAX_CHARS_MENSAJE)
-          }));
-        }
-      } catch (x) {}
-    }
-    if (!ventana.length && e.DB) {
+        return (r1.results || []).reverse();
+      } catch (x) { return null; }
+    });
+    if (ventanaRaw && ventanaRaw.length) {
+      ventana = ventanaRaw.map(x => ({
+        role: x.rol === 'assistant' ? 'assistant' : 'user',
+        content: (x.contenido || '').substring(0, MAX_CHARS_MENSAJE)
+      }));
+    } else if (e.DB) {
       try {
         const r1 = await e.DB.prepare("SELECT mensaje,respuesta FROM historial WHERE user_id=? ORDER BY fecha DESC LIMIT 15").bind(uid).all();
         if (r1.results) {
@@ -782,36 +820,42 @@ async function chat(r, e, c) {
       } catch (x) {}
     }
 
-    let ctx = '', fs = null, rec = [];
-    if (e.DB) {
+    // Contexto, resúmenes, correcciones, estrategias: caché con TTL más largo
+    let ctx = '', fs = null;
+    const ctxRaw = await conCache(e, 'contexto:ultimo', 300, async () => {
       try {
         const r2 = await e.DB.prepare("SELECT resumen,fases FROM contexto ORDER BY fecha DESC LIMIT 1").first();
-        if (r2) {
-          ctx = (r2.resumen || '').substring(0, MAX_CHARS_CONTEXTO);
-          if (r2.fases) { try { fs = JSON.parse(r2.fases); } catch (x) {} }
-        }
-      } catch (x) {}
+        return r2 || null;
+      } catch (x) { return null; }
+    });
+    if (ctxRaw) {
+      ctx = (ctxRaw.resumen || '').substring(0, MAX_CHARS_CONTEXTO);
+      if (ctxRaw.fases) { try { fs = JSON.parse(ctxRaw.fases); } catch (x) {} }
+    }
+
+    let rec = await conCache(e, `resumenes:${uid}`, 300, async () => {
       try {
         const r3 = await e.DB.prepare("SELECT resumen FROM resumenes_chat WHERE user_id=? ORDER BY fecha DESC LIMIT 3").bind(uid).all();
-        if (r3.results) rec = r3.results.map(x => (x.resumen || '').substring(0, 800));
-      } catch (x) {}
-    }
+        return (r3.results || []).map(x => (x.resumen || '').substring(0, 800));
+      } catch (x) { return null; }
+    });
+    if (!rec) rec = [];
 
-    let correcciones = [];
-    if (e.DB) {
+    let correcciones = await conCache(e, 'correcciones', 600, async () => {
       try {
         const rc = await e.DB.prepare('SELECT correccion FROM correcciones_voz ORDER BY fecha DESC LIMIT 15').all();
-        if (rc.results) correcciones = rc.results.map(x => x.correccion);
-      } catch (x) {}
-    }
+        return (rc.results || []).map(x => x.correccion);
+      } catch (x) { return null; }
+    });
+    if (!correcciones) correcciones = [];
 
-    let estrategias = [];
-    if (e.DB) {
+    let estrategias = await conCache(e, 'estrategias:activas', 600, async () => {
       try {
         const re = await e.DB.prepare("SELECT nombre, tipo, contenido FROM estrategias WHERE estado='activa' ORDER BY prioridad ASC LIMIT 5").all();
-        if (re.results) estrategias = re.results;
-      } catch (x) {}
-    }
+        return re.results || [];
+      } catch (x) { return null; }
+    });
+    if (!estrategias) estrategias = [];
 
     let conciencia = [];
     if (e.KV) {
@@ -896,6 +940,9 @@ async function chat(r, e, c) {
       } catch (x) {}
     }
 
+    // Invalidar caché de historial tras escribir (para que la próxima lectura sea fresca)
+    try { await invalidarCache(e, `historial:${uid}`); } catch (x) {}
+
     if (e.DB && e.KV && c) {
       try {
         const lastSum = parseInt(await e.KV.get('last_summary:' + uid) || '0');
@@ -909,7 +956,8 @@ async function chat(r, e, c) {
       user_id: uid,
       intencion: i,
       herramientas_usadas: invocacionesEjecutadas,
-      aprobacion_pendiente: aprobacionPendiente ? aprobacionPendiente.tool : null
+      aprobacion_pendiente: aprobacionPendiente ? aprobacionPendiente.tool : null,
+      cache_usado: true
     });
   } catch (x) {
     return J({ respuesta: 'Error: ' + x.message });
@@ -955,7 +1003,7 @@ async function rEst(e, uid) {
       try { const r9 = await e.DB.prepare('SELECT COUNT(*) as n FROM notificaciones WHERE leida=0').first(); notif = r9 ? r9.n : 0; } catch (x) {}
     }
   } catch (x) {}
-  return J({ respuesta: `Sistema activo. Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas: ${tareas}. Workers: ${workers}. Notif sin leer: ${notif}.` });
+  return J({ respuesta: `Sistema activo (con caché). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas: ${tareas}. Workers: ${workers}. Notif sin leer: ${notif}.` });
 }
 
 async function rLeer(e, uid) {
@@ -1091,6 +1139,7 @@ async function reset(r, e) {
     if (!db) return J({ error: 'D1 no configurado.' });
     await db.prepare('DELETE FROM historial WHERE user_id=?').bind(uid).run();
     await db.prepare('DELETE FROM historial_largo WHERE user_id=?').bind(uid).run();
+    await invalidarCache(e, `historial:${uid}`);
     return J({ success: true, message: `Memoria de ${uid} reseteada.` });
   } catch (x) { return J({ error: x.message }); }
 }
@@ -1220,25 +1269,19 @@ async function cancelarAprobacion(r, e) {
   } catch (x) { return J({ error: x.message }); }
 }
 
-// ============================================================
-// DIAGNÓSTICO TEMPORAL — QUITAR DESPUÉS
-// ============================================================
 async function diagnosticoVariables(r, e) {
   return J({
     timestamp: new Date().toISOString(),
     token_presente: !!e.GITHUB_TOKEN,
     token_longitud: e.GITHUB_TOKEN ? e.GITHUB_TOKEN.length : 0,
-    token_prefijo: e.GITHUB_TOKEN ? e.GITHUB_TOKEN.substring(0, 11) : null,
     repo_backend_presente: !!e.GITHUB_REPO_BACKEND,
     repo_backend_valor: e.GITHUB_REPO_BACKEND || null,
-    repo_backend_tipo: typeof e.GITHUB_REPO_BACKEND,
     repo_frontend_presente: !!e.GITHUB_REPO_FRONTEND,
     repo_frontend_valor: e.GITHUB_REPO_FRONTEND || null,
     branch_presente: !!e.GITHUB_BRANCH,
     branch_valor: e.GITHUB_BRANCH || null,
     todas_las_vars_github: Object.keys(e).filter(k => k.startsWith('GITHUB_')),
-    vars_con_guion: Object.keys(e).filter(k => k.startsWith('GITHUB-')),
-    prueba_github_api: null
+    cache_activo: true
   });
 }
 
@@ -1254,7 +1297,6 @@ export default {
       try { await migrar(e); } catch (x) {}
     }
 
-    // === DIAGNÓSTICO (sin tocar D1, funciona aunque esté agotado) ===
     if (p === '/api/_diag' && r.method === 'GET') return diagnosticoVariables(r, e);
 
     if (p.startsWith('/api/imagen/') && r.method === 'GET') return servirImagen(r, e);
@@ -1279,7 +1321,7 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '10.1' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '11.0' });
 
     if (p === '/api/uso_real' && r.method === 'GET') {
       const uso = await consultarUsoReal(e);
@@ -1315,7 +1357,8 @@ export default {
         ok: true, consulta_real: uso.ok, error_consulta: uso.error || null,
         fecha_consulta: new Date().toISOString(),
         limites_cloudflare: lim, procesos_activos: procesosActivos,
-        mensajes_historial: totalMensajes, temas_indexados: totalTemas, modo_indice: modoIndice
+        mensajes_historial: totalMensajes, temas_indexados: totalTemas, modo_indice: modoIndice,
+        cache_activo: true
       });
     }
 
@@ -1402,6 +1445,7 @@ export default {
       const { correccion } = await r.json();
       const db = gDB(e, 'agente');
       await db.prepare('INSERT INTO correcciones_voz(contexto, correccion, fecha) VALUES(?,?,?)').bind('general', correccion, Date.now()).run();
+      await invalidarCache(e, 'correcciones');
       return J({ ok: true, mensaje: 'Corrección guardada como capa. Núcleo intacto.' });
     }
 
@@ -1428,6 +1472,7 @@ export default {
       const db = gDB(e, 'agente');
       const r1 = await db.prepare('INSERT INTO estrategias(nombre,tipo,contenido,prioridad,creada,actualizada) VALUES(?,?,?,?,?,?)')
         .bind(b.nombre, b.tipo, b.contenido, b.prioridad || 5, Date.now(), Date.now()).run();
+      await invalidarCache(e, 'estrategias:');
       return J({ ok: true, id: r1.meta.last_row_id });
     }
 
@@ -1437,6 +1482,7 @@ export default {
       if (!db) return J({ error: 'D1 no configurado.' });
       try {
         await db.prepare('DELETE FROM estrategias WHERE id=?').bind(id).run();
+        await invalidarCache(e, 'estrategias:');
         return J({ ok: true, eliminada: id });
       } catch (x) {
         return J({ error: x.message });
