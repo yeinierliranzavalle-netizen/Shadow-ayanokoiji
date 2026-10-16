@@ -1,5 +1,10 @@
+// shared.js — Helpers, esquema y constantes compartidas
+// ACTUALIZADO: MODELO_LIGERO ahora usa GLM-4.7-Flash (Llama 3.1 8B fue deprecado 2026-05-30)
+
 export const MODELO = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
-export const MODELO_LIGERO = '@cf/meta/llama-3.1-8b-instruct';
+export const MODELO_LIGERO = '@cf/zai-org/glm-4.7-flash';
+// Alternativa paga (Workers Paid, $5/mes): '@cf/deepseek-ai/deepseek-v4-flash-0731'
+// Alternativa gratuita de respaldo: '@cf/meta/llama-3.1-8b-instruct-fast'
 export const MODELO_VISION = '@cf/meta/llama-3.2-11b-vision-instruct';
 export const MODELO_RAZONAMIENTO = '@cf/deepseek-ai/deepseek-r1-distill-qwen-32b';
 export const CS = 500 * 1024;
@@ -275,7 +280,7 @@ export async function verificar(e, tipo, nombre) {
 }
 
 // ============================================================
-// MONITOR REAL DE CLOUDFLARE — compartido entre worker y proc
+// MONITOR REAL DE CLOUDFLARE
 // ============================================================
 export async function consultarUsoReal(e) {
   const accountId = e.CF_ACCOUNT_ID;
@@ -392,7 +397,5 @@ async function consultarSoloWorkers(accountId, token, inicioDiaISO) {
       d1_reads: null, d1_writes: null, kv_reads: null, kv_writes: null,
       consultado_en: Date.now(), modo: 'solo_workers'
     };
-  } catch (x) {
-    return { ok: false, error: x.message };
-  }
+  } catch (x) { return { ok: false, error: x.message }; }
 }
