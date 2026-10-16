@@ -4,6 +4,26 @@ import { estadoPresupuesto, consumir } from './presupuesto.js';
 import { detectarIntencion, construirSystemPrompt, identificarArea, AREAS } from './nucleo.js';
 import { TOOLS, parsearInvocaciones, herramientaExiste, herramientaRequiereAprobacion } from './tools.js';
 
+// Extrae la respuesta del modelo sin importar el formato que devuelva Cloudflare
+function extraerRespuesta(res) {
+  if (!res) return '';
+  if (typeof res === 'string') return res;
+  if (typeof res.response === 'string' && res.response.length > 0) return res.response;
+  if (res.choices && res.choices[0]) {
+    const c = res.choices[0];
+    if (typeof c.message?.content === 'string' && c.message.content.length > 0) return c.message.content;
+    if (typeof c.text === 'string' && c.text.length > 0) return c.text;
+  }
+  if (typeof res.result?.response === 'string') return res.result.response;
+  if (typeof res.result?.choices?.[0]?.message?.content === 'string') return res.result.choices[0].message.content;
+  if (typeof res.output === 'string') return res.output;
+  try {
+    const s = JSON.stringify(res);
+    if (s && s.length > 2 && s !== '{}') return s.substring(0, 800);
+  } catch (x) {}
+  return '';
+}
+
 async function opcional(nombre) {
   try {
     if (nombre === 'social' || nombre === './social.js') return await import('./social.js');
@@ -20,7 +40,7 @@ const MAX_CHARS_PERFIL_BASE = 3000;
 const MAX_CHARS_CONTEXTO = 3000;
 const MAX_ITERACIONES_TOOL = 3;
 const APROBACION_TTL = 600;
-const INACTIVIDAD_MS = 4 * 3600 * 1000; // 4 horas
+const INACTIVIDAD_MS = 4 * 3600 * 1000;
 
 // ============================================================
 // CACHÉ EN KV
@@ -56,15 +76,13 @@ async function invalidarCache(e, prefijo) {
 }
 
 // ============================================================
-// SELECTOR DE MODELO — Elige el más pequeño que sirva
+// SELECTOR DE MODELO
 // ============================================================
 function elegirModelo(mensaje, intencion, iteracion) {
   const t = (mensaje || '').toLowerCase();
 
-  // Si es la 2ª o 3ª iteración del tool calling, usar el pesado (necesita razonar sobre resultados)
   if (iteracion > 1) return MODELO;
 
-  // Tareas que requieren razonamiento profundo
   const pesado = [
     /\b(analiza|analizar|estrategia|estrategias|plan|planifica|diseña|arquitectura|refactoriza|mejora el código|modifica el código)\b/,
     /\b(por qué|razona|razonamiento|justifica|profundiza|explica en detalle)\b/,
@@ -73,16 +91,14 @@ function elegirModelo(mensaje, intencion, iteracion) {
   ];
   for (const r of pesado) if (r.test(t)) return MODELO;
 
-  // Intenciones que ya sabemos que son pesadas
   if (intencion === 'mejorar_area' || intencion === 'desarrollar' || intencion === 'analizar') return MODELO;
   if (intencion === 'crear' && t.includes('worker')) return MODELO;
 
-  // Todo lo demás → ligero
   return MODELO_LIGERO;
 }
 
 // ============================================================
-// CACHÉ DE RELACIÓN — Extrae patrones de vuestra relación
+// CACHÉ DE RELACIÓN
 // ============================================================
 async function construirCacheRelacion(e, uid) {
   const db = gDB(e, 'agente');
@@ -125,7 +141,7 @@ Responde solo con las 5 secciones. Máximo 1200 palabras.`
       temperature: 0.4
     });
 
-    const cache = res.response || '';
+    const cache = extraerRespuesta(res);
     if (cache.length < 300) return null;
 
     await kv.put('relacion:cache', cache, { expirationTtl: 30 * 86400 });
@@ -157,11 +173,9 @@ async function autoResumenPorInactividad(e) {
     const horasInactivo = (Date.now() - ultimaActividad) / 3600000;
     if (horasInactivo < 4) return;
 
-    // Evitar correr más de una vez por ciclo de inactividad
     const ultimoResumen = parseInt(await kv.get('ultimo_resumen_inactividad') || '0');
     if (ultimoResumen > ultimaActividad) return;
 
-    // Obtener los mensajes desde el último resumen
     const mensajes = await db.prepare(
       "SELECT mensaje, respuesta, fecha FROM historial WHERE user_id='comandante' AND fecha > ? ORDER BY fecha ASC"
     ).bind(ultimoResumen).all();
@@ -178,17 +192,15 @@ async function autoResumenPorInactividad(e) {
       temperature: 0.3
     });
 
-    const resumen = res.response || '';
+    const resumen = extraerRespuesta(res);
     if (resumen.length < 50) return;
 
-    // Guardar en resumenes_chat con marca de auto-inactividad
     await db.prepare('INSERT INTO resumenes_chat(user_id,fecha,resumen,desde,hasta) VALUES(?,?,?,?,?)')
       .bind('comandante', Date.now(), '[AUTO-INACTIVIDAD] ' + resumen, ultimoResumen, ultimaActividad).run();
 
     await kv.put('ultimo_resumen_inactividad', String(Date.now()), { expirationTtl: 30 * 86400 });
     await invalidarCache(e, 'resumenes:');
 
-    // Notificar en bandeja
     try {
       await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
         .bind('auto_resumen', 'Resumen automático guardado', `Se resumió la conversación de las últimas horas. (${resumen.length} chars)`, Date.now()).run();
@@ -829,7 +841,6 @@ async function chat(r, e, c) {
     if (!m || typeof m !== 'string') return J({ respuesta: 'No enviaste mensaje.' });
     if (!e.ayanokoji_IA) return J({ respuesta: 'IA no configurada.' });
 
-    // Marcar actividad del Comandante (para auto-resumen por inactividad)
     const kvActividad = gKV(e, 'agente');
     if (kvActividad) {
       try { await kvActividad.put('ultima_actividad_comandante', String(Date.now()), { expirationTtl: 30 * 86400 }); } catch (x) {}
@@ -946,7 +957,6 @@ async function chat(r, e, c) {
       } catch (x) {}
     }
 
-    // Caché de relación
     const cacheRelacion = await leerCacheRelacion(e);
 
     let ventana = [];
@@ -1019,7 +1029,6 @@ async function chat(r, e, c) {
 
     let systemPrompt = construirSystemPrompt(ctx, fs, rec, perfilBase, correcciones, estrategias, conciencia);
 
-    // Inyectar caché de relación si existe
     if (cacheRelacion && cacheRelacion.length > 100) {
       systemPrompt += `\n\n=== CACHÉ DE RELACIÓN (patrones entre el Comandante y yo) ===\n${cacheRelacion.substring(0, 3000)}`;
     }
@@ -1039,7 +1048,7 @@ async function chat(r, e, c) {
       iteracion++;
       const modeloElegido = elegirModelo(m, i, iteracion);
       const res = await e.ayanokoji_IA.run(modeloElegido, { messages: mensajes, max_tokens: 1200, temperature: 0.7 });
-      const rp = res.response || '';
+      const rp = extraerRespuesta(res);
       const invocaciones = parsearInvocaciones(rp);
 
       if (!invocaciones.length) {
@@ -1282,7 +1291,7 @@ async function vision(r, e) {
       messages: [{ role: 'user', content: [{ type: 'text', text: prompt || 'Describe esta imagen.' }, { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${imagen}` } }] }],
       max_tokens: 800
     });
-    const rp = res.response || '';
+    const rp = extraerRespuesta(res);
     if (e.DB && rp) await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)").bind(uid, '[IMAGEN]', rp, Date.now()).run();
     return J({ respuesta: rp });
   } catch (x) { return J({ error: 'Error de visión: ' + x.message }); }
@@ -1446,6 +1455,7 @@ async function diagnosticoVariables(r, e) {
     todas_las_vars_github: Object.keys(e).filter(k => k.startsWith('GITHUB_')),
     cache_activo: true,
     modelo_adaptativo: true,
+    modelo_ligero_actual: MODELO_LIGERO,
     cache_relacion_existe: !!cacheRelacion,
     cache_relacion_longitud: cacheRelacion ? cacheRelacion.length : 0,
     cache_relacion_fecha: cacheRelacionFecha || null
@@ -1488,9 +1498,8 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '12.0' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '13.0' });
 
-    // Endpoint para forzar la construcción de la caché de relación
     if (p === '/api/relacion/construir' && r.method === 'POST') {
       const uid = 'comandante';
       const r1 = await construirCacheRelacion(e, uid);
@@ -1737,7 +1746,7 @@ export default {
         acciones_chat: ['enviar_mensaje','cargar_historial','corregir_voz','generar_imagen'],
         acciones_auto: ['indexar','migrar','analizar','encolar','publicar','simular_estrategia','ejecutar_etapa','test_500'],
         acciones_cron: ['pulso','ritmo'],
-        nuevas: ['relacion_cache','modelo_adaptativo','auto_resumen']
+        nuevas: ['relacion_cache','modelo_adaptativo','auto_resumen','extraerRespuesta']
       });
     }
 
@@ -1921,7 +1930,6 @@ export default {
       await cronRetomar(e);
       await cronAutonomo(e);
       try { await autoResumenPorInactividad(e); } catch (x) {}
-      // Reconstruir caché de relación una vez al día
       try {
         const kv = gKV(e, 'agente');
         const ultimaConstruccion = parseInt(await kv.get('relacion:cache_fecha') || '0');
