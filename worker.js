@@ -4,23 +4,41 @@ import { estadoPresupuesto, consumir } from './presupuesto.js';
 import { detectarIntencion, construirSystemPrompt, identificarArea, AREAS } from './nucleo.js';
 import { TOOLS, parsearInvocaciones, herramientaExiste, herramientaRequiereAprobacion } from './tools.js';
 
-// Extrae la respuesta del modelo sin importar el formato que devuelva Cloudflare
+// ============================================================
+// EXTRACCIÓN ROBUSTA DE RESPUESTA — soporta todos los formatos
+// ============================================================
 function extraerRespuesta(res) {
   if (!res) return '';
   if (typeof res === 'string') return res;
+
+  // 1. Formato clásico Llama: res.response
   if (typeof res.response === 'string' && res.response.length > 0) return res.response;
+
+  // 2. Formato OpenAI-compatible: choices[0].message.content
   if (res.choices && res.choices[0]) {
     const c = res.choices[0];
-    if (typeof c.message?.content === 'string' && c.message.content.length > 0) return c.message.content;
-    if (typeof c.text === 'string' && c.text.length > 0) return c.text;
+    const msg = c.message || {};
+    if (typeof msg.content === 'string' && msg.content.trim().length > 0) return msg.content;
+    // Modelo de razonamiento: content null pero reasoning lleno
+    if (msg.content === null && typeof msg.reasoning === 'string' && msg.reasoning.trim().length > 0) {
+      return msg.reasoning;
+    }
+    if (typeof c.text === 'string' && c.text.trim().length > 0) return c.text;
   }
-  if (typeof res.result?.response === 'string') return res.result.response;
-  if (typeof res.result?.choices?.[0]?.message?.content === 'string') return res.result.choices[0].message.content;
-  if (typeof res.output === 'string') return res.output;
-  try {
-    const s = JSON.stringify(res);
-    if (s && s.length > 2 && s !== '{}') return s.substring(0, 800);
-  } catch (x) {}
+
+  // 3. Formatos anidados
+  if (typeof res.result?.response === 'string' && res.result.response.length > 0) return res.result.response;
+  if (res.result?.choices?.[0]?.message?.content && typeof res.result.choices[0].message.content === 'string') {
+    return res.result.choices[0].message.content;
+  }
+  if (res.result?.choices?.[0]?.message?.reasoning && typeof res.result.choices[0].message.reasoning === 'string') {
+    return res.result.choices[0].message.reasoning;
+  }
+
+  // 4. Formato output directo
+  if (typeof res.output === 'string' && res.output.length > 0) return res.output;
+
+  // 5. NUNCA devolver JSON.stringify — si nada funciona, vacío
   return '';
 }
 
@@ -40,7 +58,6 @@ const MAX_CHARS_PERFIL_BASE = 3000;
 const MAX_CHARS_CONTEXTO = 3000;
 const MAX_ITERACIONES_TOOL = 3;
 const APROBACION_TTL = 600;
-const INACTIVIDAD_MS = 4 * 3600 * 1000;
 
 // ============================================================
 // CACHÉ EN KV
@@ -948,7 +965,6 @@ async function chat(r, e, c) {
       return J({ respuesta: 'Dime el área o el nombre del worker.', user_id: uid });
     }
 
-    // === CARGAR CONTEXTO (con caché) ===
     let perfilBase = '';
     if (e.KV) {
       try {
@@ -1052,7 +1068,7 @@ async function chat(r, e, c) {
       const invocaciones = parsearInvocaciones(rp);
 
       if (!invocaciones.length) {
-        respuestaFinal = rp;
+        respuestaFinal = rp || 'No obtuve respuesta del modelo. Intenta de nuevo.';
         break;
       }
 
@@ -1498,7 +1514,7 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '13.0' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '14.0' });
 
     if (p === '/api/relacion/construir' && r.method === 'POST') {
       const uid = 'comandante';
@@ -1746,7 +1762,7 @@ export default {
         acciones_chat: ['enviar_mensaje','cargar_historial','corregir_voz','generar_imagen'],
         acciones_auto: ['indexar','migrar','analizar','encolar','publicar','simular_estrategia','ejecutar_etapa','test_500'],
         acciones_cron: ['pulso','ritmo'],
-        nuevas: ['relacion_cache','modelo_adaptativo','auto_resumen','extraerRespuesta']
+        nuevas: ['relacion_cache','modelo_adaptativo','auto_resumen','extraerRespuesta_robusta']
       });
     }
 
