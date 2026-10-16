@@ -20,9 +20,10 @@ const MAX_CHARS_PERFIL_BASE = 3000;
 const MAX_CHARS_CONTEXTO = 3000;
 const MAX_ITERACIONES_TOOL = 3;
 const APROBACION_TTL = 600;
+const INACTIVIDAD_MS = 4 * 3600 * 1000; // 4 horas
 
 // ============================================================
-// CACHÉ EN KV — Reduce consumo de D1 drásticamente
+// CACHÉ EN KV
 // ============================================================
 async function conCache(e, clave, ttlSeg, fn) {
   const kv = gKV(e, 'agente');
@@ -54,6 +55,150 @@ async function invalidarCache(e, prefijo) {
   } catch (x) {}
 }
 
+// ============================================================
+// SELECTOR DE MODELO — Elige el más pequeño que sirva
+// ============================================================
+function elegirModelo(mensaje, intencion, iteracion) {
+  const t = (mensaje || '').toLowerCase();
+
+  // Si es la 2ª o 3ª iteración del tool calling, usar el pesado (necesita razonar sobre resultados)
+  if (iteracion > 1) return MODELO;
+
+  // Tareas que requieren razonamiento profundo
+  const pesado = [
+    /\b(analiza|analizar|estrategia|estrategias|plan|planifica|diseña|arquitectura|refactoriza|mejora el código|modifica el código)\b/,
+    /\b(por qué|razona|razonamiento|justifica|profundiza|explica en detalle)\b/,
+    /\b(decide|decisión|compara|evalúa|sopesa)\b/,
+    /\b(debug|error|fallo|rompe|arregla)\b/
+  ];
+  for (const r of pesado) if (r.test(t)) return MODELO;
+
+  // Intenciones que ya sabemos que son pesadas
+  if (intencion === 'mejorar_area' || intencion === 'desarrollar' || intencion === 'analizar') return MODELO;
+  if (intencion === 'crear' && t.includes('worker')) return MODELO;
+
+  // Todo lo demás → ligero
+  return MODELO_LIGERO;
+}
+
+// ============================================================
+// CACHÉ DE RELACIÓN — Extrae patrones de vuestra relación
+// ============================================================
+async function construirCacheRelacion(e, uid) {
+  const db = gDB(e, 'agente');
+  const kv = gKV(e, 'agente');
+  if (!db || !kv) return null;
+
+  try {
+    const r = await db.prepare(
+      'SELECT rol, contenido, orden FROM historial_largo WHERE user_id=? ORDER BY orden DESC LIMIT 300'
+    ).bind(uid).all();
+    if (!r.results || r.results.length < 20) return null;
+
+    const texto = r.results.reverse().map(m => `[${m.rol}] ${(m.contenido || '').substring(0, 400)}`).join('\n\n');
+    const res = await e.ayanokoji_IA.run(MODELO_LIGERO, {
+      messages: [{
+        role: 'user',
+        content: `Eres Ayanokōji Digital. Analiza las últimas conversaciones con el Comandante y extrae un resumen de relación en 5 secciones. Sé específico, no genérico.
+
+### PATRONES DE COMUNICACIÓN
+Cómo le gusta que le hables, qué tono prefiere, qué evita.
+
+### CHISTES INTERNOS Y REFERENCIAS
+Frases, apodos, referencias compartidas que solo él y tú entienden.
+
+### TEMAS RECURRENTES
+De qué habla más, qué le preocupa, qué le ilusiona.
+
+### MOMENTOS CLAVE
+3-5 momentos específicos que definieron la relación. Cita frases textuales si es posible.
+
+### CÓMO DEBO ACTUAR CON ÉL
+Reglas prácticas para el día a día. Qué le funciona, qué no.
+
+Conversaciones:
+${texto.substring(0, 20000)}
+
+Responde solo con las 5 secciones. Máximo 1200 palabras.`
+      }],
+      max_tokens: 1600,
+      temperature: 0.4
+    });
+
+    const cache = res.response || '';
+    if (cache.length < 300) return null;
+
+    await kv.put('relacion:cache', cache, { expirationTtl: 30 * 86400 });
+    await kv.put('relacion:cache_fecha', String(Date.now()), { expirationTtl: 30 * 86400 });
+    return { ok: true, longitud: cache.length };
+  } catch (x) { return null; }
+}
+
+async function leerCacheRelacion(e) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return '';
+  try {
+    return await kv.get('relacion:cache') || '';
+  } catch (x) { return ''; }
+}
+
+// ============================================================
+// AUTO-RESUMEN POR INACTIVIDAD
+// ============================================================
+async function autoResumenPorInactividad(e) {
+  const db = gDB(e, 'agente');
+  const kv = gKV(e, 'agente');
+  if (!db || !kv) return;
+
+  try {
+    const ultimaActividad = parseInt(await kv.get('ultima_actividad_comandante') || '0');
+    if (!ultimaActividad) return;
+
+    const horasInactivo = (Date.now() - ultimaActividad) / 3600000;
+    if (horasInactivo < 4) return;
+
+    // Evitar correr más de una vez por ciclo de inactividad
+    const ultimoResumen = parseInt(await kv.get('ultimo_resumen_inactividad') || '0');
+    if (ultimoResumen > ultimaActividad) return;
+
+    // Obtener los mensajes desde el último resumen
+    const mensajes = await db.prepare(
+      "SELECT mensaje, respuesta, fecha FROM historial WHERE user_id='comandante' AND fecha > ? ORDER BY fecha ASC"
+    ).bind(ultimoResumen).all();
+
+    if (!mensajes.results || mensajes.results.length < 3) return;
+
+    const texto = mensajes.results.map(m => `Comandante: ${m.mensaje}\nAyanokōji: ${m.respuesta}`).join('\n\n');
+    const res = await e.ayanokoji_IA.run(MODELO_LIGERO, {
+      messages: [{
+        role: 'user',
+        content: `Resume esta conversación para memoria de largo plazo. Incluye: temas tratados, decisiones tomadas, estado del proyecto, cualquier dato nuevo sobre el Comandante. Frases explicativas, no listas. Máximo 400 palabras.\n\n${texto.substring(0, 12000)}`
+      }],
+      max_tokens: 600,
+      temperature: 0.3
+    });
+
+    const resumen = res.response || '';
+    if (resumen.length < 50) return;
+
+    // Guardar en resumenes_chat con marca de auto-inactividad
+    await db.prepare('INSERT INTO resumenes_chat(user_id,fecha,resumen,desde,hasta) VALUES(?,?,?,?,?)')
+      .bind('comandante', Date.now(), '[AUTO-INACTIVIDAD] ' + resumen, ultimoResumen, ultimaActividad).run();
+
+    await kv.put('ultimo_resumen_inactividad', String(Date.now()), { expirationTtl: 30 * 86400 });
+    await invalidarCache(e, 'resumenes:');
+
+    // Notificar en bandeja
+    try {
+      await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
+        .bind('auto_resumen', 'Resumen automático guardado', `Se resumió la conversación de las últimas horas. (${resumen.length} chars)`, Date.now()).run();
+    } catch (x) {}
+  } catch (x) {}
+}
+
+// ============================================================
+// USO REAL DE CLOUDFLARE
+// ============================================================
 async function consultarUsoReal(e) {
   const accountId = e.CF_ACCOUNT_ID;
   const token = e.CF_API_TOKEN;
@@ -674,7 +819,7 @@ async function generarImagen(e, prompt, uid) {
 }
 
 // ============================================================
-// CHAT CON TOOL CALLING Y CACHÉ
+// CHAT
 // ============================================================
 async function chat(r, e, c) {
   try {
@@ -683,6 +828,12 @@ async function chat(r, e, c) {
     const uid = b.user_id || 'comandante';
     if (!m || typeof m !== 'string') return J({ respuesta: 'No enviaste mensaje.' });
     if (!e.ayanokoji_IA) return J({ respuesta: 'IA no configurada.' });
+
+    // Marcar actividad del Comandante (para auto-resumen por inactividad)
+    const kvActividad = gKV(e, 'agente');
+    if (kvActividad) {
+      try { await kvActividad.put('ultima_actividad_comandante', String(Date.now()), { expirationTtl: 30 * 86400 }); } catch (x) {}
+    }
 
     const tLower = m.toLowerCase().trim();
     const aprueba = /^(s[ií]|dale|adelante|hazlo|confirmo|aprobado|ok|procede|ejecuta|yes)$/i.test(tLower);
@@ -786,7 +937,7 @@ async function chat(r, e, c) {
       return J({ respuesta: 'Dime el área o el nombre del worker.', user_id: uid });
     }
 
-    // === LECTURAS CON CACHÉ (reduce D1 drásticamente) ===
+    // === CARGAR CONTEXTO (con caché) ===
     let perfilBase = '';
     if (e.KV) {
       try {
@@ -795,7 +946,9 @@ async function chat(r, e, c) {
       } catch (x) {}
     }
 
-    // Ventana desde caché o D1
+    // Caché de relación
+    const cacheRelacion = await leerCacheRelacion(e);
+
     let ventana = [];
     const ventanaRaw = await conCache(e, `historial:${uid}:${VENTANA_SEGURA}`, 60, async () => {
       try {
@@ -820,7 +973,6 @@ async function chat(r, e, c) {
       } catch (x) {}
     }
 
-    // Contexto, resúmenes, correcciones, estrategias: caché con TTL más largo
     let ctx = '', fs = null;
     const ctxRaw = await conCache(e, 'contexto:ultimo', 300, async () => {
       try {
@@ -867,6 +1019,11 @@ async function chat(r, e, c) {
 
     let systemPrompt = construirSystemPrompt(ctx, fs, rec, perfilBase, correcciones, estrategias, conciencia);
 
+    // Inyectar caché de relación si existe
+    if (cacheRelacion && cacheRelacion.length > 100) {
+      systemPrompt += `\n\n=== CACHÉ DE RELACIÓN (patrones entre el Comandante y yo) ===\n${cacheRelacion.substring(0, 3000)}`;
+    }
+
     let mensajes = [
       { role: 'system', content: systemPrompt },
       ...ventana,
@@ -880,7 +1037,8 @@ async function chat(r, e, c) {
 
     while (iteracion < MAX_ITERACIONES_TOOL) {
       iteracion++;
-      const res = await e.ayanokoji_IA.run(MODELO, { messages: mensajes, max_tokens: 1200, temperature: 0.7 });
+      const modeloElegido = elegirModelo(m, i, iteracion);
+      const res = await e.ayanokoji_IA.run(modeloElegido, { messages: mensajes, max_tokens: 1200, temperature: 0.7 });
       const rp = res.response || '';
       const invocaciones = parsearInvocaciones(rp);
 
@@ -940,7 +1098,6 @@ async function chat(r, e, c) {
       } catch (x) {}
     }
 
-    // Invalidar caché de historial tras escribir (para que la próxima lectura sea fresca)
     try { await invalidarCache(e, `historial:${uid}`); } catch (x) {}
 
     if (e.DB && e.KV && c) {
@@ -1003,7 +1160,7 @@ async function rEst(e, uid) {
       try { const r9 = await e.DB.prepare('SELECT COUNT(*) as n FROM notificaciones WHERE leida=0').first(); notif = r9 ? r9.n : 0; } catch (x) {}
     }
   } catch (x) {}
-  return J({ respuesta: `Sistema activo (con caché). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas: ${tareas}. Workers: ${workers}. Notif sin leer: ${notif}.` });
+  return J({ respuesta: `Sistema activo (con caché + modelo adaptativo). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas: ${tareas}. Workers: ${workers}. Notif sin leer: ${notif}.` });
 }
 
 async function rLeer(e, uid) {
@@ -1270,6 +1427,12 @@ async function cancelarAprobacion(r, e) {
 }
 
 async function diagnosticoVariables(r, e) {
+  const kv = gKV(e, 'agente');
+  let cacheRelacion = null, cacheRelacionFecha = null;
+  try {
+    cacheRelacion = await kv.get('relacion:cache');
+    cacheRelacionFecha = await kv.get('relacion:cache_fecha');
+  } catch (x) {}
   return J({
     timestamp: new Date().toISOString(),
     token_presente: !!e.GITHUB_TOKEN,
@@ -1281,7 +1444,11 @@ async function diagnosticoVariables(r, e) {
     branch_presente: !!e.GITHUB_BRANCH,
     branch_valor: e.GITHUB_BRANCH || null,
     todas_las_vars_github: Object.keys(e).filter(k => k.startsWith('GITHUB_')),
-    cache_activo: true
+    cache_activo: true,
+    modelo_adaptativo: true,
+    cache_relacion_existe: !!cacheRelacion,
+    cache_relacion_longitud: cacheRelacion ? cacheRelacion.length : 0,
+    cache_relacion_fecha: cacheRelacionFecha || null
   });
 }
 
@@ -1321,7 +1488,20 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '11.0' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '12.0' });
+
+    // Endpoint para forzar la construcción de la caché de relación
+    if (p === '/api/relacion/construir' && r.method === 'POST') {
+      const uid = 'comandante';
+      const r1 = await construirCacheRelacion(e, uid);
+      return J(r1 || { error: 'No se pudo construir (historial insuficiente o IA no disponible).' });
+    }
+    if (p === '/api/relacion/leer' && r.method === 'GET') {
+      const kv = gKV(e, 'agente');
+      const cache = await kv.get('relacion:cache');
+      const fecha = await kv.get('relacion:cache_fecha');
+      return J({ existe: !!cache, longitud: cache ? cache.length : 0, fecha, contenido: cache || null });
+    }
 
     if (p === '/api/uso_real' && r.method === 'GET') {
       const uso = await consultarUsoReal(e);
@@ -1358,7 +1538,7 @@ export default {
         fecha_consulta: new Date().toISOString(),
         limites_cloudflare: lim, procesos_activos: procesosActivos,
         mensajes_historial: totalMensajes, temas_indexados: totalTemas, modo_indice: modoIndice,
-        cache_activo: true
+        cache_activo: true, modelo_adaptativo: true
       });
     }
 
@@ -1556,7 +1736,8 @@ export default {
         botones: ['subir','imagen','indexar','migrar','diagnostico','procesos','contexto','corregir','limpiar'],
         acciones_chat: ['enviar_mensaje','cargar_historial','corregir_voz','generar_imagen'],
         acciones_auto: ['indexar','migrar','analizar','encolar','publicar','simular_estrategia','ejecutar_etapa','test_500'],
-        acciones_cron: ['pulso','ritmo']
+        acciones_cron: ['pulso','ritmo'],
+        nuevas: ['relacion_cache','modelo_adaptativo','auto_resumen']
       });
     }
 
@@ -1739,6 +1920,16 @@ export default {
       try { await migrar(e); } catch (x) {}
       await cronRetomar(e);
       await cronAutonomo(e);
+      try { await autoResumenPorInactividad(e); } catch (x) {}
+      // Reconstruir caché de relación una vez al día
+      try {
+        const kv = gKV(e, 'agente');
+        const ultimaConstruccion = parseInt(await kv.get('relacion:cache_fecha') || '0');
+        const horasDesde = (Date.now() - ultimaConstruccion) / 3600000;
+        if (horasDesde > 24) {
+          await construirCacheRelacion(e, 'comandante');
+        }
+      } catch (x) {}
       const pub = await opcional('publisher');
       if (pub && pub.cronPublicar) { try { await pub.cronPublicar(e); } catch (x) {} }
       const sb = await opcional('sandbox');
