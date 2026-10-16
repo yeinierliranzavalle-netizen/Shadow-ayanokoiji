@@ -1,10 +1,8 @@
 // shared.js — Helpers, esquema y constantes compartidas
-// ACTUALIZADO: MODELO_LIGERO ahora usa GLM-4.7-Flash (Llama 3.1 8B fue deprecado 2026-05-30)
+// MODELO_LIGERO usa Llama 3.1 8B Fast (formato clásico, fiable)
 
 export const MODELO = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
-export const MODELO_LIGERO = '@cf/zai-org/glm-4.7-flash';
-// Alternativa paga (Workers Paid, $5/mes): '@cf/deepseek-ai/deepseek-v4-flash-0731'
-// Alternativa gratuita de respaldo: '@cf/meta/llama-3.1-8b-instruct-fast'
+export const MODELO_LIGERO = '@cf/meta/llama-3.1-8b-instruct-fast';
 export const MODELO_VISION = '@cf/meta/llama-3.2-11b-vision-instruct';
 export const MODELO_RAZONAMIENTO = '@cf/deepseek-ai/deepseek-r1-distill-qwen-32b';
 export const CS = 500 * 1024;
@@ -199,7 +197,6 @@ export async function migrar(e, forzar = false) {
     }
   }
 
-  // Limpieza de duplicados
   try {
     const cnt = await db.prepare('SELECT COUNT(*) as n FROM plantillas').first();
     if (cnt && cnt.n > 10) {
@@ -216,7 +213,6 @@ export async function migrar(e, forzar = false) {
     }
   } catch (x) {}
 
-  // Plantillas iniciales
   try {
     const cnt = await db.prepare('SELECT COUNT(*) as n FROM plantillas').first();
     if (!cnt || cnt.n < 3) {
@@ -232,7 +228,6 @@ export async function migrar(e, forzar = false) {
     resultado.errores.push('plantillas init: ' + x.message);
   }
 
-  // Estrategias iniciales
   try {
     const cnt = await db.prepare('SELECT COUNT(*) as n FROM estrategias').first();
     if (!cnt || cnt.n < 3) {
