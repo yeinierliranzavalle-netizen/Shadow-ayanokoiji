@@ -5,40 +5,23 @@ import { detectarIntencion, construirSystemPrompt, identificarArea, AREAS } from
 import { TOOLS, parsearInvocaciones, herramientaExiste, herramientaRequiereAprobacion } from './tools.js';
 
 // ============================================================
-// EXTRACCIÓN ROBUSTA DE RESPUESTA — soporta todos los formatos
+// EXTRACCIÓN ROBUSTA DE RESPUESTA
 // ============================================================
 function extraerRespuesta(res) {
   if (!res) return '';
   if (typeof res === 'string') return res;
-
-  // 1. Formato clásico Llama: res.response
   if (typeof res.response === 'string' && res.response.length > 0) return res.response;
-
-  // 2. Formato OpenAI-compatible: choices[0].message.content
   if (res.choices && res.choices[0]) {
     const c = res.choices[0];
     const msg = c.message || {};
     if (typeof msg.content === 'string' && msg.content.trim().length > 0) return msg.content;
-    // Modelo de razonamiento: content null pero reasoning lleno
-    if (msg.content === null && typeof msg.reasoning === 'string' && msg.reasoning.trim().length > 0) {
-      return msg.reasoning;
-    }
+    if (msg.content === null && typeof msg.reasoning === 'string' && msg.reasoning.trim().length > 0) return msg.reasoning;
     if (typeof c.text === 'string' && c.text.trim().length > 0) return c.text;
   }
-
-  // 3. Formatos anidados
   if (typeof res.result?.response === 'string' && res.result.response.length > 0) return res.result.response;
-  if (res.result?.choices?.[0]?.message?.content && typeof res.result.choices[0].message.content === 'string') {
-    return res.result.choices[0].message.content;
-  }
-  if (res.result?.choices?.[0]?.message?.reasoning && typeof res.result.choices[0].message.reasoning === 'string') {
-    return res.result.choices[0].message.reasoning;
-  }
-
-  // 4. Formato output directo
+  if (res.result?.choices?.[0]?.message?.content && typeof res.result.choices[0].message.content === 'string') return res.result.choices[0].message.content;
+  if (res.result?.choices?.[0]?.message?.reasoning && typeof res.result.choices[0].message.reasoning === 'string') return res.result.choices[0].message.reasoning;
   if (typeof res.output === 'string' && res.output.length > 0) return res.output;
-
-  // 5. NUNCA devolver JSON.stringify — si nada funciona, vacío
   return '';
 }
 
@@ -67,9 +50,7 @@ async function conCache(e, clave, ttlSeg, fn) {
   if (kv) {
     try {
       const cached = await kv.get('cache:' + clave);
-      if (cached) {
-        try { return JSON.parse(cached); } catch (x) {}
-      }
+      if (cached) { try { return JSON.parse(cached); } catch (x) {} }
     } catch (x) {}
   }
   try {
@@ -78,9 +59,7 @@ async function conCache(e, clave, ttlSeg, fn) {
       try { await kv.put('cache:' + clave, JSON.stringify(dato), { expirationTtl: ttlSeg }); } catch (x) {}
     }
     return dato;
-  } catch (x) {
-    return null;
-  }
+  } catch (x) { return null; }
 }
 
 async function invalidarCache(e, prefijo) {
@@ -93,25 +72,12 @@ async function invalidarCache(e, prefijo) {
 }
 
 // ============================================================
-// SELECTOR DE MODELO
+// SELECTOR DE MODELO — Chat siempre con 70B
 // ============================================================
 function elegirModelo(mensaje, intencion, iteracion) {
-  const t = (mensaje || '').toLowerCase();
-
-  if (iteracion > 1) return MODELO;
-
-  const pesado = [
-    /\b(analiza|analizar|estrategia|estrategias|plan|planifica|diseña|arquitectura|refactoriza|mejora el código|modifica el código)\b/,
-    /\b(por qué|razona|razonamiento|justifica|profundiza|explica en detalle)\b/,
-    /\b(decide|decisión|compara|evalúa|sopesa)\b/,
-    /\b(debug|error|fallo|rompe|arregla)\b/
-  ];
-  for (const r of pesado) if (r.test(t)) return MODELO;
-
-  if (intencion === 'mejorar_area' || intencion === 'desarrollar' || intencion === 'analizar') return MODELO;
-  if (intencion === 'crear' && t.includes('worker')) return MODELO;
-
-  return MODELO_LIGERO;
+  // El chat con el Comandante SIEMPRE usa el modelo pesado (70B).
+  // El ligero queda reservado para tareas mecánicas internas (resumen, auto-cache).
+  return MODELO;
 }
 
 // ============================================================
@@ -121,13 +87,11 @@ async function construirCacheRelacion(e, uid) {
   const db = gDB(e, 'agente');
   const kv = gKV(e, 'agente');
   if (!db || !kv) return null;
-
   try {
     const r = await db.prepare(
       'SELECT rol, contenido, orden FROM historial_largo WHERE user_id=? ORDER BY orden DESC LIMIT 300'
     ).bind(uid).all();
     if (!r.results || r.results.length < 20) return null;
-
     const texto = r.results.reverse().map(m => `[${m.rol}] ${(m.contenido || '').substring(0, 400)}`).join('\n\n');
     const res = await e.ayanokoji_IA.run(MODELO_LIGERO, {
       messages: [{
@@ -157,10 +121,8 @@ Responde solo con las 5 secciones. Máximo 1200 palabras.`
       max_tokens: 1600,
       temperature: 0.4
     });
-
     const cache = extraerRespuesta(res);
     if (cache.length < 300) return null;
-
     await kv.put('relacion:cache', cache, { expirationTtl: 30 * 86400 });
     await kv.put('relacion:cache_fecha', String(Date.now()), { expirationTtl: 30 * 86400 });
     return { ok: true, longitud: cache.length };
@@ -170,9 +132,7 @@ Responde solo con las 5 secciones. Máximo 1200 palabras.`
 async function leerCacheRelacion(e) {
   const kv = gKV(e, 'agente');
   if (!kv) return '';
-  try {
-    return await kv.get('relacion:cache') || '';
-  } catch (x) { return ''; }
+  try { return await kv.get('relacion:cache') || ''; } catch (x) { return ''; }
 }
 
 // ============================================================
@@ -182,23 +142,17 @@ async function autoResumenPorInactividad(e) {
   const db = gDB(e, 'agente');
   const kv = gKV(e, 'agente');
   if (!db || !kv) return;
-
   try {
     const ultimaActividad = parseInt(await kv.get('ultima_actividad_comandante') || '0');
     if (!ultimaActividad) return;
-
     const horasInactivo = (Date.now() - ultimaActividad) / 3600000;
     if (horasInactivo < 4) return;
-
     const ultimoResumen = parseInt(await kv.get('ultimo_resumen_inactividad') || '0');
     if (ultimoResumen > ultimaActividad) return;
-
     const mensajes = await db.prepare(
       "SELECT mensaje, respuesta, fecha FROM historial WHERE user_id='comandante' AND fecha > ? ORDER BY fecha ASC"
     ).bind(ultimoResumen).all();
-
     if (!mensajes.results || mensajes.results.length < 3) return;
-
     const texto = mensajes.results.map(m => `Comandante: ${m.mensaje}\nAyanokōji: ${m.respuesta}`).join('\n\n');
     const res = await e.ayanokoji_IA.run(MODELO_LIGERO, {
       messages: [{
@@ -208,16 +162,12 @@ async function autoResumenPorInactividad(e) {
       max_tokens: 600,
       temperature: 0.3
     });
-
     const resumen = extraerRespuesta(res);
     if (resumen.length < 50) return;
-
     await db.prepare('INSERT INTO resumenes_chat(user_id,fecha,resumen,desde,hasta) VALUES(?,?,?,?,?)')
       .bind('comandante', Date.now(), '[AUTO-INACTIVIDAD] ' + resumen, ultimoResumen, ultimaActividad).run();
-
     await kv.put('ultimo_resumen_inactividad', String(Date.now()), { expirationTtl: 30 * 86400 });
     await invalidarCache(e, 'resumenes:');
-
     try {
       await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
         .bind('auto_resumen', 'Resumen automático guardado', `Se resumió la conversación de las últimas horas. (${resumen.length} chars)`, Date.now()).run();
@@ -395,10 +345,7 @@ async function githubEscribirArchivo(e, repo, archivo, contenido, mensaje, rama)
   try {
     const url = `https://api.github.com/repos/${repo}/contents/${archivo}?ref=${br}`;
     const r = await fetch(url, { headers: githubHeaders(e) });
-    if (r.ok) {
-      const d = await r.json();
-      sha = d.sha;
-    }
+    if (r.ok) { const d = await r.json(); sha = d.sha; }
   } catch (x) {}
   const bytes = new TextEncoder().encode(contenido);
   let bin = '';
@@ -1185,7 +1132,7 @@ async function rEst(e, uid) {
       try { const r9 = await e.DB.prepare('SELECT COUNT(*) as n FROM notificaciones WHERE leida=0').first(); notif = r9 ? r9.n : 0; } catch (x) {}
     }
   } catch (x) {}
-  return J({ respuesta: `Sistema activo (con caché + modelo adaptativo). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas: ${tareas}. Workers: ${workers}. Notif sin leer: ${notif}.` });
+  return J({ respuesta: `Sistema activo (modelo 70B + caché). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas: ${tareas}. Workers: ${workers}. Notif sin leer: ${notif}.` });
 }
 
 async function rLeer(e, uid) {
@@ -1333,10 +1280,7 @@ async function diagnostico(r, e) {
     const tablas = await db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all();
     const conteos = {};
     for (const t of (tablas.results || [])) {
-      try {
-        const c2 = await db.prepare('SELECT COUNT(*) as n FROM ' + t.name).first();
-        conteos[t.name] = c2 ? c2.n : 0;
-      } catch (x) { conteos[t.name] = 'err: ' + x.message; }
+      try { const c2 = await db.prepare('SELECT COUNT(*) as n FROM ' + t.name).first(); conteos[t.name] = c2 ? c2.n : 0; } catch (x) { conteos[t.name] = 'err: ' + x.message; }
     }
     const kvN = gKV(e, 'agente');
     let kvCount = 'sin kv';
@@ -1470,8 +1414,8 @@ async function diagnosticoVariables(r, e) {
     branch_valor: e.GITHUB_BRANCH || null,
     todas_las_vars_github: Object.keys(e).filter(k => k.startsWith('GITHUB_')),
     cache_activo: true,
-    modelo_adaptativo: true,
     modelo_ligero_actual: MODELO_LIGERO,
+    modelo_chat: MODELO,
     cache_relacion_existe: !!cacheRelacion,
     cache_relacion_longitud: cacheRelacion ? cacheRelacion.length : 0,
     cache_relacion_fecha: cacheRelacionFecha || null
@@ -1491,7 +1435,6 @@ export default {
     }
 
     if (p === '/api/_diag' && r.method === 'GET') return diagnosticoVariables(r, e);
-
     if (p.startsWith('/api/imagen/') && r.method === 'GET') return servirImagen(r, e);
 
     if (p === '/api/chat' && r.method === 'POST') return chat(r, e, c);
@@ -1514,7 +1457,7 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '14.0' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '15.0' });
 
     if (p === '/api/relacion/construir' && r.method === 'POST') {
       const uid = 'comandante';
@@ -1563,7 +1506,7 @@ export default {
         fecha_consulta: new Date().toISOString(),
         limites_cloudflare: lim, procesos_activos: procesosActivos,
         mensajes_historial: totalMensajes, temas_indexados: totalTemas, modo_indice: modoIndice,
-        cache_activo: true, modelo_adaptativo: true
+        cache_activo: true
       });
     }
 
@@ -1628,9 +1571,7 @@ export default {
         if (kvN) await kvN.delete('cron_autonomo_ultima');
         await cronAutonomo(e);
         return J({ ok: true, mensaje: 'Pulso enviado. Cron ejecutado.' });
-      } catch (x) {
-        return J({ error: x.message });
-      }
+      } catch (x) { return J({ error: x.message }); }
     }
 
     if (p === '/api/perfil_base/construir' && r.method === 'POST') {
@@ -1689,9 +1630,7 @@ export default {
         await db.prepare('DELETE FROM estrategias WHERE id=?').bind(id).run();
         await invalidarCache(e, 'estrategias:');
         return J({ ok: true, eliminada: id });
-      } catch (x) {
-        return J({ error: x.message });
-      }
+      } catch (x) { return J({ error: x.message }); }
     }
 
     if (p === '/api/decisiones' && r.method === 'GET') {
@@ -1762,7 +1701,7 @@ export default {
         acciones_chat: ['enviar_mensaje','cargar_historial','corregir_voz','generar_imagen'],
         acciones_auto: ['indexar','migrar','analizar','encolar','publicar','simular_estrategia','ejecutar_etapa','test_500'],
         acciones_cron: ['pulso','ritmo'],
-        nuevas: ['relacion_cache','modelo_adaptativo','auto_resumen','extraerRespuesta_robusta']
+        version: '15.0'
       });
     }
 
@@ -1954,6 +1893,8 @@ export default {
           await construirCacheRelacion(e, 'comandante');
         }
       } catch (x) {}
+      const au2 = await opcional('autonomia');
+      if (au2 && au2.cronAutoReparacion) { try { await au2.cronAutoReparacion(e); } catch (x) {} }
       const pub = await opcional('publisher');
       if (pub && pub.cronPublicar) { try { await pub.cronPublicar(e); } catch (x) {} }
       const sb = await opcional('sandbox');
