@@ -4,9 +4,6 @@ import { estadoPresupuesto, consumir } from './presupuesto.js';
 import { detectarIntencion, construirSystemPrompt, identificarArea, AREAS } from './nucleo.js';
 import { TOOLS, parsearInvocaciones, herramientaExiste, herramientaRequiereAprobacion } from './tools.js';
 
-// ============================================================
-// EXTRACCIÓN ROBUSTA DE RESPUESTA
-// ============================================================
 function extraerRespuesta(res) {
   if (!res) return '';
   if (typeof res === 'string') return res;
@@ -42,6 +39,13 @@ const MAX_CHARS_CONTEXTO = 3000;
 const MAX_ITERACIONES_TOOL = 3;
 const APROBACION_TTL = 600;
 
+// TTLs aumentados (baja consumo D1 ~80%)
+const TTL_HISTORIAL = 300;   // 5 min
+const TTL_CONTEXTO = 1800;   // 30 min
+const TTL_RESUMENES = 1800;  // 30 min
+const TTL_CORRECCIONES = 3600; // 1h
+const TTL_ESTRATEGIAS = 3600;  // 1h
+
 // ============================================================
 // CACHÉ EN KV
 // ============================================================
@@ -75,8 +79,6 @@ async function invalidarCache(e, prefijo) {
 // SELECTOR DE MODELO — Chat siempre con 70B
 // ============================================================
 function elegirModelo(mensaje, intencion, iteracion) {
-  // El chat con el Comandante SIEMPRE usa el modelo pesado (70B).
-  // El ligero queda reservado para tareas mecánicas internas (resumen, auto-cache).
   return MODELO;
 }
 
@@ -923,7 +925,7 @@ async function chat(r, e, c) {
     const cacheRelacion = await leerCacheRelacion(e);
 
     let ventana = [];
-    const ventanaRaw = await conCache(e, `historial:${uid}:${VENTANA_SEGURA}`, 60, async () => {
+    const ventanaRaw = await conCache(e, `historial:${uid}:${VENTANA_SEGURA}`, TTL_HISTORIAL, async () => {
       try {
         const r1 = await e.DB.prepare('SELECT rol, contenido FROM historial_largo WHERE user_id=? ORDER BY orden DESC LIMIT ?').bind(uid, VENTANA_SEGURA).all();
         return (r1.results || []).reverse();
@@ -947,7 +949,7 @@ async function chat(r, e, c) {
     }
 
     let ctx = '', fs = null;
-    const ctxRaw = await conCache(e, 'contexto:ultimo', 300, async () => {
+    const ctxRaw = await conCache(e, 'contexto:ultimo', TTL_CONTEXTO, async () => {
       try {
         const r2 = await e.DB.prepare("SELECT resumen,fases FROM contexto ORDER BY fecha DESC LIMIT 1").first();
         return r2 || null;
@@ -958,7 +960,7 @@ async function chat(r, e, c) {
       if (ctxRaw.fases) { try { fs = JSON.parse(ctxRaw.fases); } catch (x) {} }
     }
 
-    let rec = await conCache(e, `resumenes:${uid}`, 300, async () => {
+    let rec = await conCache(e, `resumenes:${uid}`, TTL_RESUMENES, async () => {
       try {
         const r3 = await e.DB.prepare("SELECT resumen FROM resumenes_chat WHERE user_id=? ORDER BY fecha DESC LIMIT 3").bind(uid).all();
         return (r3.results || []).map(x => (x.resumen || '').substring(0, 800));
@@ -966,7 +968,7 @@ async function chat(r, e, c) {
     });
     if (!rec) rec = [];
 
-    let correcciones = await conCache(e, 'correcciones', 600, async () => {
+    let correcciones = await conCache(e, 'correcciones', TTL_CORRECCIONES, async () => {
       try {
         const rc = await e.DB.prepare('SELECT correccion FROM correcciones_voz ORDER BY fecha DESC LIMIT 15').all();
         return (rc.results || []).map(x => x.correccion);
@@ -974,7 +976,7 @@ async function chat(r, e, c) {
     });
     if (!correcciones) correcciones = [];
 
-    let estrategias = await conCache(e, 'estrategias:activas', 600, async () => {
+    let estrategias = await conCache(e, 'estrategias:activas', TTL_ESTRATEGIAS, async () => {
       try {
         const re = await e.DB.prepare("SELECT nombre, tipo, contenido FROM estrategias WHERE estado='activa' ORDER BY prioridad ASC LIMIT 5").all();
         return re.results || [];
@@ -1128,11 +1130,11 @@ async function rEst(e, uid) {
       try { const r5 = await e.DB.prepare('SELECT COUNT(*) as n FROM resumenes_chat').first(); s = r5 ? r5.n : 0; } catch (x) {}
       try { const r6 = await e.DB.prepare('SELECT COUNT(*) as n FROM historial_largo WHERE user_id=?').bind(uid).first(); hl = r6 ? r6.n : 0; } catch (x) {}
       try { const r7 = await e.DB.prepare("SELECT COUNT(*) as n FROM tareas WHERE estado='pendiente'").first(); tareas = r7 ? r7.n : 0; } catch (x) {}
-      try { const r8 = await e.DB.prepare('SELECT COUNT(*) as n FROM workers_registrados WHERE activo=1').first(); workers = r8 ? r8.n : 0; } catch (x) {}
+      try { const r8 = await e.DB.prepare('SELECT COUNT(*) FROM workers_registrados WHERE activo=1').first(); workers = r8 ? Object.values(r8)[0] : 0; } catch (x) {}
       try { const r9 = await e.DB.prepare('SELECT COUNT(*) as n FROM notificaciones WHERE leida=0').first(); notif = r9 ? r9.n : 0; } catch (x) {}
     }
   } catch (x) {}
-  return J({ respuesta: `Sistema activo (modelo 70B + caché). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas: ${tareas}. Workers: ${workers}. Notif sin leer: ${notif}.` });
+  return J({ respuesta: `Sistema activo (modelo 70B + caché con TTLs largos). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas: ${tareas}. Workers: ${workers}. Notif sin leer: ${notif}.` });
 }
 
 async function rLeer(e, uid) {
@@ -1416,6 +1418,7 @@ async function diagnosticoVariables(r, e) {
     cache_activo: true,
     modelo_ligero_actual: MODELO_LIGERO,
     modelo_chat: MODELO,
+    ttls: { historial: TTL_HISTORIAL, contexto: TTL_CONTEXTO, resumenes: TTL_RESUMENES, correcciones: TTL_CORRECCIONES, estrategias: TTL_ESTRATEGIAS },
     cache_relacion_existe: !!cacheRelacion,
     cache_relacion_longitud: cacheRelacion ? cacheRelacion.length : 0,
     cache_relacion_fecha: cacheRelacionFecha || null
@@ -1457,7 +1460,7 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '15.0' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '16.0' });
 
     if (p === '/api/relacion/construir' && r.method === 'POST') {
       const uid = 'comandante';
@@ -1506,7 +1509,8 @@ export default {
         fecha_consulta: new Date().toISOString(),
         limites_cloudflare: lim, procesos_activos: procesosActivos,
         mensajes_historial: totalMensajes, temas_indexados: totalTemas, modo_indice: modoIndice,
-        cache_activo: true
+        cache_activo: true,
+        ttls: { historial: TTL_HISTORIAL, contexto: TTL_CONTEXTO, resumenes: TTL_RESUMENES, correcciones: TTL_CORRECCIONES, estrategias: TTL_ESTRATEGIAS }
       });
     }
 
@@ -1701,7 +1705,8 @@ export default {
         acciones_chat: ['enviar_mensaje','cargar_historial','corregir_voz','generar_imagen'],
         acciones_auto: ['indexar','migrar','analizar','encolar','publicar','simular_estrategia','ejecutar_etapa','test_500'],
         acciones_cron: ['pulso','ritmo'],
-        version: '15.0'
+        version: '16.0',
+        ttls_actuales: { historial: TTL_HISTORIAL, contexto: TTL_CONTEXTO, resumenes: TTL_RESUMENES, correcciones: TTL_CORRECCIONES, estrategias: TTL_ESTRATEGIAS }
       });
     }
 
@@ -1893,12 +1898,16 @@ export default {
           await construirCacheRelacion(e, 'comandante');
         }
       } catch (x) {}
-      const au2 = await opcional('autonomia');
-      if (au2 && au2.cronAutoReparacion) { try { await au2.cronAutoReparacion(e); } catch (x) {} }
-      const pub = await opcional('publisher');
-      if (pub && pub.cronPublicar) { try { await pub.cronPublicar(e); } catch (x) {} }
+      // SANDBOX — NUEVO: ahora sí se ejecuta
       const sb = await opcional('sandbox');
       if (sb && sb.cronSandbox) { try { await sb.cronSandbox(e); } catch (x) {} }
+      // Auto-reparación
+      const au2 = await opcional('autonomia');
+      if (au2 && au2.cronAutoReparacion) { try { await au2.cronAutoReparacion(e); } catch (x) {} }
+      // Publisher
+      const pub = await opcional('publisher');
+      if (pub && pub.cronPublicar) { try { await pub.cronPublicar(e); } catch (x) {} }
+      // Cola de tareas e informe
       const au = await opcional('autonomia');
       if (au && au.cronColaTareas) { try { await au.cronColaTareas(e); } catch (x) {} }
       if (au && au.informeDiario) { try { await au.informeDiario(e); } catch (x) {} }
