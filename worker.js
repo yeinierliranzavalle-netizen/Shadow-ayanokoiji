@@ -4,6 +4,9 @@ import { estadoPresupuesto, consumir } from './presupuesto.js';
 import { detectarIntencion, construirSystemPrompt, identificarArea, AREAS } from './nucleo.js';
 import { TOOLS, parsearInvocaciones, herramientaExiste, herramientaRequiereAprobacion } from './tools.js';
 
+// ============================================================
+// EXTRACCIÓN ROBUSTA DE RESPUESTA
+// ============================================================
 function extraerRespuesta(res) {
   if (!res) return '';
   if (typeof res === 'string') return res;
@@ -39,12 +42,18 @@ const MAX_CHARS_CONTEXTO = 3000;
 const MAX_ITERACIONES_TOOL = 3;
 const APROBACION_TTL = 600;
 
-// TTLs aumentados (baja consumo D1 ~80%)
-const TTL_HISTORIAL = 300;   // 5 min
-const TTL_CONTEXTO = 1800;   // 30 min
-const TTL_RESUMENES = 1800;  // 30 min
-const TTL_CORRECCIONES = 3600; // 1h
-const TTL_ESTRATEGIAS = 3600;  // 1h
+// TTLs de caché (bajan consumo D1 ~80%)
+const TTL_HISTORIAL = 300;
+const TTL_CONTEXTO = 1800;
+const TTL_RESUMENES = 1800;
+const TTL_CORRECCIONES = 3600;
+const TTL_ESTRATEGIAS = 3600;
+
+// ============================================================
+// ARCHIVOS CONOCIDOS DEL PROYECTO (para detectar cuál leer)
+// ============================================================
+const ARCHIVOS_BACKEND = ['worker.js', 'nucleo.js', 'shared.js', 'proc.js', 'autonomia.js', 'tools.js', 'doctrina.js', 'identidad.js', 'presupuesto.js', 'notify.js', 'publisher.js', 'social.js', 'sandbox.js'];
+const ARCHIVOS_FRONTEND = ['index.html', 'styles.css', 'app.js'];
 
 // ============================================================
 // CACHÉ EN KV
@@ -342,7 +351,7 @@ async function githubListarArchivos(e, repo, rama) {
 
 async function githubEscribirArchivo(e, repo, archivo, contenido, mensaje, rama) {
   const br = rama || e.GITHUB_BRANCH || 'main';
-  if (!e.GITHUB_TOKEN) return { error: 'GITHUB_TOKEN no configurado. No puedo escribir.' };
+  if (!e.GITHUB_TOKEN) return { error: 'GITHUB_TOKEN no configurado.' };
   let sha = null;
   try {
     const url = `https://api.github.com/repos/${repo}/contents/${archivo}?ref=${br}`;
@@ -357,11 +366,7 @@ async function githubEscribirArchivo(e, repo, archivo, contenido, mensaje, rama)
   }
   const b64 = btoa(bin);
   const url = `https://api.github.com/repos/${repo}/contents/${archivo}`;
-  const body = {
-    message: mensaje || `Actualización de ${archivo} por Ayanokōji Digital`,
-    content: b64,
-    branch: br
-  };
+  const body = { message: mensaje || `Actualización de ${archivo}`, content: b64, branch: br };
   if (sha) body.sha = sha;
   const r = await fetch(url, {
     method: 'PUT',
@@ -374,6 +379,22 @@ async function githubEscribirArchivo(e, repo, archivo, contenido, mensaje, rama)
   }
   const d = await r.json();
   return { ok: true, commit: d.commit?.sha, url: d.commit?.html_url };
+}
+
+// ============================================================
+// DETECCIÓN DE ARCHIVO EN MENSAJE
+// ============================================================
+function detectarArchivoEnMensaje(mensaje) {
+  const t = mensaje.toLowerCase();
+  const encontrado = ARCHIVOS_BACKEND.find(a => t.includes(a.toLowerCase())) ||
+                     ARCHIVOS_FRONTEND.find(a => t.includes(a.toLowerCase()));
+  return encontrado || null;
+}
+
+function esFrontend(mensaje) {
+  const t = mensaje.toLowerCase();
+  return ARCHIVOS_FRONTEND.some(a => t.includes(a.toLowerCase())) ||
+         t.includes('frontend') || t.includes('interfaz') || t.includes('página') || t.includes('pagina');
 }
 
 // ============================================================
@@ -797,306 +818,7 @@ async function generarImagen(e, prompt, uid) {
 }
 
 // ============================================================
-// CHAT
-// ============================================================
-async function chat(r, e, c) {
-  try {
-    const b = await r.json();
-    const m = b.mensaje;
-    const uid = b.user_id || 'comandante';
-    if (!m || typeof m !== 'string') return J({ respuesta: 'No enviaste mensaje.' });
-    if (!e.ayanokoji_IA) return J({ respuesta: 'IA no configurada.' });
-
-    const kvActividad = gKV(e, 'agente');
-    if (kvActividad) {
-      try { await kvActividad.put('ultima_actividad_comandante', String(Date.now()), { expirationTtl: 30 * 86400 }); } catch (x) {}
-    }
-
-    const tLower = m.toLowerCase().trim();
-    const aprueba = /^(s[ií]|dale|adelante|hazlo|confirmo|aprobado|ok|procede|ejecuta|yes)$/i.test(tLower);
-    const rechaza = /^(no|cancela|abort|rechaza|detente|para|nope)$/i.test(tLower);
-
-    if (aprueba) {
-      const pendiente = await leerAprobacionPendiente(e, uid);
-      if (pendiente) {
-        await limpiarAprobacionPendiente(e, uid);
-        const resultado = await ejecutarHerramienta(e, pendiente, uid, c);
-        const exito = resultado.ok;
-        try {
-          const db = gDB(e, 'agente');
-          if (db) {
-            await db.prepare('INSERT INTO acciones(tipo,descripcion,exito,detalle,fecha) VALUES(?,?,?,?,?)')
-              .bind('aprobacion_herramienta', pendiente.tool, exito ? 1 : 0, (resultado.error || JSON.stringify(resultado.resultado || {}).substring(0, 500)), Date.now()).run();
-          }
-        } catch (x) {}
-        const textoResp = exito
-          ? `Ejecutado: **${pendiente.tool}**.\n\nResultado: ${JSON.stringify(resultado.resultado || {}).substring(0, 1500)}`
-          : `Falló **${pendiente.tool}**: ${resultado.error}`;
-        if (e.DB) {
-          try {
-            await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)").bind(uid, m, textoResp, Date.now()).run();
-          } catch (x) {}
-        }
-        return J({ respuesta: textoResp, user_id: uid, intencion: 'aprobacion' });
-      }
-    }
-
-    if (rechaza) {
-      const pendiente = await leerAprobacionPendiente(e, uid);
-      if (pendiente) {
-        await limpiarAprobacionPendiente(e, uid);
-        return J({ respuesta: `Cancelado: **${pendiente.tool}**. No se ejecutó.`, user_id: uid, intencion: 'cancelacion' });
-      }
-    }
-
-    const i = detectarIntencion(m);
-    if (i === 'estado') return rEst(e, uid);
-    if (i === 'leer') return rLeer(e, uid);
-    if (i === 'eliminar') return rElim(e, uid);
-
-    if (i === 'guardar_datos') {
-      const au = await opcional('autonomia');
-      if (au && au.gestionarDatos) {
-        const r1 = await au.gestionarDatos(e, m, uid);
-        if (r1) {
-          if (au.registrarAccion) await au.registrarAccion(e, 'guardar_datos', m.substring(0, 100), true, r1.respuesta);
-          if (e.DB) {
-            try {
-              await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)")
-                .bind(uid, m, r1.respuesta, Date.now()).run();
-            } catch (x) {}
-          }
-          return J({ respuesta: r1.respuesta, user_id: uid, intencion: i });
-        }
-      }
-    }
-
-    if (i === 'imagen') {
-      const prompt = m.replace(/^.*?(?:imagen|foto|dibujo|ilustracion|ilustración|render)\s*(?:de|:)?\s*/i, '').trim() || m;
-      const r1 = await generarImagen(e, prompt, uid);
-      return J({ respuesta: r1.respuesta, user_id: uid, intencion: 'imagen' });
-    }
-
-    if (i === 'crear') {
-      const au = await opcional('autonomia');
-      const nombre = m.match(/worker\s+["']?([\w-]+)["']?/i)?.[1] || m.match(/crea\s+["']?([\w-]+)["']?/i)?.[1];
-      if (au && nombre) {
-        const r1 = await au.crearWorker(e, nombre, '// Worker creado por Ayanokōji\nexport default { async fetch(req) { return new Response("Hola desde " + req.url); } }');
-        return J({ respuesta: r1.mensaje || r1.error, user_id: uid, intencion: 'crear' });
-      }
-      if (!au) return J({ respuesta: 'Necesito que subas `autonomia.js` primero.', user_id: uid });
-    }
-
-    if (i === 'mejorar_area') {
-      const au = await opcional('autonomia');
-      if (!au) return J({ respuesta: 'autonomia.js no instalado.', user_id: uid });
-      const area = identificarArea(m);
-      if (!area) {
-        return J({
-          respuesta: `No identifiqué el área. Áreas disponibles:\n${Object.keys(AREAS).map(a => '- ' + a).join('\n')}\n\nDime cuál y procedo.`,
-          user_id: uid
-        });
-      }
-      const r1 = await au.autoMejorar(e, { nombre: 'shadow-ayano', area: area.archivo, instrucciones: m, autoDesplegar: false });
-      return J({
-        respuesta: `Área identificada: *${area.area}* → archivo \`${area.archivo}\`.\n\n${r1.mensaje || r1.error || 'Sin resultado.'}`,
-        user_id: uid, intencion: 'mejorar_area', area: area.area, archivo: area.archivo
-      });
-    }
-
-    if (i === 'mejorar' || i === 'desplegar') {
-      const au = await opcional('autonomia');
-      const nombre = m.match(/worker\s+["']?([\w-]+)["']?/i)?.[1];
-      if (au && nombre) {
-        const r1 = await au.leerCodigoWorker(e, nombre);
-        return J({ respuesta: r1.mensaje || r1.codigo?.substring(0, 500) || r1.error, user_id: uid, intencion: 'leer_codigo' });
-      }
-      return J({ respuesta: 'Dime el área o el nombre del worker.', user_id: uid });
-    }
-
-    let perfilBase = '';
-    if (e.KV) {
-      try {
-        perfilBase = await e.KV.get('perfil_base') || '';
-        if (perfilBase.length > MAX_CHARS_PERFIL_BASE) perfilBase = perfilBase.substring(0, MAX_CHARS_PERFIL_BASE);
-      } catch (x) {}
-    }
-
-    const cacheRelacion = await leerCacheRelacion(e);
-
-    let ventana = [];
-    const ventanaRaw = await conCache(e, `historial:${uid}:${VENTANA_SEGURA}`, TTL_HISTORIAL, async () => {
-      try {
-        const r1 = await e.DB.prepare('SELECT rol, contenido FROM historial_largo WHERE user_id=? ORDER BY orden DESC LIMIT ?').bind(uid, VENTANA_SEGURA).all();
-        return (r1.results || []).reverse();
-      } catch (x) { return null; }
-    });
-    if (ventanaRaw && ventanaRaw.length) {
-      ventana = ventanaRaw.map(x => ({
-        role: x.rol === 'assistant' ? 'assistant' : 'user',
-        content: (x.contenido || '').substring(0, MAX_CHARS_MENSAJE)
-      }));
-    } else if (e.DB) {
-      try {
-        const r1 = await e.DB.prepare("SELECT mensaje,respuesta FROM historial WHERE user_id=? ORDER BY fecha DESC LIMIT 15").bind(uid).all();
-        if (r1.results) {
-          ventana = r1.results.reverse().flatMap(x => [
-            { role: 'user', content: (x.mensaje || '').substring(0, MAX_CHARS_MENSAJE) },
-            { role: 'assistant', content: (x.respuesta || '').substring(0, MAX_CHARS_MENSAJE) }
-          ]);
-        }
-      } catch (x) {}
-    }
-
-    let ctx = '', fs = null;
-    const ctxRaw = await conCache(e, 'contexto:ultimo', TTL_CONTEXTO, async () => {
-      try {
-        const r2 = await e.DB.prepare("SELECT resumen,fases FROM contexto ORDER BY fecha DESC LIMIT 1").first();
-        return r2 || null;
-      } catch (x) { return null; }
-    });
-    if (ctxRaw) {
-      ctx = (ctxRaw.resumen || '').substring(0, MAX_CHARS_CONTEXTO);
-      if (ctxRaw.fases) { try { fs = JSON.parse(ctxRaw.fases); } catch (x) {} }
-    }
-
-    let rec = await conCache(e, `resumenes:${uid}`, TTL_RESUMENES, async () => {
-      try {
-        const r3 = await e.DB.prepare("SELECT resumen FROM resumenes_chat WHERE user_id=? ORDER BY fecha DESC LIMIT 3").bind(uid).all();
-        return (r3.results || []).map(x => (x.resumen || '').substring(0, 800));
-      } catch (x) { return null; }
-    });
-    if (!rec) rec = [];
-
-    let correcciones = await conCache(e, 'correcciones', TTL_CORRECCIONES, async () => {
-      try {
-        const rc = await e.DB.prepare('SELECT correccion FROM correcciones_voz ORDER BY fecha DESC LIMIT 15').all();
-        return (rc.results || []).map(x => x.correccion);
-      } catch (x) { return null; }
-    });
-    if (!correcciones) correcciones = [];
-
-    let estrategias = await conCache(e, 'estrategias:activas', TTL_ESTRATEGIAS, async () => {
-      try {
-        const re = await e.DB.prepare("SELECT nombre, tipo, contenido FROM estrategias WHERE estado='activa' ORDER BY prioridad ASC LIMIT 5").all();
-        return re.results || [];
-      } catch (x) { return null; }
-    });
-    if (!estrategias) estrategias = [];
-
-    let conciencia = [];
-    if (e.KV) {
-      try {
-        const c2 = JSON.parse(await e.KV.get('conciencia:' + uid) || '[]');
-        conciencia = c2.slice(0, 10).map(x => `[${x.pestana}] ${x.accion}: ${x.detalle}`.substring(0, 200));
-      } catch (x) {}
-    }
-
-    let systemPrompt = construirSystemPrompt(ctx, fs, rec, perfilBase, correcciones, estrategias, conciencia);
-
-    if (cacheRelacion && cacheRelacion.length > 100) {
-      systemPrompt += `\n\n=== CACHÉ DE RELACIÓN (patrones entre el Comandante y yo) ===\n${cacheRelacion.substring(0, 3000)}`;
-    }
-
-    let mensajes = [
-      { role: 'system', content: systemPrompt },
-      ...ventana,
-      { role: 'user', content: m }
-    ];
-
-    let respuestaFinal = '';
-    let iteracion = 0;
-    let invocacionesEjecutadas = [];
-    let aprobacionPendiente = null;
-
-    while (iteracion < MAX_ITERACIONES_TOOL) {
-      iteracion++;
-      const modeloElegido = elegirModelo(m, i, iteracion);
-      const res = await e.ayanokoji_IA.run(modeloElegido, { messages: mensajes, max_tokens: 1200, temperature: 0.7 });
-      const rp = extraerRespuesta(res);
-      const invocaciones = parsearInvocaciones(rp);
-
-      if (!invocaciones.length) {
-        respuestaFinal = rp || 'No obtuve respuesta del modelo. Intenta de nuevo.';
-        break;
-      }
-
-      const textoLimpio = rp.replace(/```tool\s*\n[\s\S]*?\n```/g, '').trim();
-
-      const peligrosa = invocaciones.find(inv => herramientaRequiereAprobacion(inv.tool));
-      if (peligrosa) {
-        await guardarAprobacionPendiente(e, uid, peligrosa);
-        aprobacionPendiente = peligrosa;
-        respuestaFinal = textoLimpio || `Voy a usar la herramienta **${peligrosa.tool}**.\n\nRazón: ${peligrosa.razon || '(sin especificar)'}\n\nParámetros: ${JSON.stringify(peligrosa.params).substring(0, 300)}\n\n¿Confirmas? Responde **sí** para ejecutar, **no** para cancelar.`;
-        break;
-      }
-
-      const resultados = [];
-      for (const inv of invocaciones) {
-        const r1 = await ejecutarHerramienta(e, inv, uid, c);
-        invocacionesEjecutadas.push({ tool: inv.tool, ok: r1.ok });
-        resultados.push({
-          tool: inv.tool,
-          ok: r1.ok,
-          resultado: r1.resultado ? JSON.stringify(r1.resultado).substring(0, 4000) : null,
-          error: r1.error || null
-        });
-      }
-
-      mensajes.push({ role: 'assistant', content: rp });
-      mensajes.push({
-        role: 'user',
-        content: `[RESULTADOS DE HERRAMIENTAS]\n${resultados.map(rr => `- ${rr.tool}: ${rr.ok ? 'OK' : 'ERROR'} → ${rr.ok ? rr.resultado : rr.error}`).join('\n\n')}\n\nContinúa con tu respuesta final al Comandante. NO incluyas bloques \`\`\`tool a menos que necesites otra herramienta.`
-      });
-
-      if (iteracion === MAX_ITERACIONES_TOOL) {
-        respuestaFinal = textoLimpio || 'He ejecutado herramientas pero no puedo procesar más en esta iteración. Revisa la bandeja de acciones.';
-      }
-    }
-
-    const afirmaAccion = /\b(he creado|he insertado|he guardado|he actualizado|he desplegado|he borrado|he añadido|ya está|ya se hizo|completado|ejecutado)\b/i.test(respuestaFinal);
-    if (afirmaAccion && !invocacionesEjecutadas.length && e.DB) {
-      try {
-        const ult = await e.DB.prepare("SELECT tipo FROM acciones WHERE fecha > ? ORDER BY fecha DESC LIMIT 1").bind(Date.now() - 60000).first();
-        if (!ult) respuestaFinal += '\n\n_⚠️ No tengo registro de esa acción en mi historial reciente._';
-      } catch (x) {}
-    }
-
-    if (e.DB) {
-      try {
-        await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)").bind(uid, m, respuestaFinal, Date.now()).run();
-        const maxOrd = await e.DB.prepare('SELECT MAX(orden) as o FROM historial_largo WHERE user_id=?').bind(uid).first();
-        let ord = (maxOrd && maxOrd.o != null) ? maxOrd.o : 0;
-        await e.DB.prepare('INSERT INTO historial_largo(user_id,rol,contenido,orden,fecha) VALUES(?,?,?,?,?)').bind(uid, 'user', m, ord + 1, Date.now()).run();
-        await e.DB.prepare('INSERT INTO historial_largo(user_id,rol,contenido,orden,fecha) VALUES(?,?,?,?,?)').bind(uid, 'assistant', respuestaFinal, ord + 2, Date.now()).run();
-      } catch (x) {}
-    }
-
-    try { await invalidarCache(e, `historial:${uid}`); } catch (x) {}
-
-    if (e.DB && e.KV && c) {
-      try {
-        const lastSum = parseInt(await e.KV.get('last_summary:' + uid) || '0');
-        const countRes = await e.DB.prepare("SELECT COUNT(*) as n FROM historial WHERE user_id=? AND fecha > ?").bind(uid, lastSum).first();
-        if (countRes && countRes.n >= 30) c.waitUntil(resumirChats(e, uid));
-      } catch (x) {}
-    }
-
-    return J({
-      respuesta: respuestaFinal,
-      user_id: uid,
-      intencion: i,
-      herramientas_usadas: invocacionesEjecutadas,
-      aprobacion_pendiente: aprobacionPendiente ? aprobacionPendiente.tool : null,
-      cache_usado: true
-    });
-  } catch (x) {
-    return J({ respuesta: 'Error: ' + x.message });
-  }
-}
-
-// ============================================================
-// RESPUESTAS DIRECTAS Y ENDPOINTS
+// RESPUESTAS DIRECTAS
 // ============================================================
 async function rImagen(r, e, c) {
   const b = await r.json();
@@ -1130,11 +852,11 @@ async function rEst(e, uid) {
       try { const r5 = await e.DB.prepare('SELECT COUNT(*) as n FROM resumenes_chat').first(); s = r5 ? r5.n : 0; } catch (x) {}
       try { const r6 = await e.DB.prepare('SELECT COUNT(*) as n FROM historial_largo WHERE user_id=?').bind(uid).first(); hl = r6 ? r6.n : 0; } catch (x) {}
       try { const r7 = await e.DB.prepare("SELECT COUNT(*) as n FROM tareas WHERE estado='pendiente'").first(); tareas = r7 ? r7.n : 0; } catch (x) {}
-      try { const r8 = await e.DB.prepare('SELECT COUNT(*) FROM workers_registrados WHERE activo=1').first(); workers = r8 ? Object.values(r8)[0] : 0; } catch (x) {}
+      try { const r8 = await e.DB.prepare('SELECT COUNT(*) as n FROM workers_registrados WHERE activo=1').first(); workers = r8 ? r8.n : 0; } catch (x) {}
       try { const r9 = await e.DB.prepare('SELECT COUNT(*) as n FROM notificaciones WHERE leida=0').first(); notif = r9 ? r9.n : 0; } catch (x) {}
     }
   } catch (x) {}
-  return J({ respuesta: `Sistema activo (modelo 70B + caché con TTLs largos). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas: ${tareas}. Workers: ${workers}. Notif sin leer: ${notif}.` });
+  return J({ respuesta: `Sistema activo (v17.0, modelo 70B + caché TTL largo). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas: ${tareas}. Workers: ${workers}. Notif sin leer: ${notif}.` });
 }
 
 async function rLeer(e, uid) {
@@ -1282,7 +1004,10 @@ async function diagnostico(r, e) {
     const tablas = await db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all();
     const conteos = {};
     for (const t of (tablas.results || [])) {
-      try { const c2 = await db.prepare('SELECT COUNT(*) as n FROM ' + t.name).first(); conteos[t.name] = c2 ? c2.n : 0; } catch (x) { conteos[t.name] = 'err: ' + x.message; }
+      try {
+        const c2 = await db.prepare('SELECT COUNT(*) as n FROM ' + t.name).first();
+        conteos[t.name] = c2 ? c2.n : 0;
+      } catch (x) { conteos[t.name] = 'err: ' + x.message; }
     }
     const kvN = gKV(e, 'agente');
     let kvCount = 'sin kv';
@@ -1406,6 +1131,7 @@ async function diagnosticoVariables(r, e) {
   } catch (x) {}
   return J({
     timestamp: new Date().toISOString(),
+    version: '17.0',
     token_presente: !!e.GITHUB_TOKEN,
     token_longitud: e.GITHUB_TOKEN ? e.GITHUB_TOKEN.length : 0,
     repo_backend_presente: !!e.GITHUB_REPO_BACKEND,
@@ -1423,6 +1149,396 @@ async function diagnosticoVariables(r, e) {
     cache_relacion_longitud: cacheRelacion ? cacheRelacion.length : 0,
     cache_relacion_fecha: cacheRelacionFecha || null
   });
+}
+
+// ============================================================
+// CHAT PRINCIPAL
+// ============================================================
+async function chat(r, e, c) {
+  try {
+    const b = await r.json();
+    const m = b.mensaje;
+    const uid = b.user_id || 'comandante';
+    if (!m || typeof m !== 'string') return J({ respuesta: 'No enviaste mensaje.' });
+    if (!e.ayanokoji_IA) return J({ respuesta: 'IA no configurada.' });
+
+    const kvActividad = gKV(e, 'agente');
+    if (kvActividad) {
+      try { await kvActividad.put('ultima_actividad_comandante', String(Date.now()), { expirationTtl: 30 * 86400 }); } catch (x) {}
+    }
+
+    const tLower = m.toLowerCase().trim();
+    const aprueba = /^(s[ií]|dale|adelante|hazlo|confirmo|aprobado|ok|procede|ejecuta|yes)$/i.test(tLower);
+    const rechaza = /^(no|cancela|abort|rechaza|detente|para|nope)$/i.test(tLower);
+
+    if (aprueba) {
+      const pendiente = await leerAprobacionPendiente(e, uid);
+      if (pendiente) {
+        await limpiarAprobacionPendiente(e, uid);
+        const resultado = await ejecutarHerramienta(e, pendiente, uid, c);
+        const exito = resultado.ok;
+        try {
+          const db = gDB(e, 'agente');
+          if (db) {
+            await db.prepare('INSERT INTO acciones(tipo,descripcion,exito,detalle,fecha) VALUES(?,?,?,?,?)')
+              .bind('aprobacion_herramienta', pendiente.tool, exito ? 1 : 0, (resultado.error || JSON.stringify(resultado.resultado || {}).substring(0, 500)), Date.now()).run();
+          }
+        } catch (x) {}
+        const textoResp = exito
+          ? `Ejecutado: **${pendiente.tool}**.\n\nResultado: ${JSON.stringify(resultado.resultado || {}).substring(0, 1500)}`
+          : `Falló **${pendiente.tool}**: ${resultado.error}`;
+        if (e.DB) {
+          try {
+            await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)").bind(uid, m, textoResp, Date.now()).run();
+          } catch (x) {}
+        }
+        return J({ respuesta: textoResp, user_id: uid, intencion: 'aprobacion' });
+      }
+    }
+
+    if (rechaza) {
+      const pendiente = await leerAprobacionPendiente(e, uid);
+      if (pendiente) {
+        await limpiarAprobacionPendiente(e, uid);
+        return J({ respuesta: `Cancelado: **${pendiente.tool}**. No se ejecutó.`, user_id: uid, intencion: 'cancelacion' });
+      }
+    }
+
+    const i = detectarIntencion(m);
+
+    // === RESPUESTAS DIRECTAS ===
+    if (i === 'estado') return rEst(e, uid);
+    if (i === 'leer') return rLeer(e, uid);
+    if (i === 'eliminar') return rElim(e, uid);
+
+    // === CÓDIGO — ejecución directa, sin depender del modelo ===
+    if (i === 'listar_codigo') {
+      const esFe = esFrontend(m);
+      const repo = repoDe(e, esFe ? 'frontend' : 'backend');
+      if (!repo) return J({ respuesta: 'Repo no configurado.' });
+      const r1 = await githubListarArchivos(e, repo);
+      if (r1.error) return J({ respuesta: `Error al listar: ${r1.error}` });
+      const lista = r1.archivos.map(a => `· ${a.ruta} (${(a.tamaño/1024).toFixed(1)} KB)`).join('\n');
+      return J({
+        respuesta: `Archivos del repo ${esFe ? 'frontend' : 'backend'} (${r1.total}):\n\n${lista}`,
+        herramientas_usadas: [{ tool: 'listar_source', ok: true }]
+      });
+    }
+
+    if (i === 'leer_codigo') {
+      const esFe = esFrontend(m);
+      const repo = repoDe(e, esFe ? 'frontend' : 'backend');
+      if (!repo) return J({ respuesta: 'Repo no configurado.' });
+      const archivo = detectarArchivoEnMensaje(m) || (esFe ? 'app.js' : 'worker.js');
+      const r1 = await githubLeerArchivo(e, repo, archivo);
+      if (r1.error) return J({ respuesta: `Error al leer ${archivo}: ${r1.error}` });
+      const contenido = r1.contenido.length > 8000 ? r1.contenido.substring(0, 8000) + `\n\n[... archivo truncado. ${r1.contenido.length} chars totales. Pide "lee completo ${archivo}" si necesitas verlo todo.]` : r1.contenido;
+      return J({
+        respuesta: `**${archivo}** (${r1.tamaño} chars):\n\n\`\`\`js\n${contenido}\n\`\`\``,
+        herramientas_usadas: [{ tool: 'leer_source', ok: true }]
+      });
+    }
+
+    if (i === 'escribir_codigo') {
+      const esFe = esFrontend(m);
+      const archivo = detectarArchivoEnMensaje(m);
+      if (!archivo) return J({ respuesta: 'Dime qué archivo quieres modificar. Ej: "modifica worker.js para añadir X".' });
+      const inv = {
+        tool: 'escribir_source',
+        params: { repo: esFe ? 'frontend' : 'backend', archivo, contenido: 'PENDIENTE_DE_GENERAR', mensaje_commit: `Modificación solicitada por el Comandante` },
+        razon: 'Modificar código en producción requiere aprobación'
+      };
+      await guardarAprobacionPendiente(e, uid, inv);
+      return J({
+        respuesta: `Voy a modificar **${archivo}**. Necesito que me digas exactamente qué cambio hacer. Escribe: "sí, cambia X por Y en ${archivo}" y lo ejecuto.`,
+        aprobacion_pendiente: 'escribir_source'
+      });
+    }
+
+    // === MODOS ===
+    if (i === 'modo') {
+      const kvN = gKV(e, 'agente');
+      const t = m.toLowerCase();
+      if (t.includes('arquitecto')) {
+        await kvN.put('modo_arquitecto', 'true', { expirationTtl: 86400 });
+        return J({ respuesta: 'Modo Arquitecto **activado** por 24h. Cuando planifiquemos algo, responderé en formato estructurado: objetivo, opciones, recomendación, riesgos, punto ciego. Widget "Arq" en verde.', modo_activo: 'arquitecto' });
+      }
+      if (t.includes('intensivo')) {
+        await kvN.put('modo_intensivo', 'true', { expirationTtl: 86400 });
+        await kvN.put('modo_intensivo_inicio', String(Date.now()), { expirationTtl: 86400 });
+        return J({ respuesta: 'Modo Intensivo **activado** por 24h. Puedo hacerte hasta 5 preguntas de criterio al día. Widget "Int" en verde. Se desactiva solo a las 24h.', modo_activo: 'intensivo' });
+      }
+      if (t.includes('ausente')) {
+        await kvN.put('modo_ausente', 'true', { expirationTtl: 86400 * 7 });
+        return J({ respuesta: 'Modo Ausente **activado** por 7 días. No enviaré notificaciones push. Prepararé un informe si pasan 3+ días sin escribirte. Widget "Aus" en verde.', modo_activo: 'ausente' });
+      }
+      return J({ respuesta: 'Modos disponibles: "activa modo arquitecto", "activa modo intensivo", "activa modo ausente".' });
+    }
+
+    // === ARQUITECTO (formato estructurado) ===
+    if (i === 'arquitecto') {
+      const kvN = gKV(e, 'agente');
+      await kvN.put('modo_arquitecto', 'true', { expirationTtl: 3600 });
+      // Caer al flujo normal del modelo (que leerá el flag y responderá en formato arquitecto)
+    }
+
+    // === GUARDAR DATOS, IMAGEN, CREAR, MEJORAR, ETC ===
+    if (i === 'guardar_datos') {
+      const au = await opcional('autonomia');
+      if (au && au.gestionarDatos) {
+        const r1 = await au.gestionarDatos(e, m, uid);
+        if (r1) {
+          if (au.registrarAccion) await au.registrarAccion(e, 'guardar_datos', m.substring(0, 100), true, r1.respuesta);
+          if (e.DB) {
+            try {
+              await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)")
+                .bind(uid, m, r1.respuesta, Date.now()).run();
+            } catch (x) {}
+          }
+          return J({ respuesta: r1.respuesta, user_id: uid, intencion: i });
+        }
+      }
+    }
+
+    if (i === 'imagen') {
+      const prompt = m.replace(/^.*?(?:imagen|foto|dibujo|ilustracion|ilustración|render)\s*(?:de|:)?\s*/i, '').trim() || m;
+      const r1 = await generarImagen(e, prompt, uid);
+      return J({ respuesta: r1.respuesta, user_id: uid, intencion: 'imagen' });
+    }
+
+    if (i === 'crear') {
+      const au = await opcional('autonomia');
+      const nombre = m.match(/worker\s+["']?([\w-]+)["']?/i)?.[1] || m.match(/crea\s+["']?([\w-]+)["']?/i)?.[1];
+      if (au && nombre) {
+        const r1 = await au.crearWorker(e, nombre, '// Worker creado por Ayanokōji\nexport default { async fetch(req) { return new Response("Hola desde " + req.url); } }');
+        return J({ respuesta: r1.mensaje || r1.error, user_id: uid, intencion: 'crear' });
+      }
+      if (!au) return J({ respuesta: 'Necesito que subas `autonomia.js` primero.', user_id: uid });
+    }
+
+    if (i === 'mejorar_area') {
+      const au = await opcional('autonomia');
+      if (!au) return J({ respuesta: 'autonomia.js no instalado.', user_id: uid });
+      const area = identificarArea(m);
+      if (!area) {
+        return J({
+          respuesta: `No identifiqué el área. Áreas disponibles:\n${Object.keys(AREAS).map(a => '- ' + a).join('\n')}\n\nDime cuál y procedo.`,
+          user_id: uid
+        });
+      }
+      const r1 = await au.autoMejorar(e, { nombre: 'shadow-ayano', area: area.archivo, instrucciones: m, autoDesplegar: false });
+      return J({
+        respuesta: `Área identificada: *${area.area}* → archivo \`${area.archivo}\`.\n\n${r1.mensaje || r1.error || 'Sin resultado.'}`,
+        user_id: uid, intencion: 'mejorar_area', area: area.area, archivo: area.archivo
+      });
+    }
+
+    if (i === 'mejorar' || i === 'desplegar') {
+      const au = await opcional('autonomia');
+      const nombre = m.match(/worker\s+["']?([\w-]+)["']?/i)?.[1];
+      if (au && nombre) {
+        const r1 = await au.leerCodigoWorker(e, nombre);
+        return J({ respuesta: r1.mensaje || r1.codigo?.substring(0, 500) || r1.error, user_id: uid, intencion: 'leer_codigo' });
+      }
+      return J({ respuesta: 'Dime el área o el nombre del worker.', user_id: uid });
+    }
+
+    // === FLUJO NORMAL DEL MODELO (charla, sugerencia, arquitecto) ===
+    let perfilBase = '';
+    if (e.KV) {
+      try {
+        perfilBase = await e.KV.get('perfil_base') || '';
+        if (perfilBase.length > MAX_CHARS_PERFIL_BASE) perfilBase = perfilBase.substring(0, MAX_CHARS_PERFIL_BASE);
+      } catch (x) {}
+    }
+
+    const cacheRelacion = await leerCacheRelacion(e);
+
+    let ventana = [];
+    const ventanaRaw = await conCache(e, `historial:${uid}:${VENTANA_SEGURA}`, TTL_HISTORIAL, async () => {
+      try {
+        const r1 = await e.DB.prepare('SELECT rol, contenido FROM historial_largo WHERE user_id=? ORDER BY orden DESC LIMIT ?').bind(uid, VENTANA_SEGURA).all();
+        return (r1.results || []).reverse();
+      } catch (x) { return null; }
+    });
+    if (ventanaRaw && ventanaRaw.length) {
+      ventana = ventanaRaw.map(x => ({
+        role: x.rol === 'assistant' ? 'assistant' : 'user',
+        content: (x.contenido || '').substring(0, MAX_CHARS_MENSAJE)
+      }));
+    } else if (e.DB) {
+      try {
+        const r1 = await e.DB.prepare("SELECT mensaje,respuesta FROM historial WHERE user_id=? ORDER BY fecha DESC LIMIT 15").bind(uid).all();
+        if (r1.results) {
+          ventana = r1.results.reverse().flatMap(x => [
+            { role: 'user', content: (x.mensaje || '').substring(0, MAX_CHARS_MENSAJE) },
+            { role: 'assistant', content: (x.respuesta || '').substring(0, MAX_CHARS_MENSAJE) }
+          ]);
+        }
+      } catch (x) {}
+    }
+
+    let ctx = '', fs = null;
+    const ctxRaw = await conCache(e, 'contexto:ultimo', TTL_CONTEXTO, async () => {
+      try {
+        const r2 = await e.DB.prepare("SELECT resumen,fases FROM contexto ORDER BY fecha DESC LIMIT 1").first();
+        return r2 || null;
+      } catch (x) { return null; }
+    });
+    if (ctxRaw) {
+      ctx = (ctxRaw.resumen || '').substring(0, MAX_CHARS_CONTEXTO);
+      if (ctxRaw.fases) { try { fs = JSON.parse(ctxRaw.fases); } catch (x) {} }
+    }
+
+    let rec = await conCache(e, `resumenes:${uid}`, TTL_RESUMENES, async () => {
+      try {
+        const r3 = await e.DB.prepare("SELECT resumen FROM resumenes_chat WHERE user_id=? ORDER BY fecha DESC LIMIT 3").bind(uid).all();
+        return (r3.results || []).map(x => (x.resumen || '').substring(0, 800));
+      } catch (x) { return null; }
+    });
+    if (!rec) rec = [];
+
+    let correcciones = await conCache(e, 'correcciones', TTL_CORRECCIONES, async () => {
+      try {
+        const rc = await e.DB.prepare('SELECT correccion FROM correcciones_voz ORDER BY fecha DESC LIMIT 15').all();
+        return (rc.results || []).map(x => x.correccion);
+      } catch (x) { return null; }
+    });
+    if (!correcciones) correcciones = [];
+
+    let estrategias = await conCache(e, 'estrategias:activas', TTL_ESTRATEGIAS, async () => {
+      try {
+        const re = await e.DB.prepare("SELECT nombre, tipo, contenido FROM estrategias WHERE estado='activa' ORDER BY prioridad ASC LIMIT 5").all();
+        return re.results || [];
+      } catch (x) { return null; }
+    });
+    if (!estrategias) estrategias = [];
+
+    let conciencia = [];
+    if (e.KV) {
+      try {
+        const c2 = JSON.parse(await e.KV.get('conciencia:' + uid) || '[]');
+        conciencia = c2.slice(0, 10).map(x => `[${x.pestana}] ${x.accion}: ${x.detalle}`.substring(0, 200));
+      } catch (x) {}
+    }
+
+    let systemPrompt = construirSystemPrompt(ctx, fs, rec, perfilBase, correcciones, estrategias, conciencia);
+
+    if (cacheRelacion && cacheRelacion.length > 100) {
+      systemPrompt += `\n\n=== CACHÉ DE RELACIÓN (patrones entre el Comandante y yo) ===\n${cacheRelacion.substring(0, 3000)}`;
+    }
+
+    // Leer flags de modos y añadir al prompt si aplica
+    const kvM = gKV(e, 'agente');
+    let modoArqActivo = false, modoIntActivo = false;
+    try {
+      modoArqActivo = (await kvM.get('modo_arquitecto')) === 'true';
+      modoIntActivo = (await kvM.get('modo_intensivo')) === 'true';
+    } catch (x) {}
+    if (modoArqActivo || i === 'arquitecto') {
+      systemPrompt += `\n\n=== MODO ARQUITECTO ACTIVO ===\nResponde en formato estructurado obligatorio:\n1. OBJETIVO CLARO (1-2 líneas)\n2. RESTRICCIONES (lista breve)\n3. OPCIONES (mínimo 2, máximo 3, con pros/contras/riesgo)\n4. RECOMENDACIÓN DE AYANOKŌJI (cuál eliges y por qué)\n5. PRÓXIMO PASO CONCRETO (una sola acción ejecutable)\n6. RIESGOS QUE PODRÍAN MATAR ESTO (3 puntos)\n7. ¿QUÉ NO ESTAMOS VIENDO? (punto ciego, 2-3 líneas)\n`;
+    }
+    if (modoIntActivo) {
+      systemPrompt += `\n\n=== MODO INTENSIVO ACTIVO ===\nPuedes hacer hasta 5 preguntas de criterio al Comandante hoy. Aprovecha para calibrar tu modelo de su criterio.\n`;
+    }
+
+    let mensajes = [
+      { role: 'system', content: systemPrompt },
+      ...ventana,
+      { role: 'user', content: m }
+    ];
+
+    let respuestaFinal = '';
+    let iteracion = 0;
+    let invocacionesEjecutadas = [];
+    let aprobacionPendiente = null;
+
+    while (iteracion < MAX_ITERACIONES_TOOL) {
+      iteracion++;
+      const modeloElegido = elegirModelo(m, i, iteracion);
+      const res = await e.ayanokoji_IA.run(modeloElegido, { messages: mensajes, max_tokens: 1800, temperature: 0.7 });
+      const rp = extraerRespuesta(res);
+      const invocaciones = parsearInvocaciones(rp);
+
+      if (!invocaciones.length) {
+        respuestaFinal = rp || 'No obtuve respuesta del modelo. Intenta de nuevo.';
+        break;
+      }
+
+      const textoLimpio = rp.replace(/```tool\s*\n[\s\S]*?\n```/g, '').trim();
+
+      const peligrosa = invocaciones.find(inv => herramientaRequiereAprobacion(inv.tool));
+      if (peligrosa) {
+        await guardarAprobacionPendiente(e, uid, peligrosa);
+        aprobacionPendiente = peligrosa;
+        respuestaFinal = textoLimpio || `Voy a usar la herramienta **${peligrosa.tool}**.\n\nRazón: ${peligrosa.razon || '(sin especificar)'}\n\nParámetros: ${JSON.stringify(peligrosa.params).substring(0, 300)}\n\n¿Confirmas? Responde **sí** para ejecutar, **no** para cancelar.`;
+        break;
+      }
+
+      const resultados = [];
+      for (const inv of invocaciones) {
+        const r1 = await ejecutarHerramienta(e, inv, uid, c);
+        invocacionesEjecutadas.push({ tool: inv.tool, ok: r1.ok });
+        resultados.push({
+          tool: inv.tool,
+          ok: r1.ok,
+          resultado: r1.resultado ? JSON.stringify(r1.resultado).substring(0, 4000) : null,
+          error: r1.error || null
+        });
+      }
+
+      mensajes.push({ role: 'assistant', content: rp });
+      mensajes.push({
+        role: 'user',
+        content: `[RESULTADOS DE HERRAMIENTAS]\n${resultados.map(rr => `- ${rr.tool}: ${rr.ok ? 'OK' : 'ERROR'} → ${rr.ok ? rr.resultado : rr.error}`).join('\n\n')}\n\nContinúa con tu respuesta final al Comandante. NO incluyas bloques \`\`\`tool a menos que necesites otra herramienta.`
+      });
+
+      if (iteracion === MAX_ITERACIONES_TOOL) {
+        respuestaFinal = textoLimpio || 'He ejecutado herramientas pero no puedo procesar más en esta iteración. Revisa la bandeja de acciones.';
+      }
+    }
+
+    const afirmaAccion = /\b(he creado|he insertado|he guardado|he actualizado|he desplegado|he borrado|he añadido|ya está|ya se hizo|completado|ejecutado)\b/i.test(respuestaFinal);
+    if (afirmaAccion && !invocacionesEjecutadas.length && e.DB) {
+      try {
+        const ult = await e.DB.prepare("SELECT tipo FROM acciones WHERE fecha > ? ORDER BY fecha DESC LIMIT 1").bind(Date.now() - 60000).first();
+        if (!ult) respuestaFinal += '\n\n_⚠️ No tengo registro de esa acción en mi historial reciente._';
+      } catch (x) {}
+    }
+
+    if (e.DB) {
+      try {
+        await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)").bind(uid, m, respuestaFinal, Date.now()).run();
+        const maxOrd = await e.DB.prepare('SELECT MAX(orden) as o FROM historial_largo WHERE user_id=?').bind(uid).first();
+        let ord = (maxOrd && maxOrd.o != null) ? maxOrd.o : 0;
+        await e.DB.prepare('INSERT INTO historial_largo(user_id,rol,contenido,orden,fecha) VALUES(?,?,?,?,?)').bind(uid, 'user', m, ord + 1, Date.now()).run();
+        await e.DB.prepare('INSERT INTO historial_largo(user_id,rol,contenido,orden,fecha) VALUES(?,?,?,?,?)').bind(uid, 'assistant', respuestaFinal, ord + 2, Date.now()).run();
+      } catch (x) {}
+    }
+
+    try { await invalidarCache(e, `historial:${uid}`); } catch (x) {}
+
+    if (e.DB && e.KV && c) {
+      try {
+        const lastSum = parseInt(await e.KV.get('last_summary:' + uid) || '0');
+        const countRes = await e.DB.prepare("SELECT COUNT(*) as n FROM historial WHERE user_id=? AND fecha > ?").bind(uid, lastSum).first();
+        if (countRes && countRes.n >= 30) c.waitUntil(resumirChats(e, uid));
+      } catch (x) {}
+    }
+
+    return J({
+      respuesta: respuestaFinal,
+      user_id: uid,
+      intencion: i,
+      herramientas_usadas: invocacionesEjecutadas,
+      aprobacion_pendiente: aprobacionPendiente ? aprobacionPendiente.tool : null,
+      cache_usado: true,
+      modo_arquitecto_activo: modoArqActivo,
+      modo_intensivo_activo: modoIntActivo
+    });
+  } catch (x) {
+    return J({ respuesta: 'Error: ' + x.message });
+  }
 }
 
 // ============================================================
@@ -1460,7 +1576,7 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '16.0' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '17.0' });
 
     if (p === '/api/relacion/construir' && r.method === 'POST') {
       const uid = 'comandante';
@@ -1541,14 +1657,6 @@ export default {
         const sb = await opcional('sandbox');
         if (sb && sb.estadoActual) {
           salida.etapa_actual = await sb.estadoActual(e);
-        } else {
-          if (kvN) {
-            const progreso = JSON.parse(await kvN.get('sandbox:progreso') || '{}');
-            if (progreso.en_progreso && Object.keys(progreso.en_progreso).length) {
-              const [id, info] = Object.entries(progreso.en_progreso)[0];
-              salida.etapa_actual = { id, fase: 0, prioridad: 5, dia: info.dia_actual || 1, dias: info.dias_total || 1, descripcion: '', metrica: '', umbral: '' };
-            }
-          }
         }
       } catch (x) {}
       return J(salida);
@@ -1702,10 +1810,11 @@ export default {
       return J({
         pestanas: ['chat','sandbox','estrategias','shadow','stats','actividad','decisiones','ideas','bandeja'],
         botones: ['subir','imagen','indexar','migrar','diagnostico','procesos','contexto','corregir','limpiar'],
-        acciones_chat: ['enviar_mensaje','cargar_historial','corregir_voz','generar_imagen'],
+        acciones_chat: ['enviar_mensaje','cargar_historial','corregir_voz','generar_imagen','activar_modo'],
         acciones_auto: ['indexar','migrar','analizar','encolar','publicar','simular_estrategia','ejecutar_etapa','test_500'],
         acciones_cron: ['pulso','ritmo'],
-        version: '16.0',
+        modos_disponibles: ['arquitecto','intensivo','ausente'],
+        version: '17.0',
         ttls_actuales: { historial: TTL_HISTORIAL, contexto: TTL_CONTEXTO, resumenes: TTL_RESUMENES, correcciones: TTL_CORRECCIONES, estrategias: TTL_ESTRATEGIAS }
       });
     }
@@ -1898,15 +2007,22 @@ export default {
           await construirCacheRelacion(e, 'comandante');
         }
       } catch (x) {}
-      // SANDBOX — NUEVO: ahora sí se ejecuta
+
+      // Sandbox (activo cada 2h en la noche)
       const sb = await opcional('sandbox');
       if (sb && sb.cronSandbox) { try { await sb.cronSandbox(e); } catch (x) {} }
-      // Auto-reparación
+
+      // Auto-reparación (si autonomia.js la tiene)
       const au2 = await opcional('autonomia');
       if (au2 && au2.cronAutoReparacion) { try { await au2.cronAutoReparacion(e); } catch (x) {} }
+
+      // Pensamiento continuo (si autonomia.js la tiene — nueva función)
+      if (au2 && au2.pensarYActuar) { try { await au2.pensarYActuar(e); } catch (x) {} }
+
       // Publisher
       const pub = await opcional('publisher');
       if (pub && pub.cronPublicar) { try { await pub.cronPublicar(e); } catch (x) {} }
+
       // Cola de tareas e informe
       const au = await opcional('autonomia');
       if (au && au.cronColaTareas) { try { await au.cronColaTareas(e); } catch (x) {} }
