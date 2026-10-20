@@ -4,9 +4,6 @@ import { estadoPresupuesto, consumir } from './presupuesto.js';
 import { detectarIntencion, construirSystemPrompt, identificarArea, AREAS } from './nucleo.js';
 import { TOOLS, parsearInvocaciones, herramientaExiste, herramientaRequiereAprobacion } from './tools.js';
 
-// ============================================================
-// EXTRACCIÓN ROBUSTA DE RESPUESTA
-// ============================================================
 function extraerRespuesta(res) {
   if (!res) return '';
   if (typeof res === 'string') return res;
@@ -42,22 +39,15 @@ const MAX_CHARS_CONTEXTO = 3000;
 const MAX_ITERACIONES_TOOL = 3;
 const APROBACION_TTL = 600;
 
-// TTLs de caché (bajan consumo D1 ~80%)
 const TTL_HISTORIAL = 300;
 const TTL_CONTEXTO = 1800;
 const TTL_RESUMENES = 1800;
 const TTL_CORRECCIONES = 3600;
 const TTL_ESTRATEGIAS = 3600;
 
-// ============================================================
-// ARCHIVOS CONOCIDOS DEL PROYECTO (para detectar cuál leer)
-// ============================================================
 const ARCHIVOS_BACKEND = ['worker.js', 'nucleo.js', 'shared.js', 'proc.js', 'autonomia.js', 'tools.js', 'doctrina.js', 'identidad.js', 'presupuesto.js', 'notify.js', 'publisher.js', 'social.js', 'sandbox.js'];
 const ARCHIVOS_FRONTEND = ['index.html', 'styles.css', 'app.js'];
 
-// ============================================================
-// CACHÉ EN KV
-// ============================================================
 async function conCache(e, clave, ttlSeg, fn) {
   const kv = gKV(e, 'agente');
   if (kv) {
@@ -84,16 +74,10 @@ async function invalidarCache(e, prefijo) {
   } catch (x) {}
 }
 
-// ============================================================
-// SELECTOR DE MODELO — Chat siempre con 70B
-// ============================================================
 function elegirModelo(mensaje, intencion, iteracion) {
   return MODELO;
 }
 
-// ============================================================
-// CACHÉ DE RELACIÓN
-// ============================================================
 async function construirCacheRelacion(e, uid) {
   const db = gDB(e, 'agente');
   const kv = gKV(e, 'agente');
@@ -146,9 +130,6 @@ async function leerCacheRelacion(e) {
   try { return await kv.get('relacion:cache') || ''; } catch (x) { return ''; }
 }
 
-// ============================================================
-// AUTO-RESUMEN POR INACTIVIDAD
-// ============================================================
 async function autoResumenPorInactividad(e) {
   const db = gDB(e, 'agente');
   const kv = gKV(e, 'agente');
@@ -186,9 +167,6 @@ async function autoResumenPorInactividad(e) {
   } catch (x) {}
 }
 
-// ============================================================
-// USO REAL DE CLOUDFLARE
-// ============================================================
 async function consultarUsoReal(e) {
   const accountId = e.CF_ACCOUNT_ID;
   const token = e.CF_API_TOKEN;
@@ -298,9 +276,6 @@ async function consultarSoloWorkers(accountId, token, inicioDiaISO) {
   } catch (x) { return { ok: false, error: x.message }; }
 }
 
-// ============================================================
-// GITHUB
-// ============================================================
 function githubHeaders(e) {
   const h = {
     'Accept': 'application/vnd.github+json',
@@ -381,9 +356,6 @@ async function githubEscribirArchivo(e, repo, archivo, contenido, mensaje, rama)
   return { ok: true, commit: d.commit?.sha, url: d.commit?.html_url };
 }
 
-// ============================================================
-// DETECCIÓN DE ARCHIVO EN MENSAJE
-// ============================================================
 function detectarArchivoEnMensaje(mensaje) {
   const t = mensaje.toLowerCase();
   const encontrado = ARCHIVOS_BACKEND.find(a => t.includes(a.toLowerCase())) ||
@@ -397,9 +369,6 @@ function esFrontend(mensaje) {
          t.includes('frontend') || t.includes('interfaz') || t.includes('página') || t.includes('pagina');
 }
 
-// ============================================================
-// EJECUTOR DE HERRAMIENTAS
-// ============================================================
 async function ejecutarHerramienta(e, inv, uid, c) {
   const t = inv.tool;
   const p = inv.params || {};
@@ -817,9 +786,6 @@ async function generarImagen(e, prompt, uid) {
   } catch (x) { return { respuesta: 'Error: ' + x.message }; }
 }
 
-// ============================================================
-// RESPUESTAS DIRECTAS
-// ============================================================
 async function rImagen(r, e, c) {
   const b = await r.json();
   if (!b.prompt) return J({ error: 'Falta prompt.' });
@@ -856,7 +822,7 @@ async function rEst(e, uid) {
       try { const r9 = await e.DB.prepare('SELECT COUNT(*) as n FROM notificaciones WHERE leida=0').first(); notif = r9 ? r9.n : 0; } catch (x) {}
     }
   } catch (x) {}
-  return J({ respuesta: `Sistema activo (v17.0, modelo 70B + caché TTL largo). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas: ${tareas}. Workers: ${workers}. Notif sin leer: ${notif}.` });
+  return J({ respuesta: `Sistema activo (v18.0, modelo 70B + caché TTL largo). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas: ${tareas}. Workers: ${workers}. Notif sin leer: ${notif}.` });
 }
 
 async function rLeer(e, uid) {
@@ -1131,7 +1097,7 @@ async function diagnosticoVariables(r, e) {
   } catch (x) {}
   return J({
     timestamp: new Date().toISOString(),
-    version: '17.0',
+    version: '18.0',
     token_presente: !!e.GITHUB_TOKEN,
     token_longitud: e.GITHUB_TOKEN ? e.GITHUB_TOKEN.length : 0,
     repo_backend_presente: !!e.GITHUB_REPO_BACKEND,
@@ -1151,9 +1117,35 @@ async function diagnosticoVariables(r, e) {
   });
 }
 
-// ============================================================
-// CHAT PRINCIPAL
-// ============================================================
+async function testGithub(r, e) {
+  const kv = gKV(e, 'agente');
+  const repoBackend = e.GITHUB_REPO_BACKEND || null;
+  const repoFrontend = e.GITHUB_REPO_FRONTEND || null;
+  const resultados = {};
+
+  if (!e.GITHUB_TOKEN) {
+    resultados.token = { ok: false, error: 'GITHUB_TOKEN no configurado.' };
+  } else {
+    resultados.token = { ok: true, longitud: e.GITHUB_TOKEN.length };
+  }
+
+  if (repoBackend) {
+    const r1 = await githubListarArchivos(e, repoBackend);
+    resultados.repo_backend = r1.error ? { ok: false, error: r1.error } : { ok: true, total: r1.total };
+  } else {
+    resultados.repo_backend = { ok: false, error: 'Repo backend no configurado.' };
+  }
+
+  if (repoFrontend) {
+    const r2 = await githubListarArchivos(e, repoFrontend);
+    resultados.repo_frontend = r2.error ? { ok: false, error: r2.error } : { ok: true, total: r2.total };
+  } else {
+    resultados.repo_frontend = { ok: false, error: 'Repo frontend no configurado.' };
+  }
+
+  return J({ ok: true, resultados, timestamp: new Date().toISOString() });
+}
+
 async function chat(r, e, c) {
   try {
     const b = await r.json();
@@ -1206,12 +1198,10 @@ async function chat(r, e, c) {
 
     const i = detectarIntencion(m);
 
-    // === RESPUESTAS DIRECTAS ===
     if (i === 'estado') return rEst(e, uid);
     if (i === 'leer') return rLeer(e, uid);
     if (i === 'eliminar') return rElim(e, uid);
 
-    // === CÓDIGO — ejecución directa, sin depender del modelo ===
     if (i === 'listar_codigo') {
       const esFe = esFrontend(m);
       const repo = repoDe(e, esFe ? 'frontend' : 'backend');
@@ -1229,7 +1219,17 @@ async function chat(r, e, c) {
       const esFe = esFrontend(m);
       const repo = repoDe(e, esFe ? 'frontend' : 'backend');
       if (!repo) return J({ respuesta: 'Repo no configurado.' });
-      const archivo = detectarArchivoEnMensaje(m) || (esFe ? 'app.js' : 'worker.js');
+      const archivo = detectarArchivoEnMensaje(m);
+      if (!archivo) {
+        // Si no se detecta archivo, listar los disponibles
+        const r1 = await githubListarArchivos(e, repo);
+        if (r1.error) return J({ respuesta: `Error al listar archivos: ${r1.error}` });
+        const lista = r1.archivos.map(a => `· ${a.ruta}`).join('\n');
+        return J({
+          respuesta: `No identifiqué qué archivo quieres leer. Estos son los disponibles:\n\n${lista}\n\nDime "lee [nombre del archivo]" y lo abro.`,
+          herramientas_usadas: [{ tool: 'listar_source', ok: true }]
+        });
+      }
       const r1 = await githubLeerArchivo(e, repo, archivo);
       if (r1.error) return J({ respuesta: `Error al leer ${archivo}: ${r1.error}` });
       const contenido = r1.contenido.length > 8000 ? r1.contenido.substring(0, 8000) + `\n\n[... archivo truncado. ${r1.contenido.length} chars totales. Pide "lee completo ${archivo}" si necesitas verlo todo.]` : r1.contenido;
@@ -1255,7 +1255,6 @@ async function chat(r, e, c) {
       });
     }
 
-    // === MODOS ===
     if (i === 'modo') {
       const kvN = gKV(e, 'agente');
       const t = m.toLowerCase();
@@ -1275,14 +1274,12 @@ async function chat(r, e, c) {
       return J({ respuesta: 'Modos disponibles: "activa modo arquitecto", "activa modo intensivo", "activa modo ausente".' });
     }
 
-    // === ARQUITECTO (formato estructurado) ===
     if (i === 'arquitecto') {
       const kvN = gKV(e, 'agente');
       await kvN.put('modo_arquitecto', 'true', { expirationTtl: 3600 });
       // Caer al flujo normal del modelo (que leerá el flag y responderá en formato arquitecto)
     }
 
-    // === GUARDAR DATOS, IMAGEN, CREAR, MEJORAR, ETC ===
     if (i === 'guardar_datos') {
       const au = await opcional('autonomia');
       if (au && au.gestionarDatos) {
@@ -1343,7 +1340,7 @@ async function chat(r, e, c) {
       return J({ respuesta: 'Dime el área o el nombre del worker.', user_id: uid });
     }
 
-    // === FLUJO NORMAL DEL MODELO (charla, sugerencia, arquitecto) ===
+    // === FLUJO NORMAL DEL MODELO ===
     let perfilBase = '';
     if (e.KV) {
       try {
@@ -1428,7 +1425,6 @@ async function chat(r, e, c) {
       systemPrompt += `\n\n=== CACHÉ DE RELACIÓN (patrones entre el Comandante y yo) ===\n${cacheRelacion.substring(0, 3000)}`;
     }
 
-    // Leer flags de modos y añadir al prompt si aplica
     const kvM = gKV(e, 'agente');
     let modoArqActivo = false, modoIntActivo = false;
     try {
@@ -1541,9 +1537,6 @@ async function chat(r, e, c) {
   }
 }
 
-// ============================================================
-// EXPORT PRINCIPAL
-// ============================================================
 export default {
   async fetch(r, e, c) {
     if (r.method === 'OPTIONS') return new Response(null, { headers: CORS });
@@ -1554,6 +1547,7 @@ export default {
     }
 
     if (p === '/api/_diag' && r.method === 'GET') return diagnosticoVariables(r, e);
+    if (p === '/api/test_github' && r.method === 'GET') return testGithub(r, e);
     if (p.startsWith('/api/imagen/') && r.method === 'GET') return servirImagen(r, e);
 
     if (p === '/api/chat' && r.method === 'POST') return chat(r, e, c);
@@ -1576,7 +1570,7 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '17.0' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '18.0' });
 
     if (p === '/api/relacion/construir' && r.method === 'POST') {
       const uid = 'comandante';
@@ -1814,7 +1808,7 @@ export default {
         acciones_auto: ['indexar','migrar','analizar','encolar','publicar','simular_estrategia','ejecutar_etapa','test_500'],
         acciones_cron: ['pulso','ritmo'],
         modos_disponibles: ['arquitecto','intensivo','ausente'],
-        version: '17.0',
+        version: '18.0',
         ttls_actuales: { historial: TTL_HISTORIAL, contexto: TTL_CONTEXTO, resumenes: TTL_RESUMENES, correcciones: TTL_CORRECCIONES, estrategias: TTL_ESTRATEGIAS }
       });
     }
@@ -2008,22 +2002,16 @@ export default {
         }
       } catch (x) {}
 
-      // Sandbox (activo cada 2h en la noche)
       const sb = await opcional('sandbox');
       if (sb && sb.cronSandbox) { try { await sb.cronSandbox(e); } catch (x) {} }
 
-      // Auto-reparación (si autonomia.js la tiene)
       const au2 = await opcional('autonomia');
       if (au2 && au2.cronAutoReparacion) { try { await au2.cronAutoReparacion(e); } catch (x) {} }
-
-      // Pensamiento continuo (si autonomia.js la tiene — nueva función)
       if (au2 && au2.pensarYActuar) { try { await au2.pensarYActuar(e); } catch (x) {} }
 
-      // Publisher
       const pub = await opcional('publisher');
       if (pub && pub.cronPublicar) { try { await pub.cronPublicar(e); } catch (x) {} }
 
-      // Cola de tareas e informe
       const au = await opcional('autonomia');
       if (au && au.cronColaTareas) { try { await au.cronColaTareas(e); } catch (x) {} }
       if (au && au.informeDiario) { try { await au.informeDiario(e); } catch (x) {} }
