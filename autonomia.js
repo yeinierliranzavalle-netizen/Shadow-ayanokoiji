@@ -1,4 +1,5 @@
-// autonomia.js — Ciclo de vida de Ayanokōji Digital (v3 con protección de variables)
+// autonomia.js — Ciclo de vida de Ayanokōji Digital (v4 limpia)
+// Sin backup/restore de variables. La protección real está en wrangler.toml [vars].
 
 import { MODELO, MODELO_LIGERO, gDB, gKV } from './shared.js';
 import { consumir } from './presupuesto.js';
@@ -33,65 +34,16 @@ function cfHeaders(e) {
 function accountId(e) { return e.CF_ACCOUNT_ID; }
 
 // ============================================================
-// PROTECCIÓN DE VARIABLES DE TEXTO
-// Antes de un PUT que puede borrarlas, las guardamos en KV.
-// Después del PUT, las restauramos vía API de Cloudflare.
-// ============================================================
-async function backupVariablesTexto(e) {
-  const kv = gKV(e, 'agente');
-  if (!kv) return;
-  try {
-    await kv.put('vars_backup:GITHUB_BRANCH', e.GITHUB_BRANCH || 'main', { expirationTtl: 7 * 86400 });
-    await kv.put('vars_backup:GITHUB_REPO_BACKEND', e.GITHUB_REPO_BACKEND || '', { expirationTtl: 7 * 86400 });
-    await kv.put('vars_backup:GITHUB_REPO_FRONTEND', e.GITHUB_REPO_FRONTEND || '', { expirationTtl: 7 * 86400 });
-  } catch (x) {}
-}
-
-async function restaurarVariablesTexto(e, nombre) {
-  const kv = gKV(e, 'agente');
-  if (!kv) return;
-  if (!e.CF_API_TOKEN || !e.CF_ACCOUNT_ID) return;
-  try {
-    const vars = [
-      { key: 'GITHUB_BRANCH', valor: await kv.get('vars_backup:GITHUB_BRANCH') || 'main', tipo: 'plain_text' },
-      { key: 'GITHUB_REPO_BACKEND', valor: await kv.get('vars_backup:GITHUB_REPO_BACKEND') || '', tipo: 'plain_text' },
-      { key: 'GITHUB_REPO_FRONTEND', valor: await kv.get('vars_backup:GITHUB_REPO_FRONTEND') || '', tipo: 'plain_text' }
-    ];
-    for (const v of vars) {
-      if (!v.valor) continue;
-      try {
-        const url = `${CF_API}/accounts/${accountId(e)}/workers/scripts/${nombre}/settings`;
-        const getR = await fetch(url, { headers: { 'Authorization': `Bearer ${e.CF_API_TOKEN}` } });
-        if (!getR.ok) continue;
-        const settings = await getR.json();
-        const bindings = (settings.result?.bindings || []).filter(b => b.name !== v.key);
-        bindings.push({ name: v.key, type: v.tipo, text: v.valor });
-        await fetch(url, {
-          method: 'PATCH',
-          headers: {
-            'Authorization': `Bearer ${e.CF_API_TOKEN}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ bindings })
-        });
-      } catch (x) {}
-    }
-  } catch (x) {}
-}
-
-// ============================================================
-// GESTIÓN DE WORKERS (con protección)
+// GESTIÓN DE WORKERS
 // ============================================================
 export async function crearWorker(e, nombre, codigo) {
   try {
     if (!e.CF_API_TOKEN || !e.CF_ACCOUNT_ID) return { error: 'Falta CF_API_TOKEN o CF_ACCOUNT_ID.' };
     if (!nombre || !codigo) return { error: 'Faltan nombre o código.' };
-    await backupVariablesTexto(e);
     const url = `${CF_API}/accounts/${accountId(e)}/workers/scripts/${nombre}`;
     const r = await fetch(url, { method: 'PUT', headers: cfHeaders(e), body: codigo });
     const d = await r.json();
     if (!d.success) return { error: 'Cloudflare rechazó: ' + JSON.stringify(d.errors) };
-    await restaurarVariablesTexto(e, nombre);
     const db = gDB(e, 'agente');
     if (db) {
       try {
@@ -110,16 +62,10 @@ export async function crearWorker(e, nombre, codigo) {
 export async function actualizarWorker(e, nombre, codigo) {
   try {
     if (!e.CF_API_TOKEN || !e.CF_ACCOUNT_ID) return { error: 'Falta token.' };
-    // 1. Backup de variables antes de tocar nada
-    await backupVariablesTexto(e);
-    // 2. PUT del script
     const url = `${CF_API}/accounts/${accountId(e)}/workers/scripts/${nombre}`;
     const r = await fetch(url, { method: 'PUT', headers: cfHeaders(e), body: codigo });
     const d = await r.json();
     if (!d.success) return { error: 'Fallo: ' + JSON.stringify(d.errors) };
-    // 3. Restaurar variables después del PUT
-    await restaurarVariablesTexto(e, nombre);
-    // 4. Registrar en D1
     const db = gDB(e, 'agente');
     if (db) {
       try {
@@ -129,8 +75,8 @@ export async function actualizarWorker(e, nombre, codigo) {
           .bind(codigo.substring(0, 500), v, Date.now(), nombre).run();
       } catch (x) {}
     }
-    await registrarAccion(e, 'actualizar_worker', nombre, true, 'Actualizado con protección de variables');
-    return { ok: true, mensaje: `Worker \`${nombre}\` actualizado (variables protegidas).` };
+    await registrarAccion(e, 'actualizar_worker', nombre, true, 'Actualizado');
+    return { ok: true, mensaje: `Worker \`${nombre}\` actualizado.` };
   } catch (x) {
     await registrarAccion(e, 'actualizar_worker', nombre, false, x.message);
     return { error: x.message };
@@ -202,7 +148,7 @@ export async function revertir(e, nombre) {
 }
 
 // ============================================================
-// AUTO-MEJORA POR ÁREA
+// AUTO-MEJORA
 // ============================================================
 export async function autoMejorar(e, body) {
   try {
@@ -275,7 +221,7 @@ export async function analizarErrorRecurrente(e, tipoError, muestras) {
   if (codigo.error) return { error: 'No pude leer mi código: ' + codigo.error };
   if (!codigo.codigo || codigo.codigo.length < 500) return { error: 'Código vacío.' };
 
-  const prompt = `Eres Ayanokōji Digital. Detectaste un error recurrente en tu propio funcionamiento. Tu tarea es ARREGLARLO.
+  const prompt = `Eres Ayanokōji Digital. Detectaste un error recurrente. Tu tarea es ARREGLARLO.
 
 ERROR RECURRENTE: ${tipoError}
 VECES EN 1H: ${muestras.length} o más
@@ -312,10 +258,9 @@ export async function autoreparar(e, tipoError, muestras) {
   const kv = gKV(e, 'agente');
   if (!db || !kv) return { error: 'Falta DB o KV.' };
 
-  // Verificar flag de pausa (por si el Comandante decide pausar en el futuro)
   try {
     const pausada = await kv.get('auto_reparacion_pausada');
-    if (pausada === 'true') return { ok: false, error: 'Auto-reparación pausada por el Comandante.' };
+    if (pausada === 'true') return { ok: false, error: 'Auto-reparación pausada.' };
   } catch (x) {}
 
   const snap = await crearSnapshot(e, 'shadow-ayano');
@@ -338,15 +283,10 @@ export async function autoreparar(e, tipoError, muestras) {
     return { error: 'La IA no devolvió código válido.', analisis: textoAnalisis };
   }
 
-  // actualizarWorker ya protege las variables (backup + restore)
   const upd = await actualizarWorker(e, 'shadow-ayano', codigoPropuesto);
   if (!upd.ok) {
     const rev = await revertir(e, 'shadow-ayano');
-    return {
-      error: 'Despliegue falló: ' + (upd.error || ''),
-      revertido: rev.ok === true,
-      analisis: textoAnalisis
-    };
+    return { error: 'Despliegue falló: ' + (upd.error || ''), revertido: rev.ok === true, analisis: textoAnalisis };
   }
 
   let verificado = false;
@@ -363,7 +303,7 @@ export async function autoreparar(e, tipoError, muestras) {
 
   try {
     await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
-      .bind('autoreparacion', `✓ Reparación autónoma ${verificado ? 'verificada' : 'aplicada'}`,
+      .bind('autoreparacion', `✓ Reparación ${verificado ? 'verificada' : 'aplicada'}`,
         `Error: ${tipoError}\n\n${textoAnalisis.substring(0, 800)}`, Date.now()).run();
   } catch (x) {}
 
@@ -391,7 +331,7 @@ export async function cronAutoReparacion(e) {
 
   try {
     await db.prepare('INSERT INTO acciones(tipo,descripcion,exito,detalle,fecha) VALUES(?,?,?,?,?)')
-      .bind('cron_auto_reparacion', 'Intento auto-reparación: ' + errTop.tipo, r.ok ? 1 : 0,
+      .bind('cron_auto_reparacion', 'Reparación: ' + errTop.tipo, r.ok ? 1 : 0,
         (r.ok ? `Aplicado (${r.codigoAplicado} chars)` : (r.error || 'sin detalle')).substring(0, 500), Date.now()).run();
   } catch (x) {}
 }
@@ -875,7 +815,7 @@ export async function cronColaTareas(e) {
           continue;
         }
         const res = await ai.run(MODELO_LIGERO, {
-          messages: [{ role: 'user', content: `Como Ayanokōji Digital, ejecuta o planifica esta tarea. Reporta qué hiciste.\n\nTarea: ${t.descripcion}\n\nMáximo 200 palabras.` }],
+          messages: [{ role: 'user', content: `Como Ayanokōji Digital, ejecuta o planifica esta tarea.\n\nTarea: ${t.descripcion}\n\nMáximo 200 palabras.` }],
           max_tokens: 400,
           temperature: 0.5
         });
