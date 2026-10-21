@@ -3,6 +3,7 @@ import { subir, procesar, resumir, verProceso, retomar, cronRetomar, cronAutonom
 import { estadoPresupuesto, consumir } from './presupuesto.js';
 import { detectarIntencion, construirSystemPrompt, identificarArea, AREAS } from './nucleo.js';
 import { TOOLS, parsearInvocaciones, herramientaExiste, herramientaRequiereAprobacion } from './tools.js';
+import { verificarSalud, cronSalud, cronSaludRapido, modoCacheActivo, estadoSalud, bufferEscritura, sincronizarBuffer } from './salud.js';
 
 function extraerRespuesta(res) {
   if (!res) return '';
@@ -15,10 +16,10 @@ function extraerRespuesta(res) {
     if (msg.content === null && typeof msg.reasoning === 'string' && msg.reasoning.trim().length > 0) return msg.reasoning;
     if (typeof c.text === 'string' && c.text.trim().length > 0) return c.text;
   }
-  if (typeof res.result?.response === 'string' && res.result.response.length > 0) return res.result.response;
+  if (typeof res.result?.response === 'string') return res.result.response;
   if (res.result?.choices?.[0]?.message?.content && typeof res.result.choices[0].message.content === 'string') return res.result.choices[0].message.content;
   if (res.result?.choices?.[0]?.message?.reasoning && typeof res.result.choices[0].message.reasoning === 'string') return res.result.choices[0].message.reasoning;
-  if (typeof res.output === 'string' && res.output.length > 0) return res.output;
+  if (typeof res.output === 'string') return res.output;
   return '';
 }
 
@@ -29,6 +30,7 @@ async function opcional(nombre) {
     if (nombre === 'publisher' || nombre === './publisher.js') return await import('./publisher.js');
     if (nombre === 'sandbox' || nombre === './sandbox.js') return await import('./sandbox.js');
     if (nombre === 'examen' || nombre === './examen.js') return await import('./examen.js');
+    if (nombre === 'salud' || nombre === './salud.js') return await import('./salud.js');
     return null;
   } catch (e) { return null; }
 }
@@ -45,25 +47,41 @@ const TTL_CONTEXTO = 1800;
 const TTL_RESUMENES = 1800;
 const TTL_CORRECCIONES = 3600;
 const TTL_ESTRATEGIAS = 3600;
+const TTL_DRAFT = 24 * 3600;
 
-const ARCHIVOS_BACKEND = ['worker.js', 'nucleo.js', 'shared.js', 'proc.js', 'autonomia.js', 'tools.js', 'doctrina.js', 'identidad.js', 'presupuesto.js', 'notify.js', 'publisher.js', 'social.js', 'sandbox.js', 'examen.js'];
+const ARCHIVOS_BACKEND = ['worker.js', 'nucleo.js', 'shared.js', 'proc.js', 'autonomia.js', 'tools.js', 'doctrina.js', 'identidad.js', 'presupuesto.js', 'notify.js', 'publisher.js', 'social.js', 'sandbox.js', 'examen.js', 'salud.js'];
 const ARCHIVOS_FRONTEND = ['index.html', 'styles.css', 'app.js'];
 
 async function conCache(e, clave, ttlSeg, fn) {
   const kv = gKV(e, 'agente');
+  const modoCache = await modoCacheActivo(e);
+
   if (kv) {
     try {
       const cached = await kv.get('cache:' + clave);
-      if (cached) { try { return JSON.parse(cached); } catch (x) {} }
+      if (cached) {
+        try { return JSON.parse(cached); } catch (x) {}
+      }
     } catch (x) {}
   }
+
+  if (modoCache) return null;
+
   try {
     const dato = await fn();
     if (kv && dato !== undefined && dato !== null) {
       try { await kv.put('cache:' + clave, JSON.stringify(dato), { expirationTtl: ttlSeg }); } catch (x) {}
     }
     return dato;
-  } catch (x) { return null; }
+  } catch (x) {
+    if (kv) {
+      try {
+        const cached = await kv.get('cache:' + clave);
+        if (cached) { try { return JSON.parse(cached); } catch (y) {} }
+      } catch (y) {}
+    }
+    return null;
+  }
 }
 
 async function invalidarCache(e, prefijo) {
@@ -77,6 +95,35 @@ async function invalidarCache(e, prefijo) {
 
 function elegirModelo(mensaje, intencion, iteracion) {
   return MODELO;
+}
+
+// ============================================================
+// GUARDAR MENSAJE INMEDIATO (con buffer si D1 falla)
+// ============================================================
+async function guardarMensajeInmediato(e, uid, rol, contenido) {
+  const fecha = Date.now();
+  const db = gDB(e, 'agente');
+  const kv = gKV(e, 'agente');
+
+  if (db) {
+    try {
+      const maxOrd = await db.prepare('SELECT MAX(orden) as o FROM historial_largo WHERE user_id=?').bind(uid).first();
+      const ord = (maxOrd && maxOrd.o != null) ? maxOrd.o + 1 : fecha;
+      await db.prepare('INSERT INTO historial_largo(user_id,rol,contenido,orden,fecha) VALUES(?,?,?,?,?)')
+        .bind(uid, rol, contenido.substring(0, 4000), ord, fecha).run();
+      return { ok: true, via: 'd1', fecha };
+    } catch (x) {
+      if (kv) {
+        try {
+          const payload = { tabla: 'historial_largo', datos: { user_id: uid, rol, contenido: contenido.substring(0, 4000), orden: fecha, fecha }, ts: fecha };
+          await kv.put('buffer:escritura:' + fecha + ':' + Math.random().toString(36).substring(7), JSON.stringify(payload), { expirationTtl: 7 * 86400 });
+          return { ok: true, via: 'buffer', fecha };
+        } catch (y) {}
+      }
+      return { ok: false, error: x.message, fecha };
+    }
+  }
+  return { ok: false, error: 'D1 no disponible', fecha };
 }
 
 async function construirCacheRelacion(e, uid) {
@@ -161,10 +208,6 @@ async function autoResumenPorInactividad(e) {
       .bind('comandante', Date.now(), '[AUTO-INACTIVIDAD] ' + resumen, ultimoResumen, ultimaActividad).run();
     await kv.put('ultimo_resumen_inactividad', String(Date.now()), { expirationTtl: 30 * 86400 });
     await invalidarCache(e, 'resumenes:');
-    try {
-      await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
-        .bind('auto_resumen', 'Resumen automático guardado', `Se resumió la conversación de las últimas horas. (${resumen.length} chars)`, Date.now()).run();
-    } catch (x) {}
   } catch (x) {}
 }
 
@@ -826,7 +869,7 @@ async function rEst(e, uid) {
       try { confianza = parseInt(await e.KV.get('confianza:actual') || '0'); } catch (x) {}
     }
   } catch (x) {}
-  return J({ respuesta: `Sistema activo (v19.0, modelo 70B + caché TTL largo). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas: ${tareas}. Workers: ${workers}. Notif sin leer: ${notif}. Confianza: ${confianza}/100.` });
+  return J({ respuesta: `Sistema activo (v20.0, modelo 70B + caché TTL largo + salud resiliente). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas: ${tareas}. Workers: ${workers}. Notif sin leer: ${notif}. Confianza: ${confianza}/100.` });
 }
 
 async function rLeer(e, uid) {
@@ -924,7 +967,14 @@ async function historialLargo(r, e) {
     const limite = parseInt(u.searchParams.get('limite') || '100');
     const db = gDB(e, 'agente');
     const r1 = await db.prepare('SELECT rol,contenido,orden,fecha FROM historial_largo WHERE user_id=? ORDER BY orden DESC LIMIT ?').bind(uid, limite).all();
-    return J({ total: r1.results.length, historial: r1.results.reverse() });
+    const formateados = (r1.results || []).map(m => ({
+      rol: m.rol,
+      contenido: m.contenido,
+      orden: m.orden,
+      fecha: m.fecha,
+      fecha_formateada: new Date(m.fecha).toISOString().replace('T', ' ').substring(0, 19)
+    }));
+    return J({ total: formateados.length, historial: formateados.reverse() });
   } catch (x) { return J({ error: x.message }); }
 }
 
@@ -983,7 +1033,7 @@ async function diagnostico(r, e) {
     let kvCount = 'sin kv';
     try { const lista = await kvN.list({ limit: 1000 }); kvCount = lista.keys.length; } catch (x) {}
     const modulos = {};
-    for (const m of ['social','autonomia','publisher','sandbox','examen']) {
+    for (const m of ['social','autonomia','publisher','sandbox','examen','salud']) {
       const x = await opcional(m);
       modulos[m] = !!x;
     }
@@ -1102,7 +1152,7 @@ async function diagnosticoVariables(r, e) {
   } catch (x) {}
   return J({
     timestamp: new Date().toISOString(),
-    version: '19.0',
+    version: '20.0',
     token_presente: !!e.GITHUB_TOKEN,
     token_longitud: e.GITHUB_TOKEN ? e.GITHUB_TOKEN.length : 0,
     repo_backend_presente: !!e.GITHUB_REPO_BACKEND,
@@ -1115,7 +1165,7 @@ async function diagnosticoVariables(r, e) {
     cache_activo: true,
     modelo_ligero_actual: MODELO_LIGERO,
     modelo_chat: MODELO,
-    ttls: { historial: TTL_HISTORIAL, contexto: TTL_CONTEXTO, resumenes: TTL_RESUMENES, correcciones: TTL_CORRECCIONES, estrategias: TTL_ESTRATEGIAS },
+    ttls: { historial: TTL_HISTORIAL, contexto: TTL_CONTEXTO, resumenes: TTL_RESUMENES, correcciones: TTL_CORRECCIONES, estrategias: TTL_ESTRATEGIAS, draft: TTL_DRAFT },
     cache_relacion_existe: !!cacheRelacion,
     cache_relacion_longitud: cacheRelacion ? cacheRelacion.length : 0,
     cache_relacion_fecha: cacheRelacionFecha || null,
@@ -1162,7 +1212,11 @@ async function chat(r, e, c) {
     const kvActividad = gKV(e, 'agente');
     if (kvActividad) {
       try { await kvActividad.put('ultima_actividad_comandante', String(Date.now()), { expirationTtl: 30 * 86400 }); } catch (x) {}
+      try { await kvActividad.delete('draft:' + uid); } catch (x) {}
     }
+
+    // === GUARDAR MENSAJE INMEDIATAMENTE (antes de procesar la IA) ===
+    await guardarMensajeInmediato(e, uid, 'user', m);
 
     const tLower = m.toLowerCase().trim();
     const aprueba = /^(s[ií]|dale|adelante|hazlo|confirmo|aprobado|ok|procede|ejecuta|yes)$/i.test(tLower);
@@ -1184,11 +1238,7 @@ async function chat(r, e, c) {
         const textoResp = exito
           ? `Ejecutado: **${pendiente.tool}**.\n\nResultado: ${JSON.stringify(resultado.resultado || {}).substring(0, 1500)}`
           : `Falló **${pendiente.tool}**: ${resultado.error}`;
-        if (e.DB) {
-          try {
-            await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)").bind(uid, m, textoResp, Date.now()).run();
-          } catch (x) {}
-        }
+        await guardarMensajeInmediato(e, uid, 'assistant', textoResp);
         return J({ respuesta: textoResp, user_id: uid, intencion: 'aprobacion' });
       }
     }
@@ -1197,7 +1247,9 @@ async function chat(r, e, c) {
       const pendiente = await leerAprobacionPendiente(e, uid);
       if (pendiente) {
         await limpiarAprobacionPendiente(e, uid);
-        return J({ respuesta: `Cancelado: **${pendiente.tool}**. No se ejecutó.`, user_id: uid, intencion: 'cancelacion' });
+        const textoResp = `Cancelado: **${pendiente.tool}**. No se ejecutó.`;
+        await guardarMensajeInmediato(e, uid, 'assistant', textoResp);
+        return J({ respuesta: textoResp, user_id: uid, intencion: 'cancelacion' });
       }
     }
 
@@ -1214,10 +1266,9 @@ async function chat(r, e, c) {
       const r1 = await githubListarArchivos(e, repo);
       if (r1.error) return J({ respuesta: `Error al listar: ${r1.error}` });
       const lista = r1.archivos.map(a => `· ${a.ruta} (${(a.tamaño/1024).toFixed(1)} KB)`).join('\n');
-      return J({
-        respuesta: `Archivos del repo ${esFe ? 'frontend' : 'backend'} (${r1.total}):\n\n${lista}`,
-        herramientas_usadas: [{ tool: 'listar_source', ok: true }]
-      });
+      const textoResp = `Archivos del repo ${esFe ? 'frontend' : 'backend'} (${r1.total}):\n\n${lista}`;
+      await guardarMensajeInmediato(e, uid, 'assistant', textoResp);
+      return J({ respuesta: textoResp, herramientas_usadas: [{ tool: 'listar_source', ok: true }] });
     }
 
     if (i === 'leer_codigo') {
@@ -1229,18 +1280,16 @@ async function chat(r, e, c) {
         const r1 = await githubListarArchivos(e, repo);
         if (r1.error) return J({ respuesta: `Error al listar archivos: ${r1.error}` });
         const lista = r1.archivos.map(a => `· ${a.ruta}`).join('\n');
-        return J({
-          respuesta: `No identifiqué qué archivo quieres leer. Estos son los disponibles:\n\n${lista}\n\nDime "lee [nombre del archivo]" y lo abro.`,
-          herramientas_usadas: [{ tool: 'listar_source', ok: true }]
-        });
+        const textoResp = `No identifiqué qué archivo quieres leer. Estos son los disponibles:\n\n${lista}\n\nDime "lee [nombre del archivo]" y lo abro.`;
+        await guardarMensajeInmediato(e, uid, 'assistant', textoResp);
+        return J({ respuesta: textoResp, herramientas_usadas: [{ tool: 'listar_source', ok: true }] });
       }
       const r1 = await githubLeerArchivo(e, repo, archivo);
       if (r1.error) return J({ respuesta: `Error al leer ${archivo}: ${r1.error}` });
       const contenido = r1.contenido.length > 8000 ? r1.contenido.substring(0, 8000) + `\n\n[... archivo truncado. ${r1.contenido.length} chars totales.]` : r1.contenido;
-      return J({
-        respuesta: `**${archivo}** (${r1.tamaño} chars):\n\n\`\`\`js\n${contenido}\n\`\`\``,
-        herramientas_usadas: [{ tool: 'leer_source', ok: true }]
-      });
+      const textoResp = `**${archivo}** (${r1.tamaño} chars):\n\n\`\`\`js\n${contenido}\n\`\`\``;
+      await guardarMensajeInmediato(e, uid, 'assistant', textoResp);
+      return J({ respuesta: textoResp, herramientas_usadas: [{ tool: 'leer_source', ok: true }] });
     }
 
     if (i === 'escribir_codigo') {
@@ -1253,29 +1302,30 @@ async function chat(r, e, c) {
         razon: 'Modificar código en producción requiere aprobación'
       };
       await guardarAprobacionPendiente(e, uid, inv);
-      return J({
-        respuesta: `Voy a modificar **${archivo}**. Necesito que me digas exactamente qué cambio hacer. Escribe: "sí, cambia X por Y en ${archivo}" y lo ejecuto.`,
-        aprobacion_pendiente: 'escribir_source'
-      });
+      const textoResp = `Voy a modificar **${archivo}**. Necesito que me digas exactamente qué cambio hacer. Escribe: "sí, cambia X por Y en ${archivo}" y lo ejecuto.`;
+      await guardarMensajeInmediato(e, uid, 'assistant', textoResp);
+      return J({ respuesta: textoResp, aprobacion_pendiente: 'escribir_source' });
     }
 
     if (i === 'modo') {
       const kvN = gKV(e, 'agente');
       const t = m.toLowerCase();
+      let textoResp = '';
       if (t.includes('arquitecto')) {
         await kvN.put('modo_arquitecto', 'true', { expirationTtl: 86400 });
-        return J({ respuesta: 'Modo Arquitecto **activado** por 24h.', modo_activo: 'arquitecto' });
-      }
-      if (t.includes('intensivo')) {
+        textoResp = 'Modo Arquitecto **activado** por 24h.';
+      } else if (t.includes('intensivo')) {
         await kvN.put('modo_intensivo', 'true', { expirationTtl: 86400 });
         await kvN.put('modo_intensivo_inicio', String(Date.now()), { expirationTtl: 86400 });
-        return J({ respuesta: 'Modo Intensivo **activado** por 24h. Hasta 5 preguntas de criterio al día.', modo_activo: 'intensivo' });
-      }
-      if (t.includes('ausente')) {
+        textoResp = 'Modo Intensivo **activado** por 24h. Hasta 5 preguntas de criterio al día.';
+      } else if (t.includes('ausente')) {
         await kvN.put('modo_ausente', 'true', { expirationTtl: 86400 * 7 });
-        return J({ respuesta: 'Modo Ausente **activado** por 7 días.', modo_activo: 'ausente' });
+        textoResp = 'Modo Ausente **activado** por 7 días.';
+      } else {
+        textoResp = 'Modos disponibles: "activa modo arquitecto", "activa modo intensivo", "activa modo ausente".';
       }
-      return J({ respuesta: 'Modos disponibles: "activa modo arquitecto", "activa modo intensivo", "activa modo ausente".' });
+      await guardarMensajeInmediato(e, uid, 'assistant', textoResp);
+      return J({ respuesta: textoResp, modo_activo: t.includes('arquitecto') ? 'arquitecto' : t.includes('intensivo') ? 'intensivo' : t.includes('ausente') ? 'ausente' : null });
     }
 
     if (i === 'arquitecto') {
@@ -1289,12 +1339,7 @@ async function chat(r, e, c) {
         const r1 = await au.gestionarDatos(e, m, uid);
         if (r1) {
           if (au.registrarAccion) await au.registrarAccion(e, 'guardar_datos', m.substring(0, 100), true, r1.respuesta);
-          if (e.DB) {
-            try {
-              await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)")
-                .bind(uid, m, r1.respuesta, Date.now()).run();
-            } catch (x) {}
-          }
+          await guardarMensajeInmediato(e, uid, 'assistant', r1.respuesta);
           return J({ respuesta: r1.respuesta, user_id: uid, intencion: i });
         }
       }
@@ -1303,6 +1348,7 @@ async function chat(r, e, c) {
     if (i === 'imagen') {
       const prompt = m.replace(/^.*?(?:imagen|foto|dibujo|ilustracion|ilustración|render)\s*(?:de|:)?\s*/i, '').trim() || m;
       const r1 = await generarImagen(e, prompt, uid);
+      await guardarMensajeInmediato(e, uid, 'assistant', r1.respuesta);
       return J({ respuesta: r1.respuesta, user_id: uid, intencion: 'imagen' });
     }
 
@@ -1311,7 +1357,9 @@ async function chat(r, e, c) {
       const nombre = m.match(/worker\s+["']?([\w-]+)["']?/i)?.[1] || m.match(/crea\s+["']?([\w-]+)["']?/i)?.[1];
       if (au && nombre) {
         const r1 = await au.crearWorker(e, nombre, '// Worker creado por Ayanokōji\nexport default { async fetch(req) { return new Response("Hola desde " + req.url); } }');
-        return J({ respuesta: r1.mensaje || r1.error, user_id: uid, intencion: 'crear' });
+        const textoResp = r1.mensaje || r1.error;
+        await guardarMensajeInmediato(e, uid, 'assistant', textoResp);
+        return J({ respuesta: textoResp, user_id: uid, intencion: 'crear' });
       }
       if (!au) return J({ respuesta: 'Necesito que subas `autonomia.js` primero.', user_id: uid });
     }
@@ -1327,10 +1375,9 @@ async function chat(r, e, c) {
         });
       }
       const r1 = await au.autoMejorar(e, { nombre: 'shadow-ayano', area: area.archivo, instrucciones: m, autoDesplegar: false });
-      return J({
-        respuesta: `Área identificada: *${area.area}* → archivo \`${area.archivo}\`.\n\n${r1.mensaje || r1.error || 'Sin resultado.'}`,
-        user_id: uid, intencion: 'mejorar_area', area: area.area, archivo: area.archivo
-      });
+      const textoResp = `Área identificada: *${area.area}* → archivo \`${area.archivo}\`.\n\n${r1.mensaje || r1.error || 'Sin resultado.'}`;
+      await guardarMensajeInmediato(e, uid, 'assistant', textoResp);
+      return J({ respuesta: textoResp, user_id: uid, intencion: 'mejorar_area', area: area.area, archivo: area.archivo });
     }
 
     if (i === 'mejorar' || i === 'desplegar') {
@@ -1338,7 +1385,9 @@ async function chat(r, e, c) {
       const nombre = m.match(/worker\s+["']?([\w-]+)["']?/i)?.[1];
       if (au && nombre) {
         const r1 = await au.leerCodigoWorker(e, nombre);
-        return J({ respuesta: r1.mensaje || r1.codigo?.substring(0, 500) || r1.error, user_id: uid, intencion: 'leer_codigo' });
+        const textoResp = r1.mensaje || r1.codigo?.substring(0, 500) || r1.error;
+        await guardarMensajeInmediato(e, uid, 'assistant', textoResp);
+        return J({ respuesta: textoResp, user_id: uid, intencion: 'leer_codigo' });
       }
       return J({ respuesta: 'Dime el área o el nombre del worker.', user_id: uid });
     }
@@ -1356,7 +1405,8 @@ async function chat(r, e, c) {
     let ventana = [];
     const ventanaRaw = await conCache(e, `historial:${uid}:${VENTANA_SEGURA}`, TTL_HISTORIAL, async () => {
       try {
-        const r1 = await e.DB.prepare('SELECT rol, contenido FROM historial_largo WHERE user_id=? ORDER BY orden DESC LIMIT ?').bind(uid, VENTANA_SEGURA).all();
+        // OFFSET 1: excluye el mensaje del usuario que acaba de guardarse (para no duplicar)
+        const r1 = await e.DB.prepare('SELECT rol, contenido FROM historial_largo WHERE user_id=? ORDER BY orden DESC LIMIT ? OFFSET 1').bind(uid, VENTANA_SEGURA).all();
         return (r1.results || []).reverse();
       } catch (x) { return null; }
     });
@@ -1505,15 +1555,8 @@ async function chat(r, e, c) {
       } catch (x) {}
     }
 
-    if (e.DB) {
-      try {
-        await e.DB.prepare("INSERT INTO historial(user_id,mensaje,respuesta,fecha) VALUES(?,?,?,?)").bind(uid, m, respuestaFinal, Date.now()).run();
-        const maxOrd = await e.DB.prepare('SELECT MAX(orden) as o FROM historial_largo WHERE user_id=?').bind(uid).first();
-        let ord = (maxOrd && maxOrd.o != null) ? maxOrd.o : 0;
-        await e.DB.prepare('INSERT INTO historial_largo(user_id,rol,contenido,orden,fecha) VALUES(?,?,?,?,?)').bind(uid, 'user', m, ord + 1, Date.now()).run();
-        await e.DB.prepare('INSERT INTO historial_largo(user_id,rol,contenido,orden,fecha) VALUES(?,?,?,?,?)').bind(uid, 'assistant', respuestaFinal, ord + 2, Date.now()).run();
-      } catch (x) {}
-    }
+    // Guardar respuesta del asistente (con buffer si D1 falla)
+    await guardarMensajeInmediato(e, uid, 'assistant', respuestaFinal);
 
     try { await invalidarCache(e, `historial:${uid}`); } catch (x) {}
 
@@ -1574,7 +1617,55 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '19.0' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '20.0' });
+
+    // === DRAFT (guardar mientras escribes) ===
+    if (p === '/api/draft' && r.method === 'POST') {
+      const b = await r.json();
+      const uid = b.user_id || 'comandante';
+      const kvN = gKV(e, 'agente');
+      if (kvN && b.texto) {
+        try {
+          await kvN.put('draft:' + uid, JSON.stringify({ texto: b.texto.substring(0, 4000), ts: Date.now() }), { expirationTtl: TTL_DRAFT });
+          return J({ ok: true, guardado: true });
+        } catch (x) { return J({ error: x.message }); }
+      }
+      return J({ ok: true, guardado: false });
+    }
+    if (p === '/api/draft' && r.method === 'GET') {
+      const uu = new URL(r.url);
+      const uid = uu.searchParams.get('user_id') || 'comandante';
+      const kvN = gKV(e, 'agente');
+      if (!kvN) return J({ draft: null });
+      try {
+        const raw = await kvN.get('draft:' + uid);
+        return J({ draft: raw ? JSON.parse(raw) : null });
+      } catch (x) { return J({ draft: null }); }
+    }
+    if (p === '/api/draft' && r.method === 'DELETE') {
+      const uu = new URL(r.url);
+      const uid = uu.searchParams.get('user_id') || 'comandante';
+      const kvN = gKV(e, 'agente');
+      if (kvN) { try { await kvN.delete('draft:' + uid); } catch (x) {} }
+      return J({ ok: true });
+    }
+
+    // === SALUD ===
+    if (p === '/api/salud' && r.method === 'GET') return J(await estadoSalud(e));
+    if (p === '/api/salud/verificar' && r.method === 'POST') return J(await verificarSalud(e));
+    if (p === '/api/salud/destilar' && r.method === 'POST') {
+      const b = await r.json();
+      const sa = await opcional('salud');
+      if (!sa) return J({ error: 'salud.js no instalado.' });
+      return J(await sa.destilarHistorial(e, b.dias || 30));
+    }
+    if (p === '/api/salud/sincronizar' && r.method === 'POST') {
+      return J(await sincronizarBuffer(e));
+    }
+    if (p === '/api/salud/modo_cache' && r.method === 'GET') {
+      const activo = await modoCacheActivo(e);
+      return J({ modo_cache_activo: activo });
+    }
 
     if (p === '/api/relacion/construir' && r.method === 'POST') {
       const uid = 'comandante';
@@ -1582,9 +1673,9 @@ export default {
       return J(r1 || { error: 'No se pudo construir.' });
     }
     if (p === '/api/relacion/leer' && r.method === 'GET') {
-      const kv = gKV(e, 'agente');
-      const cache = await kv.get('relacion:cache');
-      const fecha = await kv.get('relacion:cache_fecha');
+      const kvN = gKV(e, 'agente');
+      const cache = await kvN.get('relacion:cache');
+      const fecha = await kvN.get('relacion:cache_fecha');
       return J({ existe: !!cache, longitud: cache ? cache.length : 0, fecha, contenido: cache || null });
     }
 
@@ -1651,12 +1742,6 @@ export default {
           }
         } catch (x) {}
       }
-      try {
-        const sb = await opcional('sandbox');
-        if (sb && sb.estadoActual) {
-          salida.etapa_actual = await sb.estadoActual(e);
-        }
-      } catch (x) {}
       return J(salida);
     }
 
@@ -1806,14 +1891,14 @@ export default {
 
     if (p === '/api/componentes' && r.method === 'GET') {
       return J({
-        pestanas: ['chat','sandbox','estrategias','shadow','stats','actividad','decisiones','ideas','bandeja','calibracion'],
+        pestanas: ['chat','calibracion','sandbox','estrategias','shadow','stats','actividad','decisiones','ideas','bandeja'],
         botones: ['subir','imagen','indexar','migrar','diagnostico','procesos','contexto','corregir','limpiar'],
         acciones_chat: ['enviar_mensaje','cargar_historial','corregir_voz','generar_imagen','activar_modo'],
         acciones_auto: ['indexar','migrar','analizar','encolar','publicar','simular_estrategia','ejecutar_etapa','test_500'],
         acciones_cron: ['pulso','ritmo'],
         modos_disponibles: ['arquitecto','intensivo','ausente'],
-        version: '19.0',
-        ttls_actuales: { historial: TTL_HISTORIAL, contexto: TTL_CONTEXTO, resumenes: TTL_RESUMENES, correcciones: TTL_CORRECCIONES, estrategias: TTL_ESTRATEGIAS }
+        version: '20.0',
+        ttls_actuales: { historial: TTL_HISTORIAL, contexto: TTL_CONTEXTO, resumenes: TTL_RESUMENES, correcciones: TTL_CORRECCIONES, estrategias: TTL_ESTRATEGIAS, draft: TTL_DRAFT }
       });
     }
 
@@ -1993,8 +2078,8 @@ export default {
       return J(await m.verConfianza(e));
     }
     if (p === '/api/confianza/historial' && r.method === 'GET') {
-      const kv = gKV(e, 'agente');
-      const h = JSON.parse(await kv.get('confianza:historial') || '[]');
+      const kvN = gKV(e, 'agente');
+      const h = JSON.parse(await kvN.get('confianza:historial') || '[]');
       return J({ ok: true, total: h.length, historial: h.slice(0, 50) });
     }
 
@@ -2007,8 +2092,8 @@ export default {
       return J(await m.leerDiario(e, limite));
     }
     if (p === '/api/lecciones/leer' && r.method === 'GET') {
-      const kv = gKV(e, 'agente');
-      const lecciones = JSON.parse(await kv.get('identidad:lecciones') || '[]');
+      const kvN = gKV(e, 'agente');
+      const lecciones = JSON.parse(await kvN.get('identidad:lecciones') || '[]');
       return J({ ok: true, total: lecciones.length, lecciones: lecciones.slice(0, 30) });
     }
     if (p === '/api/deseos/leer' && r.method === 'GET') {
@@ -2083,6 +2168,11 @@ export default {
           await construirCacheRelacion(e, 'comandante');
         }
       } catch (x) {}
+
+      // SALUD: cada 6h completa, cada 2min rápida (con throttle interno)
+      const sa = await opcional('salud');
+      if (sa && sa.cronSalud) { try { await sa.cronSalud(e); } catch (x) {} }
+      if (sa && sa.cronSaludRapido) { try { await sa.cronSaludRapido(e); } catch (x) {} }
 
       const sb = await opcional('sandbox');
       if (sb && sb.cronSandbox) { try { await sb.cronSandbox(e); } catch (x) {} }
