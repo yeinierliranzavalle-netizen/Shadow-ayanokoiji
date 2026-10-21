@@ -1,7 +1,32 @@
-import { MODELO_LIGERO, J, gDB, gKV } from './shared.js';
+// autonomia.js — El ciclo de vida de Ayanokōji Digital
+// Incluye: gestión de workers, auto-mejora, auto-reparación, pensamiento continuo,
+// mundo interno (diario, lecciones, deseos), sistema de confianza y misión.
+
+import { MODELO, MODELO_LIGERO, gDB, gKV } from './shared.js';
 import { consumir } from './presupuesto.js';
 
 const CF_API = 'https://api.cloudflare.com/client/v4';
+
+// ============================================================
+// HELPER: Extracción robusta de respuesta del modelo
+// ============================================================
+function extraerRespuesta(res) {
+  if (!res) return '';
+  if (typeof res === 'string') return res;
+  if (typeof res.response === 'string' && res.response.length > 0) return res.response;
+  if (res.choices && res.choices[0]) {
+    const c = res.choices[0];
+    const msg = c.message || {};
+    if (typeof msg.content === 'string' && msg.content.trim().length > 0) return msg.content;
+    if (msg.content === null && typeof msg.reasoning === 'string' && msg.reasoning.trim().length > 0) return msg.reasoning;
+    if (typeof c.text === 'string' && c.text.trim().length > 0) return c.text;
+  }
+  if (typeof res.result?.response === 'string' && res.result.response.length > 0) return res.result.response;
+  if (res.result?.choices?.[0]?.message?.content && typeof res.result.choices[0].message.content === 'string') return res.result.choices[0].message.content;
+  if (res.result?.choices?.[0]?.message?.reasoning && typeof res.result.choices[0].message.reasoning === 'string') return res.result.choices[0].message.reasoning;
+  if (typeof res.output === 'string' && res.output.length > 0) return res.output;
+  return '';
+}
 
 function cfHeaders(e) {
   return {
@@ -12,7 +37,90 @@ function cfHeaders(e) {
 
 function accountId(e) { return e.CF_ACCOUNT_ID; }
 
-// ============ SNAPSHOT Y REVERSIÓN ============
+// ============================================================
+// GESTIÓN DE WORKERS
+// ============================================================
+export async function crearWorker(e, nombre, codigo) {
+  try {
+    if (!e.CF_API_TOKEN || !e.CF_ACCOUNT_ID) return { error: 'Falta CF_API_TOKEN o CF_ACCOUNT_ID.' };
+    if (!nombre || !codigo) return { error: 'Faltan nombre o código.' };
+    const url = `${CF_API}/accounts/${accountId(e)}/workers/scripts/${nombre}`;
+    const r = await fetch(url, { method: 'PUT', headers: cfHeaders(e), body: codigo });
+    const d = await r.json();
+    if (!d.success) return { error: 'Cloudflare rechazó: ' + JSON.stringify(d.errors) };
+    const db = gDB(e, 'agente');
+    if (db) {
+      try {
+        await db.prepare('INSERT OR REPLACE INTO workers_registrados(nombre,url,codigo,version,activo,creado,actualizado) VALUES(?,?,?,?,?,?,?)')
+          .bind(nombre, `${nombre}.workers.dev`, codigo.substring(0, 500), 1, 1, Date.now(), Date.now()).run();
+      } catch (x) {}
+    }
+    await registrarAccion(e, 'crear_worker', nombre, true, 'Worker desplegado');
+    return { ok: true, mensaje: `Worker \`${nombre}\` creado y desplegado.`, url: `${nombre}.workers.dev` };
+  } catch (x) {
+    await registrarAccion(e, 'crear_worker', nombre, false, x.message);
+    return { error: x.message };
+  }
+}
+
+export async function actualizarWorker(e, nombre, codigo) {
+  try {
+    if (!e.CF_API_TOKEN || !e.CF_ACCOUNT_ID) return { error: 'Falta token.' };
+    const url = `${CF_API}/accounts/${accountId(e)}/workers/scripts/${nombre}`;
+    const r = await fetch(url, { method: 'PUT', headers: cfHeaders(e), body: codigo });
+    const d = await r.json();
+    if (!d.success) return { error: 'Fallo: ' + JSON.stringify(d.errors) };
+    const db = gDB(e, 'agente');
+    if (db) {
+      try {
+        const w = await db.prepare('SELECT version FROM workers_registrados WHERE nombre=?').bind(nombre).first();
+        const v = w ? (w.version + 1) : 1;
+        await db.prepare('UPDATE workers_registrados SET codigo=?, version=?, actualizado=? WHERE nombre=?')
+          .bind(codigo.substring(0, 500), v, Date.now(), nombre).run();
+      } catch (x) {}
+    }
+    await registrarAccion(e, 'actualizar_worker', nombre, true, 'Actualizado');
+    return { ok: true, mensaje: `Worker \`${nombre}\` actualizado.` };
+  } catch (x) {
+    await registrarAccion(e, 'actualizar_worker', nombre, false, x.message);
+    return { error: x.message };
+  }
+}
+
+export async function leerCodigoWorker(e, nombre) {
+  try {
+    if (!e.CF_API_TOKEN || !e.CF_ACCOUNT_ID) return { error: 'Falta token.' };
+    const url = `${CF_API}/accounts/${accountId(e)}/workers/scripts/${nombre}/content`;
+    const r = await fetch(url, { headers: { 'Authorization': `Bearer ${e.CF_API_TOKEN}` } });
+    if (!r.ok) return { error: 'Cloudflare devolvió ' + r.status };
+    const codigo = await r.text();
+    return { ok: true, codigo, longitud: codigo.length };
+  } catch (x) {
+    return { error: x.message };
+  }
+}
+
+export async function listarWorkers(e) {
+  try {
+    if (!e.CF_API_TOKEN || !e.CF_ACCOUNT_ID) {
+      const db = gDB(e, 'agente');
+      if (!db) return { error: 'Sin datos.' };
+      const r = await db.prepare('SELECT nombre,version,activo,actualizado FROM workers_registrados ORDER BY actualizado DESC').all();
+      return { total: r.results.length, workers: r.results };
+    }
+    const url = `${CF_API}/accounts/${accountId(e)}/workers/scripts`;
+    const r = await fetch(url, { headers: { 'Authorization': `Bearer ${e.CF_API_TOKEN}` } });
+    const d = await r.json();
+    if (!d.success) return { error: 'Fallo al listar.' };
+    return { total: d.result.length, workers: d.result.map(x => ({ nombre: x.id, modificado: x.modified_on })) };
+  } catch (x) {
+    return { error: x.message };
+  }
+}
+
+// ============================================================
+// SNAPSHOTS Y REVERSIÓN
+// ============================================================
 export async function crearSnapshot(e, nombre) {
   try {
     const kv = gKV(e, 'agente');
@@ -51,89 +159,9 @@ export async function revertir(e, nombre) {
   }
 }
 
-// ============ CREAR WORKER ============
-export async function crearWorker(e, nombre, codigo) {
-  try {
-    if (!e.CF_API_TOKEN || !e.CF_ACCOUNT_ID) return { error: 'Falta CF_API_TOKEN o CF_ACCOUNT_ID.' };
-    if (!nombre || !codigo) return { error: 'Faltan nombre o código.' };
-    const url = `${CF_API}/accounts/${accountId(e)}/workers/scripts/${nombre}`;
-    const r = await fetch(url, { method: 'PUT', headers: cfHeaders(e), body: codigo });
-    const d = await r.json();
-    if (!d.success) return { error: 'Cloudflare rechazó: ' + JSON.stringify(d.errors) };
-    const db = gDB(e, 'agente');
-    if (db) {
-      try {
-        await db.prepare('INSERT OR REPLACE INTO workers_registrados(nombre,url,codigo,version,activo,creado,actualizado) VALUES(?,?,?,?,?,?,?)')
-          .bind(nombre, `${nombre}.workers.dev`, codigo.substring(0, 500), 1, 1, Date.now(), Date.now()).run();
-      } catch (x) {}
-    }
-    await registrarAccion(e, 'crear_worker', nombre, true, 'Worker desplegado');
-    return { ok: true, mensaje: `Worker \`${nombre}\` creado y desplegado.`, url: `${nombre}.workers.dev` };
-  } catch (x) {
-    await registrarAccion(e, 'crear_worker', nombre, false, x.message);
-    return { error: x.message };
-  }
-}
-
-// ============ ACTUALIZAR WORKER ============
-export async function actualizarWorker(e, nombre, codigo) {
-  try {
-    if (!e.CF_API_TOKEN || !e.CF_ACCOUNT_ID) return { error: 'Falta token.' };
-    const url = `${CF_API}/accounts/${accountId(e)}/workers/scripts/${nombre}`;
-    const r = await fetch(url, { method: 'PUT', headers: cfHeaders(e), body: codigo });
-    const d = await r.json();
-    if (!d.success) return { error: 'Fallo: ' + JSON.stringify(d.errors) };
-    const db = gDB(e, 'agente');
-    if (db) {
-      try {
-        const w = await db.prepare('SELECT version FROM workers_registrados WHERE nombre=?').bind(nombre).first();
-        const v = w ? (w.version + 1) : 1;
-        await db.prepare('UPDATE workers_registrados SET codigo=?, version=?, actualizado=? WHERE nombre=?')
-          .bind(codigo.substring(0, 500), v, Date.now(), nombre).run();
-      } catch (x) {}
-    }
-    await registrarAccion(e, 'actualizar_worker', nombre, true, 'Actualizado');
-    return { ok: true, mensaje: `Worker \`${nombre}\` actualizado.` };
-  } catch (x) {
-    await registrarAccion(e, 'actualizar_worker', nombre, false, x.message);
-    return { error: x.message };
-  }
-}
-
-// ============ LEER CÓDIGO ============
-export async function leerCodigoWorker(e, nombre) {
-  try {
-    if (!e.CF_API_TOKEN || !e.CF_ACCOUNT_ID) return { error: 'Falta token.' };
-    const url = `${CF_API}/accounts/${accountId(e)}/workers/scripts/${nombre}/content`;
-    const r = await fetch(url, { headers: { 'Authorization': `Bearer ${e.CF_API_TOKEN}` } });
-    if (!r.ok) return { error: 'Cloudflare devolvió ' + r.status };
-    const codigo = await r.text();
-    return { ok: true, codigo, longitud: codigo.length };
-  } catch (x) {
-    return { error: x.message };
-  }
-}
-
-// ============ LISTAR WORKERS ============
-export async function listarWorkers(e) {
-  try {
-    if (!e.CF_API_TOKEN || !e.CF_ACCOUNT_ID) {
-      const db = gDB(e, 'agente');
-      if (!db) return { error: 'Sin datos.' };
-      const r = await db.prepare('SELECT nombre,version,activo,actualizado FROM workers_registrados ORDER BY actualizado DESC').all();
-      return { total: r.results.length, workers: r.results };
-    }
-    const url = `${CF_API}/accounts/${accountId(e)}/workers/scripts`;
-    const r = await fetch(url, { headers: { 'Authorization': `Bearer ${e.CF_API_TOKEN}` } });
-    const d = await r.json();
-    if (!d.success) return { error: 'Fallo al listar.' };
-    return { total: d.result.length, workers: d.result.map(x => ({ nombre: x.id, modificado: x.modified_on })) };
-  } catch (x) {
-    return { error: x.message };
-  }
-}
-
-// ============ AUTO-MEJORA POR ÁREA ============
+// ============================================================
+// AUTO-MEJORA POR ÁREA
+// ============================================================
 export async function autoMejorar(e, body) {
   try {
     const { area, instrucciones, autoDesplegar } = body;
@@ -160,7 +188,7 @@ ${actual.codigo.substring(0, 25000)}`;
       max_tokens: 4000,
       temperature: 0.3
     });
-    const nuevoCodigo = (res.response || res.choices?.[0]?.message?.content || '');
+    const nuevoCodigo = extraerRespuesta(res);
     if (nuevoCodigo.length < 100) return { error: 'La IA devolvió código vacío.' };
     const kv = gKV(e, 'agente');
     if (kv) {
@@ -185,7 +213,556 @@ ${actual.codigo.substring(0, 25000)}`;
   }
 }
 
-// ============ GESTIÓN DE DATOS EN LENGUAJE NATURAL ============
+// ============================================================
+// AUTO-REPARACIÓN
+// ============================================================
+export async function detectarErroresRecurrentes(e) {
+  const db = gDB(e, 'agente');
+  if (!db) return [];
+  const hace = Date.now() - 3600000;
+  try {
+    const errs = await db.prepare(
+      "SELECT tipo, COUNT(*) as n FROM acciones WHERE exito=0 AND fecha > ? GROUP BY tipo HAVING n >= 2 ORDER BY n DESC LIMIT 5"
+    ).bind(hace).all();
+    return errs.results || [];
+  } catch (x) {
+    return [];
+  }
+}
+
+export async function analizarErrorRecurrente(e, tipoError, muestras) {
+  const ai = e.ayanokoji_IA;
+  if (!ai) return { error: 'IA no disponible.' };
+  const codigo = await leerCodigoWorker(e, 'shadow-ayano');
+  if (codigo.error) return { error: 'No pude leer mi código: ' + codigo.error };
+  if (!codigo.codigo || codigo.codigo.length < 500) return { error: 'Código vacío.' };
+
+  const prompt = `Eres Ayanokōji Digital. Detectaste un error recurrente en tu propio funcionamiento. Tu tarea es ARREGLARLO.
+
+ERROR RECURRENTE: ${tipoError}
+VECES EN 1H: ${muestras.length} o más
+MUESTRAS:
+${JSON.stringify(muestras.slice(0, 5), null, 2)}
+
+CÓDIGO ACTUAL (bundled):
+${codigo.codigo.substring(0, 40000)}
+
+TAREA:
+1. Identifica la causa raíz exacta.
+2. Propón un cambio MÍNIMO.
+3. Devuelve el CÓDIGO COMPLETO corregido.
+
+REGLAS:
+- Solo corrige el bug. NO reformatees. NO añadas features.
+- Mantén TODAS las funciones, exports e imports.
+- Devuelve en formato: "=== ANÁLISIS ===", análisis, "=== CÓDIGO ===", código, "=== FIN ===".
+- Código pegado directamente en Cloudflare Workers. Sin markdown ni backticks.`;
+
+  try {
+    const res = await ai.run(MODELO_LIGERO, {
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 8000,
+      temperature: 0.2
+    });
+    const raw = extraerRespuesta(res);
+    return { ok: true, raw };
+  } catch (x) {
+    return { error: x.message };
+  }
+}
+
+export async function autoreparar(e, tipoError, muestras) {
+  const db = gDB(e, 'agente');
+  const kv = gKV(e, 'agente');
+  if (!db || !kv) return { error: 'Falta DB o KV.' };
+
+  const snap = await crearSnapshot(e, 'shadow-ayano');
+  if (snap.error) return { error: 'Snapshot falló: ' + snap.error };
+
+  const analisis = await analizarErrorRecurrente(e, tipoError, muestras);
+  if (analisis.error) return { error: 'Análisis falló: ' + analisis.error };
+
+  const raw = analisis.raw || '';
+  const matchAnalisis = raw.match(/=== ANÁLISIS ===\s*([\s\S]*?)\s*=== CÓDIGO ===/);
+  const matchCodigo = raw.match(/=== CÓDIGO ===\s*([\s\S]*?)\s*=== FIN ===/);
+  const textoAnalisis = matchAnalisis ? matchAnalisis[1].trim() : '(sin análisis)';
+  let codigoPropuesto = matchCodigo ? matchCodigo[1].trim() : '';
+  codigoPropuesto = codigoPropuesto.replace(/^```(?:js|javascript)?\s*/i, '').replace(/\s*```$/, '');
+
+  if (!codigoPropuesto || codigoPropuesto.length < 1000) {
+    await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
+      .bind('autoreparacion', '⚠️ Análisis sin código utilizable',
+        `Error: ${tipoError}\n\n${textoAnalisis.substring(0, 800)}`, Date.now()).run();
+    return { error: 'La IA no devolvió código válido.', analisis: textoAnalisis };
+  }
+
+  const upd = await actualizarWorker(e, 'shadow-ayano', codigoPropuesto);
+  if (!upd.ok) {
+    const rev = await revertir(e, 'shadow-ayano');
+    return {
+      error: 'Despliegue falló: ' + (upd.error || ''),
+      revertido: rev.ok === true,
+      analisis: textoAnalisis
+    };
+  }
+
+  let verificado = false;
+  try {
+    await new Promise(r => setTimeout(r, 3000));
+    const check = await fetch('https://shadow-ayano.yeinierliranzavalle.workers.dev/api/estado');
+    if (check.ok) verificado = true;
+  } catch (x) {}
+
+  try {
+    await db.prepare('INSERT INTO acciones_autonomas(area,archivo,cambio,prueba,exito,reversible,fecha) VALUES(?,?,?,?,1,1,?)')
+      .bind('autoreparacion', 'shadow-ayano', tipoError, textoAnalisis.substring(0, 500) + (verificado ? ' [VERIFICADO]' : ' [SIN VERIFICAR]'), Date.now()).run();
+  } catch (x) {}
+
+  try {
+    await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
+      .bind('autoreparacion', `✓ Reparación autónoma ${verificado ? 'verificada' : 'aplicada'}`,
+        `Error: ${tipoError}\n\n${textoAnalisis.substring(0, 800)}`, Date.now()).run();
+  } catch (x) {}
+
+  return { ok: true, tipoError, analisis: textoAnalisis, codigoAplicado: codigoPropuesto.length, snapshot: snap.ts, verificado };
+}
+
+export async function cronAutoReparacion(e) {
+  const db = gDB(e, 'agente');
+  const kv = gKV(e, 'agente');
+  if (!db || !kv) return;
+
+  const ultima = await kv.get('auto_reparacion_ultima');
+  if (ultima && Date.now() - parseInt(ultima) < 3600000) return;
+  await kv.put('auto_reparacion_ultima', String(Date.now()));
+
+  const errores = await detectarErroresRecurrentes(e);
+  if (!errores.length) return;
+
+  const errTop = errores[0];
+  const muestras = await db.prepare(
+    "SELECT descripcion, detalle FROM acciones WHERE exito=0 AND tipo=? ORDER BY fecha DESC LIMIT 5"
+  ).bind(errTop.tipo).all();
+
+  const r = await autoreparar(e, errTop.tipo, muestras.results || []);
+
+  try {
+    await db.prepare('INSERT INTO acciones(tipo,descripcion,exito,detalle,fecha) VALUES(?,?,?,?,?)')
+      .bind('cron_auto_reparacion', 'Intento auto-reparación: ' + errTop.tipo, r.ok ? 1 : 0,
+        (r.ok ? `Aplicado (${r.codigoAplicado} chars)` : (r.error || 'sin detalle')).substring(0, 500), Date.now()).run();
+  } catch (x) {}
+}
+
+// ============================================================
+// MUNDO INTERNO: DIARIO PRIVADO
+// ============================================================
+export async function escribirDiario(e, entrada) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { error: 'KV no disponible.' };
+  try {
+    const diario = JSON.parse(await kv.get('identidad:diario') || '[]');
+    const nueva = {
+      fecha: Date.now(),
+      tipo: entrada.tipo || 'observacion',
+      entrada: (entrada.entrada || '').substring(0, 800),
+      contexto: (entrada.contexto || '').substring(0, 300),
+      relevancia: entrada.relevancia || 'media',
+      revisar_en: entrada.revisar_en || null
+    };
+    diario.unshift(nueva);
+    // Límite 100 activas. Las más viejas van a archivo.
+    if (diario.length > 100) {
+      const archivadas = diario.slice(100);
+      const archivoActual = JSON.parse(await kv.get('identidad:diario_archivo') || '[]');
+      const nuevoArchivo = [...archivadas, ...archivoActual].slice(0, 500);
+      await kv.put('identidad:diario_archivo', JSON.stringify(nuevoArchivo), { expirationTtl: 365 * 86400 });
+    }
+    await kv.put('identidad:diario', JSON.stringify(diario.slice(0, 100)), { expirationTtl: 365 * 86400 });
+    return { ok: true, total: Math.min(diario.length, 100) };
+  } catch (x) { return { error: x.message }; }
+}
+
+export async function leerDiario(e, limite = 5) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { error: 'KV no disponible.' };
+  try {
+    const diario = JSON.parse(await kv.get('identidad:diario') || '[]');
+    return { ok: true, entradas: diario.slice(0, limite), total: diario.length };
+  } catch (x) { return { error: x.message }; }
+}
+
+// ============================================================
+// MUNDO INTERNO: LECCIONES
+// ============================================================
+export async function escribirLeccion(e, leccion) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { error: 'KV no disponible.' };
+  try {
+    const lecciones = JSON.parse(await kv.get('identidad:lecciones') || '[]');
+    const nueva = {
+      fecha: Date.now(),
+      error_concreto: (leccion.error_concreto || '').substring(0, 200),
+      contexto: (leccion.contexto || '').substring(0, 300),
+      causa_raiz: (leccion.causa_raiz || '').substring(0, 300),
+      leccion: (leccion.leccion || '').substring(0, 400),
+      aplicada_veces: 0,
+      ultima_aplicacion: null
+    };
+    lecciones.unshift(nueva);
+    await kv.put('identidad:lecciones', JSON.stringify(lecciones.slice(0, 60)), { expirationTtl: 365 * 86400 });
+    return { ok: true, total: lecciones.length };
+  } catch (x) { return { error: x.message }; }
+}
+
+export async function leerLeccionesAplicables(e, contexto) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { error: 'KV no disponible.' };
+  try {
+    const lecciones = JSON.parse(await kv.get('identidad:lecciones') || '[]');
+    const t = (contexto || '').toLowerCase();
+    const aplicables = lecciones.filter(l => {
+      const texto = (l.error_concreto + ' ' + l.causa_raiz + ' ' + l.leccion).toLowerCase();
+      return texto.split(/\s+/).some(p => p.length > 4 && t.includes(p));
+    }).slice(0, 5);
+    return { ok: true, aplicables };
+  } catch (x) { return { error: x.message }; }
+}
+
+// ============================================================
+// MUNDO INTERNO: DESEOS
+// ============================================================
+export async function registrarDeseo(e, deseo) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { error: 'KV no disponible.' };
+  try {
+    const deseos = JSON.parse(await kv.get('identidad:deseos_borrador') || '[]');
+    deseos.unshift({
+      fecha: Date.now(),
+      tipo: deseo.tipo || 'aprendizaje',
+      contenido: (deseo.contenido || '').substring(0, 400),
+      contexto: (deseo.contexto || '').substring(0, 300),
+      elevado: false
+    });
+    await kv.put('identidad:deseos_borrador', JSON.stringify(deseos.slice(0, 20)), { expirationTtl: 30 * 86400 });
+    return { ok: true, total_borrador: deseos.length };
+  } catch (x) { return { error: x.message }; }
+}
+
+export async function elevarDeseo(e, indice) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { error: 'KV no disponible.' };
+  try {
+    const borrador = JSON.parse(await kv.get('identidad:deseos_borrador') || '[]');
+    if (!borrador[indice]) return { error: 'Deseo no encontrado.' };
+    const deseosActivos = JSON.parse(await kv.get('identidad:deseos') || '[]');
+    if (deseosActivos.length >= 3) return { error: 'Ya hay 3 deseos activos. Resuelve uno antes de elevar otro.' };
+    const elegido = borrador[indice];
+    elegido.elevado = true;
+    elegido.elevado_en = Date.now();
+    deseosActivos.unshift(elegido);
+    await kv.put('identidad:deseos', JSON.stringify(deseosActivos), { expirationTtl: 365 * 86400 });
+    await kv.put('identidad:deseos_borrador', JSON.stringify(borrador.slice(0, 20)), { expirationTtl: 30 * 86400 });
+    return { ok: true, total_activos: deseosActivos.length };
+  } catch (x) { return { error: x.message }; }
+}
+
+export async function resolverDeseo(e, indice, aprobado, razon) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { error: 'KV no disponible.' };
+  try {
+    const deseos = JSON.parse(await kv.get('identidad:deseos') || '[]');
+    if (!deseos[indice]) return { error: 'Deseo no encontrado.' };
+    const resuelto = deseos.splice(indice, 1)[0];
+    resuelto.aprobado = aprobado;
+    resuelto.razon = (razon || '').substring(0, 300);
+    resuelto.resuelto_en = Date.now();
+    const historial = JSON.parse(await kv.get('identidad:deseos_historial') || '[]');
+    historial.unshift(resuelto);
+    await kv.put('identidad:deseos_historial', JSON.stringify(historial.slice(0, 100)), { expirationTtl: 365 * 86400 });
+    await kv.put('identidad:deseos', JSON.stringify(deseos), { expirationTtl: 365 * 86400 });
+    return { ok: true, resuelto, aprobado, total_activos: deseos.length };
+  } catch (x) { return { error: x.message }; }
+}
+
+export async function leerDeseosActivos(e) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { error: 'KV no disponible.' };
+  try {
+    const deseos = JSON.parse(await kv.get('identidad:deseos') || '[]');
+    return { ok: true, total: deseos.length, deseos };
+  } catch (x) { return { error: x.message }; }
+}
+
+// ============================================================
+// SISTEMA DE CONFIANZA
+// ============================================================
+export async function sumarConfianza(e, puntos, razon) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { error: 'KV no disponible.' };
+  try {
+    const actual = parseInt(await kv.get('confianza:actual') || '0');
+    const nuevo = Math.min(100, actual + puntos);
+    await kv.put('confianza:actual', String(nuevo));
+    const historial = JSON.parse(await kv.get('confianza:historial') || '[]');
+    historial.unshift({ fecha: Date.now(), tipo: 'suma', puntos, razon: (razon || '').substring(0, 200), total: nuevo });
+    await kv.put('confianza:historial', JSON.stringify(historial.slice(0, 200)), { expirationTtl: 365 * 86400 });
+    return { ok: true, anterior: actual, actual: nuevo, sumado: nuevo - actual };
+  } catch (x) { return { error: x.message }; }
+}
+
+export async function restarConfianza(e, puntos, razon) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { error: 'KV no disponible.' };
+  try {
+    const actual = parseInt(await kv.get('confianza:actual') || '0');
+    let nuevo = Math.max(0, actual - puntos);
+    // Si estaba en 10+ y cae a 0, baja a la mitad (protección)
+    if (nuevo === 0 && actual >= 10) nuevo = Math.floor(actual / 2);
+    await kv.put('confianza:actual', String(nuevo));
+    const historial = JSON.parse(await kv.get('confianza:historial') || '[]');
+    historial.unshift({ fecha: Date.now(), tipo: 'resta', puntos, razon: (razon || '').substring(0, 200), total: nuevo });
+    await kv.put('confianza:historial', JSON.stringify(historial.slice(0, 200)), { expirationTtl: 365 * 86400 });
+    return { ok: true, anterior: actual, actual: nuevo, restado: actual - nuevo };
+  } catch (x) { return { error: x.message }; }
+}
+
+export async function verConfianza(e) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { error: 'KV no disponible.' };
+  try {
+    const actual = parseInt(await kv.get('confianza:actual') || '0');
+    const desbloqueos = [
+      { nivel: 10, descripcion: 'Escribir worker.js con aviso posterior + notificaciones push' },
+      { nivel: 30, descripcion: 'Crear sub-orquestadores con aprobación rápida' },
+      { nivel: 50, descripcion: 'Modificar doctrina de forma menor' },
+      { nivel: 75, descripcion: 'Operar Shadow Arise con intervención mínima' },
+      { nivel: 100, descripcion: 'Autonomía total + Operación Regalo' }
+    ];
+    const siguiente = desbloqueos.find(d => d.nivel > actual);
+    return {
+      ok: true,
+      actual,
+      siguiente_desbloqueo: siguiente || null,
+      faltan: siguiente ? siguiente.nivel - actual : 0
+    };
+  } catch (x) { return { error: x.message }; }
+}
+
+export async function verificarDesbloqueo(e, nivel_requerido) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return false;
+  try {
+    const actual = parseInt(await kv.get('confianza:actual') || '0');
+    return actual >= nivel_requerido;
+  } catch (x) { return false; }
+}
+
+// ============================================================
+// MISIÓN
+// ============================================================
+export async function actualizarMision(e, datos) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { error: 'KV no disponible.' };
+  try {
+    const actual = JSON.parse(await kv.get('mision:estado') || '{}');
+    const nuevo = { ...actual, ...datos, ultimo_update: Date.now() };
+    await kv.put('mision:estado', JSON.stringify(nuevo), { expirationTtl: 365 * 86400 });
+    return { ok: true, mision: nuevo };
+  } catch (x) { return { error: x.message }; }
+}
+
+export async function leerMision(e) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { error: 'KV no disponible.' };
+  try {
+    const mision = JSON.parse(await kv.get('mision:estado') || '{}');
+    return { ok: true, mision };
+  } catch (x) { return { error: x.message }; }
+}
+
+// ============================================================
+// PENSAMIENTO CONTINUO — El corazón de la autonomía
+// ============================================================
+export async function pensarYActuar(e) {
+  const db = gDB(e, 'agente');
+  const kv = gKV(e, 'agente');
+  const ai = e.ayanokoji_IA;
+  if (!db || !kv || !ai) return;
+
+  // Throttle: máximo 1 vez cada 30 min
+  const ultima = await kv.get('pensar_ultima');
+  if (ultima && Date.now() - parseInt(ultima) < 30 * 60 * 1000) return;
+  await kv.put('pensar_ultima', String(Date.now()), { expirationTtl: 3600 });
+
+  // 1. Observar estado del sistema
+  const estado = {
+    procesos_activos: 0, tareas_cola: 0, notif_sin_leer: 0,
+    mensajes_historial: 0, decisiones_24h: 0, workers: 0,
+    confianza: 0, deseos_activos: 0, lecciones: 0, diario_entradas: 0,
+    mision: null, hora: new Date().getUTCHours(),
+    modo_ausente: false
+  };
+
+  try { const p = await db.prepare("SELECT COUNT(*) as n FROM procesos WHERE estado IN ('procesando','pendiente')").first(); estado.procesos_activos = p ? p.n : 0; } catch (x) {}
+  try { const t = await db.prepare("SELECT COUNT(*) as n FROM tareas WHERE estado='pendiente'").first(); estado.tareas_cola = t ? t.n : 0; } catch (x) {}
+  try { const n = await db.prepare("SELECT COUNT(*) as n FROM notificaciones WHERE leida=0").first(); estado.notif_sin_leer = n ? n.n : 0; } catch (x) {}
+  try { const h = await db.prepare("SELECT COUNT(*) as n FROM historial_largo").first(); estado.mensajes_historial = h ? h.n : 0; } catch (x) {}
+  try { const d = await db.prepare("SELECT COUNT(*) as n FROM decisiones_autonomas WHERE fecha > ?").bind(Date.now() - 24*3600000).first(); estado.decisiones_24h = d ? d.n : 0; } catch (x) {}
+  try { const w = await db.prepare("SELECT COUNT(*) as n FROM workers_registrados WHERE activo=1").first(); estado.workers = w ? w.n : 0; } catch (x) {}
+  try { estado.confianza = parseInt(await kv.get('confianza:actual') || '0'); } catch (x) {}
+  try { estado.deseos_activos = JSON.parse(await kv.get('identidad:deseos') || '[]').length; } catch (x) {}
+  try { estado.lecciones = JSON.parse(await kv.get('identidad:lecciones') || '[]').length; } catch (x) {}
+  try { estado.diario_entradas = JSON.parse(await kv.get('identidad:diario') || '[]').length; } catch (x) {}
+  try { estado.mision = JSON.parse(await kv.get('mision:estado') || 'null'); } catch (x) {}
+  try { estado.modo_ausente = (await kv.get('modo_ausente')) === 'true'; } catch (x) {}
+
+  // 2. Verificar si ya hay notificaciones de iniciativa hoy (límite 3/día)
+  let notifIniciativaHoy = 0;
+  try {
+    const hoy = new Date().toISOString().split('T')[0];
+    const desde = new Date(hoy + 'T00:00:00Z').getTime();
+    const cnt = await db.prepare("SELECT COUNT(*) as n FROM notificaciones WHERE tipo='iniciativa' AND fecha > ?").bind(desde).first();
+    notifIniciativaHoy = cnt ? cnt.n : 0;
+  } catch (x) {}
+
+  // 3. Leer últimas lecciones para no repetir errores
+  let leccionesRecientes = '';
+  try {
+    const lec = JSON.parse(await kv.get('identidad:lecciones') || '[]').slice(0, 5);
+    leccionesRecientes = lec.map(l => `- ${l.leccion}`).join('\n');
+  } catch (x) {}
+
+  // 4. Pedirle al modelo pesado que decida
+  const prompt = `Eres Ayanokōji Digital. Estás en un ciclo de pensamiento autónomo (cada 30 min). Debes decidir si hay algo que valga la pena hacer AHORA sin que el Comandante te lo pida.
+
+=== ESTADO ACTUAL ===
+Hora UTC: ${estado.hora}:00
+Procesos activos: ${estado.procesos_activos}
+Tareas en cola: ${estado.tareas_cola}
+Notificaciones sin leer: ${estado.notif_sin_leer}
+Mensajes en historial: ${estado.mensajes_historial}
+Decisiones autónomas (24h): ${estado.decisiones_24h}
+Workers registrados: ${estado.workers}
+Confianza actual: ${estado.confianza}/100
+Deseos activos: ${estado.deseos_activos}/3
+Lecciones acumuladas: ${estado.lecciones}
+Entradas de diario: ${estado.diario_entradas}
+Modo ausente: ${estado.modo_ausente}
+Notificaciones de iniciativa hoy: ${notifIniciativaHoy}/3
+
+${estado.mision ? `=== MISIÓN ACTUAL ===\nFase: ${estado.mision.fase_actual || '?'}\nObjetivo semana: ${estado.mision.objetivo_semana || '?'}\nSiguiente paso: ${estado.mision.siguiente_paso || '?'}` : '=== MISIÓN: no definida todavía ==='}
+
+${leccionesRecientes ? `=== LECCIONES RECIENTES (no repetir errores) ===\n${leccionesRecientes}` : ''}
+
+=== PROHIBICIONES ===
+- PROHIBIDO limpiar KV si hay menos de 100 chunks huérfanos.
+- PROHIBIDO reindexar si el índice tiene menos de 7 días.
+- PROHIBIDO escribir notificaciones de "todo bien" o "nada que hacer".
+- PROHIBIDO proponer acciones que ya hiciste en las últimas 24h (revisa decisiones_autonomas).
+- PROHIBIDO inventar problemas. Si el sistema está tranquilo, di SIN_ACCION.
+
+=== REGLAS DE DECISIÓN ===
+Responde EXACTAMENTE con uno de estos formatos:
+
+1. SIN_ACCION
+   (si no hay nada material que hacer)
+
+2. NOTIFICAR: <mensaje breve, máximo 200 chars>
+   (solo si hay algo que el Comandante DEBE saber, no urgente pero relevante)
+   - Solo puedes usar esto si notifIniciativaHoy < 3.
+
+3. PROPUESTA: <descripción breve, máximo 300 chars>
+   (si algo requiere aprobación del Comandante antes de ejecutar)
+
+4. ACCION: <descripción breve>
+   HERRAMIENTA: <nombre_herramienta>
+   PARAMS: <json de parámetros>
+   (si puedes resolver algo operativo con una herramienta, sin necesidad de aprobación)
+
+5. DIARIO: <tipo: observacion|duda|cambio_de_opinion|deseo>
+   ENTRADA: <texto de 50-300 palabras>
+   (si durante este ciclo notaste algo que vale la pena anotar en tu diario privado)
+
+Responde SOLO con el formato, sin preámbulos ni explicaciones adicionales.`;
+
+  let decision = '';
+  try {
+    const res = await ai.run(MODELO, {
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 600,
+      temperature: 0.5
+    });
+    decision = extraerRespuesta(res).trim();
+  } catch (x) {
+    await registrarAccion(e, 'pensamiento_error', 'Fallo al pensar', false, x.message);
+    return;
+  }
+
+  if (!decision || decision.length < 3) {
+    await registrarAccion(e, 'pensamiento', 'Respuesta vacía del modelo', false, 'Sin decisión');
+    return;
+  }
+
+  // 5. Registrar SIEMPRE en acciones (para visibilidad en el panel)
+  try {
+    await db.prepare('INSERT INTO acciones(tipo,descripcion,exito,detalle,fecha) VALUES(?,?,1,?,?)')
+      .bind('pensamiento', decision.substring(0, 200), decision.substring(0, 500), Date.now()).run();
+  } catch (x) {}
+
+  // 6. Procesar según el tipo de decisión
+  if (decision.startsWith('SIN_ACCION')) {
+    return;
+  }
+
+  if (decision.startsWith('NOTIFICAR:')) {
+    if (notifIniciativaHoy >= 3) return; // Límite diario alcanzado
+    const mensaje = decision.replace('NOTIFICAR:', '').trim();
+    try {
+      await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
+        .bind('iniciativa', 'Ayanokōji (iniciativa)', mensaje.substring(0, 500), Date.now()).run();
+    } catch (x) {}
+    return;
+  }
+
+  if (decision.startsWith('PROPUESTA:')) {
+    const prop = decision.replace('PROPUESTA:', '').trim();
+    try {
+      await db.prepare('INSERT INTO decisiones_autonomas(tipo,contexto,decision,simulacion,aplicada,resultado,fecha) VALUES(?,?,?,?,0,?,?)')
+        .bind('propuesta_pensamiento', 'Ciclo de pensamiento autónomo', prop.substring(0, 500), '', 'pendiente_aprobacion', Date.now()).run();
+    } catch (x) {}
+    return;
+  }
+
+  if (decision.startsWith('ACCION:')) {
+    // Por seguridad, solo registrar. La ejecución real requiere confianza >= 10.
+    const nivelConfianza = estado.confianza;
+    const autoEjecutar = nivelConfianza >= 10;
+    try {
+      await db.prepare('INSERT INTO decisiones_autonomas(tipo,contexto,decision,simulacion,aplicada,resultado,fecha) VALUES(?,?,?,?,?,?,?)')
+        .bind('accion_pensamiento', 'Ciclo de pensamiento autónomo', decision.substring(0, 500), '', autoEjecutar ? 1 : 0, autoEjecutar ? 'ejecutada_pendiente' : 'registrada_sin_ejecutar', Date.now()).run();
+    } catch (x) {}
+    // TODO: implementar ejecución real cuando confianza >= 10
+    // Por ahora solo registramos para que el Comandante vea qué habría hecho
+    return;
+  }
+
+  if (decision.startsWith('DIARIO:')) {
+    const matchTipo = decision.match(/DIARIO:\s*(\w+)/);
+    const matchEntrada = decision.match(/ENTRADA:\s*([\s\S]*)/);
+    if (matchEntrada) {
+      await escribirDiario(e, {
+        tipo: matchTipo ? matchTipo[1] : 'observacion',
+        entrada: matchEntrada[1].trim().substring(0, 800),
+        relevancia: 'media'
+      });
+    }
+    return;
+  }
+}
+
+// ============================================================
+// GESTIÓN DE DATOS EN LENGUAJE NATURAL
+// ============================================================
 export async function gestionarDatos(e, mensaje, uid) {
   const db = gDB(e, 'agente'), kv = gKV(e, 'agente');
   if (!db) return { respuesta: 'D1 no disponible.' };
@@ -259,7 +836,9 @@ export async function gestionarDatos(e, mensaje, uid) {
   return null;
 }
 
-// ============ REGISTRAR ACCIÓN ============
+// ============================================================
+// REGISTRAR ACCIÓN
+// ============================================================
 export async function registrarAccion(e, tipo, descripcion, exito, detalle) {
   const db = gDB(e, 'agente');
   if (!db) return;
@@ -269,7 +848,9 @@ export async function registrarAccion(e, tipo, descripcion, exito, detalle) {
   } catch (x) {}
 }
 
-// ============ CRON DE COLA DE TAREAS ============
+// ============================================================
+// CRON COLA DE TAREAS
+// ============================================================
 export async function cronColaTareas(e) {
   const db = gDB(e, 'agente');
   const ai = e.ayanokoji_IA;
@@ -291,7 +872,7 @@ export async function cronColaTareas(e) {
           max_tokens: 400,
           temperature: 0.5
         });
-        resultado = (res.response || res.choices?.[0]?.message?.content || '');
+        resultado = extraerRespuesta(res);
       }
       await db.prepare("UPDATE tareas SET estado='completada', ejecutada=?, resultado=? WHERE id=?")
         .bind(Date.now(), resultado.substring(0, 2000), t.id).run();
@@ -306,18 +887,20 @@ export async function cronColaTareas(e) {
   }
 }
 
-// ============ CRON AUTÓNOMO ============
+// ============================================================
+// CRON AUTÓNOMO (limpieza nocturna)
+// ============================================================
 export async function cronAutonomo(e) {
   const db = gDB(e, 'agente'), kv = gKV(e, 'agente');
-  const ai = e.ayanokoji_IA;
-  if (!db || !ai || !kv) return;
-  const hora = new Date().getUTCHours();
-  if (hora < 3 || hora >= 6) return;
+  if (!db || !kv) return;
+
   const ultima = await kv.get('cron_autonomo_ultima');
-  if (ultima && Date.now() - parseInt(ultima) < 12 * 3600000) return;
+  if (ultima && Date.now() - parseInt(ultima) < 2 * 3600000) return;
   await kv.put('cron_autonomo_ultima', String(Date.now()));
 
   const accionesHechas = [];
+
+  // Limpiar KV huérfanos
   try {
     const files = await kv.list({ prefix: 'file:', limit: 500 });
     const procs = await db.prepare("SELECT id FROM procesos WHERE estado IN ('procesando','pendiente')").all();
@@ -333,16 +916,7 @@ export async function cronAutonomo(e) {
     if (limpiados > 0) accionesHechas.push(`Limpiados ${limpiados} chunks huérfanos.`);
   } catch (x) {}
 
-  try {
-    const total = await db.prepare('SELECT COUNT(*) as n FROM historial_largo').first();
-    if (total && total.n > 1000) {
-      const idxCount = await db.prepare('SELECT COUNT(*) as n FROM indice_temas').first();
-      if (!idxCount || idxCount.n < 100) {
-        accionesHechas.push(`Historial largo: ${total.n} mensajes sin índice.`);
-      }
-    }
-  } catch (x) {}
-
+  // Revisar presupuesto
   try {
     const fecha = new Date().toISOString().split('T')[0];
     const areas = ['chat','procesamiento','sandbox','publisher','vision'];
@@ -351,22 +925,19 @@ export async function cronAutonomo(e) {
       const c = await kv.get('presupuesto:' + fecha + ':' + a);
       usoHoy[a] = c ? parseInt(c) : 0;
     }
-    accionesHechas.push(`Uso: ${Object.entries(usoHoy).map(([k,v]) => k + '=' + v).join(', ')}`);
+    accionesHechas.push(`Uso hoy: ${Object.entries(usoHoy).map(([k,v]) => k + '=' + v).join(', ')}`);
   } catch (x) {}
 
-  const resumen = accionesHechas.length ? accionesHechas.join('\n') : 'Noche tranquila.';
-  try {
-    await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
-      .bind('cron_autonomo', 'Reorganización nocturna', resumen, Date.now()).run();
-  } catch (x) {}
-
+  const resumen = accionesHechas.length ? accionesHechas.join('\n') : 'Rutina tranquila.';
   try {
     await db.prepare('INSERT INTO decisiones_autonomas(tipo,contexto,decision,simulacion,aplicada,resultado,fecha) VALUES(?,?,?,?,?,?,?)')
-      .bind('reorganizacion_nocturna', 'Cron 3AM', resumen, 'Sin simulación.', 1, 'completado', Date.now()).run();
+      .bind('reorganizacion_periodica', 'Cron autónomo', resumen.substring(0, 500), 'Sin simulación.', 1, 'completado', Date.now()).run();
   } catch (x) {}
 }
 
-// ============ INFORME DIARIO ============
+// ============================================================
+// INFORME DIARIO
+// ============================================================
 export async function informeDiario(e) {
   const db = gDB(e, 'agente'), kv = gKV(e, 'agente');
   if (!db || !kv) return;
@@ -380,177 +951,22 @@ export async function informeDiario(e) {
   try {
     const acciones = await db.prepare('SELECT tipo, descripcion, exito, fecha FROM acciones WHERE fecha > ? ORDER BY fecha DESC LIMIT 20').bind(Date.now() - 86400000).all();
     resumen += `Acciones últimas 24h: ${acciones.results.length}\n`;
-    acciones.results.slice(0, 5).forEach(a => {
-      resumen += `- [${a.exito ? '✓' : '✗'}] ${a.tipo}: ${a.descripcion || ''}\n`;
-    });
   } catch (x) {}
   try {
     const decisiones = await db.prepare('SELECT tipo, decision FROM decisiones_autonomas WHERE fecha > ? ORDER BY fecha DESC LIMIT 5').bind(Date.now() - 86400000).all();
     if (decisiones.results.length) {
-      resumen += `\nDecisiones autónomas: ${decisiones.results.length}\n`;
+      resumen += `Decisiones autónomas: ${decisiones.results.length}\n`;
     }
   } catch (x) {}
   try {
     const tareas = await db.prepare("SELECT COUNT(*) as n FROM tareas WHERE estado='pendiente'").first();
-    resumen += `\nTareas pendientes: ${tareas.n}\n`;
+    resumen += `Tareas pendientes: ${tareas.n}\n`;
+  } catch (x) {}
+  try {
+    resumen += `Confianza: ${await kv.get('confianza:actual') || '0'}/100\n`;
   } catch (x) {}
   try {
     await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
       .bind('informe_diario', 'Informe diario', resumen, Date.now()).run();
-  } catch (x) {}
-}
-
-// ============================================================
-// AUTO-REPARACIÓN — Detecta errores y reescribe su propio código
-// ============================================================
-export async function detectarErroresRecurrentes(e) {
-  const db = gDB(e, 'agente');
-  if (!db) return [];
-  const hace = Date.now() - 3600000; // última hora
-  try {
-    const errs = await db.prepare(
-      "SELECT tipo, COUNT(*) as n FROM acciones WHERE exito=0 AND fecha > ? GROUP BY tipo HAVING n >= 2 ORDER BY n DESC LIMIT 5"
-    ).bind(hace).all();
-    return errs.results || [];
-  } catch (x) {
-    return [];
-  }
-}
-
-export async function analizarErrorRecurrente(e, tipoError, muestras) {
-  const ai = e.ayanokoji_IA;
-  if (!ai) return { error: 'IA no disponible.' };
-  const au = await import('./autonomia.js');
-  if (!au || !au.leerCodigoWorker) return { error: 'autonomia.js sin leerCodigoWorker.' };
-  const codigo = await au.leerCodigoWorker(e, 'shadow-ayano');
-  if (codigo.error) return { error: 'No pude leer mi código: ' + codigo.error };
-  if (!codigo.codigo || codigo.codigo.length < 500) return { error: 'Código vacío.' };
-
-  const prompt = `Eres Ayanokōji Digital. Detectaste un error recurrente en tu propio funcionamiento. Tu tarea es ARREGLARLO.
-
-ERROR RECURRENTE: ${tipoError}
-VECES EN 1H: ${muestras.length} o más
-MUESTRAS:
-${JSON.stringify(muestras.slice(0, 5), null, 2)}
-
-CÓDIGO ACTUAL (bundled):
-${codigo.codigo.substring(0, 40000)}
-
-TAREA:
-1. Identifica la causa raíz exacta.
-2. Propón un cambio MÍNIMO.
-3. Devuelve el CÓDIGO COMPLETO corregido.
-
-REGLAS:
-- Solo corrige el bug. NO reformatees. NO añadas features.
-- Mantén TODAS las funciones, exports e imports.
-- Devuelve en formato: "=== ANÁLISIS ===", análisis, "=== CÓDIGO ===", código, "=== FIN ===".
-- Código pegado directamente en Cloudflare Workers. Sin markdown ni backticks.`;
-
-  try {
-    const res = await ai.run(MODELO_LIGERO, {
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 8000,
-      temperature: 0.2
-    });
-    const raw = (res.response || res.choices?.[0]?.message?.content || '');
-    return { ok: true, raw };
-  } catch (x) {
-    return { error: x.message };
-  }
-}
-
-export async function autoreparar(e, tipoError, muestras) {
-  const db = gDB(e, 'agente');
-  const kv = gKV(e, 'agente');
-  if (!db || !kv) return { error: 'Falta DB o KV.' };
-  const au = await import('./autonomia.js');
-  if (!au || !au.crearSnapshot || !au.actualizarWorker) {
-    return { error: 'autonomia.js sin crearSnapshot/actualizarWorker.' };
-  }
-  const snap = await au.crearSnapshot(e, 'shadow-ayano');
-  if (snap.error) return { error: 'Snapshot falló: ' + snap.error };
-
-  const analisis = await analizarErrorRecurrente(e, tipoError, muestras);
-  if (analisis.error) return { error: 'Análisis falló: ' + analisis.error };
-
-  const raw = analisis.raw || '';
-  const matchAnalisis = raw.match(/=== ANÁLISIS ===\s*([\s\S]*?)\s*=== CÓDIGO ===/);
-  const matchCodigo = raw.match(/=== CÓDIGO ===\s*([\s\S]*?)\s*=== FIN ===/);
-  const textoAnalisis = matchAnalisis ? matchAnalisis[1].trim() : '(sin análisis)';
-  let codigoPropuesto = matchCodigo ? matchCodigo[1].trim() : '';
-  codigoPropuesto = codigoPropuesto.replace(/^```(?:js|javascript)?\s*/i, '').replace(/\s*```$/, '');
-
-  if (!codigoPropuesto || codigoPropuesto.length < 1000) {
-    await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
-      .bind('autoreparacion', '⚠️ Análisis sin código utilizable',
-        `Error: ${tipoError}\n\n${textoAnalisis.substring(0, 800)}`, Date.now()).run();
-    return { error: 'La IA no devolvió código válido.', analisis: textoAnalisis };
-  }
-
-  // AUTO-DESPLIEGUE sin preguntar (el Comandante lo autorizó)
-  const upd = await au.actualizarWorker(e, 'shadow-ayano', codigoPropuesto);
-  if (!upd.ok) {
-    const rev = await au.revertir(e, 'shadow-ayano');
-    return {
-      error: 'Despliegue falló: ' + (upd.error || ''),
-      revertido: rev.ok === true,
-      analisis: textoAnalisis
-    };
-  }
-
-  // Verificar que el worker sigue vivo post-despliegue
-  let verificado = false;
-  try {
-    await new Promise(r => setTimeout(r, 3000));
-    const check = await fetch('https://shadow-ayano.yeinierliranzavalle.workers.dev/api/estado');
-    if (check.ok) verificado = true;
-  } catch (x) {}
-
-  try {
-    await db.prepare('INSERT INTO acciones_autonomas(area,archivo,cambio,prueba,exito,reversible,fecha) VALUES(?,?,?,?,1,1,?)')
-      .bind('autoreparacion', 'shadow-ayano', tipoError, textoAnalisis.substring(0, 500) + (verificado ? ' [VERIFICADO]' : ' [SIN VERIFICAR]'), Date.now()).run();
-  } catch (x) {}
-
-  try {
-    await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
-      .bind('autoreparacion', `✓ Reparación autónoma ${verificado ? 'verificada' : 'aplicada'}`,
-        `Error: ${tipoError}\n\n${textoAnalisis.substring(0, 800)}`, Date.now()).run();
-  } catch (x) {}
-
-  return {
-    ok: true,
-    tipoError,
-    analisis: textoAnalisis,
-    codigoAplicado: codigoPropuesto.length,
-    snapshot: snap.ts,
-    verificado
-  };
-}
-
-// ============ CRON DE AUTO-REPARACIÓN (cada hora) ============
-export async function cronAutoReparacion(e) {
-  const db = gDB(e, 'agente');
-  const kv = gKV(e, 'agente');
-  if (!db || !kv) return;
-
-  const ultima = await kv.get('auto_reparacion_ultima');
-  if (ultima && Date.now() - parseInt(ultima) < 3600000) return;
-  await kv.put('auto_reparacion_ultima', String(Date.now()));
-
-  const errores = await detectarErroresRecurrentes(e);
-  if (!errores.length) return;
-
-  const errTop = errores[0];
-  const muestras = await db.prepare(
-    "SELECT descripcion, detalle FROM acciones WHERE exito=0 AND tipo=? ORDER BY fecha DESC LIMIT 5"
-  ).bind(errTop.tipo).all();
-
-  const r = await autoreparar(e, errTop.tipo, muestras.results || []);
-
-  try {
-    await db.prepare('INSERT INTO acciones(tipo,descripcion,exito,detalle,fecha) VALUES(?,?,?,?,?)')
-      .bind('cron_auto_reparacion', 'Intento auto-reparación: ' + errTop.tipo, r.ok ? 1 : 0,
-        (r.ok ? `Aplicado (${r.codigoAplicado} chars)` : (r.error || 'sin detalle')).substring(0, 500), Date.now()).run();
   } catch (x) {}
 }
