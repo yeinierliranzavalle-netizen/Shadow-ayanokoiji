@@ -28,6 +28,7 @@ async function opcional(nombre) {
     if (nombre === 'autonomia' || nombre === './autonomia.js') return await import('./autonomia.js');
     if (nombre === 'publisher' || nombre === './publisher.js') return await import('./publisher.js');
     if (nombre === 'sandbox' || nombre === './sandbox.js') return await import('./sandbox.js');
+    if (nombre === 'examen' || nombre === './examen.js') return await import('./examen.js');
     return null;
   } catch (e) { return null; }
 }
@@ -45,7 +46,7 @@ const TTL_RESUMENES = 1800;
 const TTL_CORRECCIONES = 3600;
 const TTL_ESTRATEGIAS = 3600;
 
-const ARCHIVOS_BACKEND = ['worker.js', 'nucleo.js', 'shared.js', 'proc.js', 'autonomia.js', 'tools.js', 'doctrina.js', 'identidad.js', 'presupuesto.js', 'notify.js', 'publisher.js', 'social.js', 'sandbox.js'];
+const ARCHIVOS_BACKEND = ['worker.js', 'nucleo.js', 'shared.js', 'proc.js', 'autonomia.js', 'tools.js', 'doctrina.js', 'identidad.js', 'presupuesto.js', 'notify.js', 'publisher.js', 'social.js', 'sandbox.js', 'examen.js'];
 const ARCHIVOS_FRONTEND = ['index.html', 'styles.css', 'app.js'];
 
 async function conCache(e, clave, ttlSeg, fn) {
@@ -808,7 +809,7 @@ async function servirImagen(r, e) {
 }
 
 async function rEst(e, uid) {
-  let n = 0, c2 = 0, a = 0, p = 0, s = 0, hl = 0, tareas = 0, workers = 0, notif = 0;
+  let n = 0, c2 = 0, a = 0, p = 0, s = 0, hl = 0, tareas = 0, workers = 0, notif = 0, confianza = 0;
   try {
     if (e.DB) {
       try { const r1 = await e.DB.prepare('SELECT COUNT(*) as n FROM historial WHERE user_id=?').bind(uid).first(); n = r1 ? r1.n : 0; } catch (x) {}
@@ -821,8 +822,11 @@ async function rEst(e, uid) {
       try { const r8 = await e.DB.prepare('SELECT COUNT(*) as n FROM workers_registrados WHERE activo=1').first(); workers = r8 ? r8.n : 0; } catch (x) {}
       try { const r9 = await e.DB.prepare('SELECT COUNT(*) as n FROM notificaciones WHERE leida=0').first(); notif = r9 ? r9.n : 0; } catch (x) {}
     }
+    if (e.KV) {
+      try { confianza = parseInt(await e.KV.get('confianza:actual') || '0'); } catch (x) {}
+    }
   } catch (x) {}
-  return J({ respuesta: `Sistema activo (v18.0, modelo 70B + caché TTL largo). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas: ${tareas}. Workers: ${workers}. Notif sin leer: ${notif}.` });
+  return J({ respuesta: `Sistema activo (v19.0, modelo 70B + caché TTL largo). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos, ${a} archivos, ${p} procesos, ${s} resúmenes. Tareas: ${tareas}. Workers: ${workers}. Notif sin leer: ${notif}. Confianza: ${confianza}/100.` });
 }
 
 async function rLeer(e, uid) {
@@ -979,7 +983,7 @@ async function diagnostico(r, e) {
     let kvCount = 'sin kv';
     try { const lista = await kvN.list({ limit: 1000 }); kvCount = lista.keys.length; } catch (x) {}
     const modulos = {};
-    for (const m of ['social','autonomia','publisher','sandbox']) {
+    for (const m of ['social','autonomia','publisher','sandbox','examen']) {
       const x = await opcional(m);
       modulos[m] = !!x;
     }
@@ -1090,14 +1094,15 @@ async function cancelarAprobacion(r, e) {
 
 async function diagnosticoVariables(r, e) {
   const kv = gKV(e, 'agente');
-  let cacheRelacion = null, cacheRelacionFecha = null;
+  let cacheRelacion = null, cacheRelacionFecha = null, confianza = 0;
   try {
     cacheRelacion = await kv.get('relacion:cache');
     cacheRelacionFecha = await kv.get('relacion:cache_fecha');
+    confianza = parseInt(await kv.get('confianza:actual') || '0');
   } catch (x) {}
   return J({
     timestamp: new Date().toISOString(),
-    version: '18.0',
+    version: '19.0',
     token_presente: !!e.GITHUB_TOKEN,
     token_longitud: e.GITHUB_TOKEN ? e.GITHUB_TOKEN.length : 0,
     repo_backend_presente: !!e.GITHUB_REPO_BACKEND,
@@ -1113,12 +1118,12 @@ async function diagnosticoVariables(r, e) {
     ttls: { historial: TTL_HISTORIAL, contexto: TTL_CONTEXTO, resumenes: TTL_RESUMENES, correcciones: TTL_CORRECCIONES, estrategias: TTL_ESTRATEGIAS },
     cache_relacion_existe: !!cacheRelacion,
     cache_relacion_longitud: cacheRelacion ? cacheRelacion.length : 0,
-    cache_relacion_fecha: cacheRelacionFecha || null
+    cache_relacion_fecha: cacheRelacionFecha || null,
+    confianza_actual: confianza
   });
 }
 
 async function testGithub(r, e) {
-  const kv = gKV(e, 'agente');
   const repoBackend = e.GITHUB_REPO_BACKEND || null;
   const repoFrontend = e.GITHUB_REPO_FRONTEND || null;
   const resultados = {};
@@ -1221,7 +1226,6 @@ async function chat(r, e, c) {
       if (!repo) return J({ respuesta: 'Repo no configurado.' });
       const archivo = detectarArchivoEnMensaje(m);
       if (!archivo) {
-        // Si no se detecta archivo, listar los disponibles
         const r1 = await githubListarArchivos(e, repo);
         if (r1.error) return J({ respuesta: `Error al listar archivos: ${r1.error}` });
         const lista = r1.archivos.map(a => `· ${a.ruta}`).join('\n');
@@ -1232,7 +1236,7 @@ async function chat(r, e, c) {
       }
       const r1 = await githubLeerArchivo(e, repo, archivo);
       if (r1.error) return J({ respuesta: `Error al leer ${archivo}: ${r1.error}` });
-      const contenido = r1.contenido.length > 8000 ? r1.contenido.substring(0, 8000) + `\n\n[... archivo truncado. ${r1.contenido.length} chars totales. Pide "lee completo ${archivo}" si necesitas verlo todo.]` : r1.contenido;
+      const contenido = r1.contenido.length > 8000 ? r1.contenido.substring(0, 8000) + `\n\n[... archivo truncado. ${r1.contenido.length} chars totales.]` : r1.contenido;
       return J({
         respuesta: `**${archivo}** (${r1.tamaño} chars):\n\n\`\`\`js\n${contenido}\n\`\`\``,
         herramientas_usadas: [{ tool: 'leer_source', ok: true }]
@@ -1260,16 +1264,16 @@ async function chat(r, e, c) {
       const t = m.toLowerCase();
       if (t.includes('arquitecto')) {
         await kvN.put('modo_arquitecto', 'true', { expirationTtl: 86400 });
-        return J({ respuesta: 'Modo Arquitecto **activado** por 24h. Cuando planifiquemos algo, responderé en formato estructurado: objetivo, opciones, recomendación, riesgos, punto ciego. Widget "Arq" en verde.', modo_activo: 'arquitecto' });
+        return J({ respuesta: 'Modo Arquitecto **activado** por 24h.', modo_activo: 'arquitecto' });
       }
       if (t.includes('intensivo')) {
         await kvN.put('modo_intensivo', 'true', { expirationTtl: 86400 });
         await kvN.put('modo_intensivo_inicio', String(Date.now()), { expirationTtl: 86400 });
-        return J({ respuesta: 'Modo Intensivo **activado** por 24h. Puedo hacerte hasta 5 preguntas de criterio al día. Widget "Int" en verde. Se desactiva solo a las 24h.', modo_activo: 'intensivo' });
+        return J({ respuesta: 'Modo Intensivo **activado** por 24h. Hasta 5 preguntas de criterio al día.', modo_activo: 'intensivo' });
       }
       if (t.includes('ausente')) {
         await kvN.put('modo_ausente', 'true', { expirationTtl: 86400 * 7 });
-        return J({ respuesta: 'Modo Ausente **activado** por 7 días. No enviaré notificaciones push. Prepararé un informe si pasan 3+ días sin escribirte. Widget "Aus" en verde.', modo_activo: 'ausente' });
+        return J({ respuesta: 'Modo Ausente **activado** por 7 días.', modo_activo: 'ausente' });
       }
       return J({ respuesta: 'Modos disponibles: "activa modo arquitecto", "activa modo intensivo", "activa modo ausente".' });
     }
@@ -1277,7 +1281,6 @@ async function chat(r, e, c) {
     if (i === 'arquitecto') {
       const kvN = gKV(e, 'agente');
       await kvN.put('modo_arquitecto', 'true', { expirationTtl: 3600 });
-      // Caer al flujo normal del modelo (que leerá el flag y responderá en formato arquitecto)
     }
 
     if (i === 'guardar_datos') {
@@ -1340,7 +1343,6 @@ async function chat(r, e, c) {
       return J({ respuesta: 'Dime el área o el nombre del worker.', user_id: uid });
     }
 
-    // === FLUJO NORMAL DEL MODELO ===
     let perfilBase = '';
     if (e.KV) {
       try {
@@ -1422,20 +1424,21 @@ async function chat(r, e, c) {
     let systemPrompt = construirSystemPrompt(ctx, fs, rec, perfilBase, correcciones, estrategias, conciencia);
 
     if (cacheRelacion && cacheRelacion.length > 100) {
-      systemPrompt += `\n\n=== CACHÉ DE RELACIÓN (patrones entre el Comandante y yo) ===\n${cacheRelacion.substring(0, 3000)}`;
+      systemPrompt += `\n\n=== CACHÉ DE RELACIÓN ===\n${cacheRelacion.substring(0, 3000)}`;
     }
 
     const kvM = gKV(e, 'agente');
-    let modoArqActivo = false, modoIntActivo = false;
+    let modoArqActivo = false, modoIntActivo = false, confianzaActual = 0;
     try {
       modoArqActivo = (await kvM.get('modo_arquitecto')) === 'true';
       modoIntActivo = (await kvM.get('modo_intensivo')) === 'true';
+      confianzaActual = parseInt(await kvM.get('confianza:actual') || '0');
     } catch (x) {}
     if (modoArqActivo || i === 'arquitecto') {
-      systemPrompt += `\n\n=== MODO ARQUITECTO ACTIVO ===\nResponde en formato estructurado obligatorio:\n1. OBJETIVO CLARO (1-2 líneas)\n2. RESTRICCIONES (lista breve)\n3. OPCIONES (mínimo 2, máximo 3, con pros/contras/riesgo)\n4. RECOMENDACIÓN DE AYANOKŌJI (cuál eliges y por qué)\n5. PRÓXIMO PASO CONCRETO (una sola acción ejecutable)\n6. RIESGOS QUE PODRÍAN MATAR ESTO (3 puntos)\n7. ¿QUÉ NO ESTAMOS VIENDO? (punto ciego, 2-3 líneas)\n`;
+      systemPrompt += `\n\n=== MODO ARQUITECTO ACTIVO ===\nResponde en formato estructurado: objetivo, restricciones, opciones, recomendación, próximo paso, riesgos, punto ciego.\n`;
     }
     if (modoIntActivo) {
-      systemPrompt += `\n\n=== MODO INTENSIVO ACTIVO ===\nPuedes hacer hasta 5 preguntas de criterio al Comandante hoy. Aprovecha para calibrar tu modelo de su criterio.\n`;
+      systemPrompt += `\n\n=== MODO INTENSIVO ACTIVO ===\nHasta 5 preguntas de criterio hoy.\n`;
     }
 
     let mensajes = [
@@ -1457,7 +1460,7 @@ async function chat(r, e, c) {
       const invocaciones = parsearInvocaciones(rp);
 
       if (!invocaciones.length) {
-        respuestaFinal = rp || 'No obtuve respuesta del modelo. Intenta de nuevo.';
+        respuestaFinal = rp || 'No obtuve respuesta del modelo.';
         break;
       }
 
@@ -1467,7 +1470,7 @@ async function chat(r, e, c) {
       if (peligrosa) {
         await guardarAprobacionPendiente(e, uid, peligrosa);
         aprobacionPendiente = peligrosa;
-        respuestaFinal = textoLimpio || `Voy a usar la herramienta **${peligrosa.tool}**.\n\nRazón: ${peligrosa.razon || '(sin especificar)'}\n\nParámetros: ${JSON.stringify(peligrosa.params).substring(0, 300)}\n\n¿Confirmas? Responde **sí** para ejecutar, **no** para cancelar.`;
+        respuestaFinal = textoLimpio || `Voy a usar **${peligrosa.tool}**.\n\nRazón: ${peligrosa.razon || '(sin especificar)'}\n\n¿Confirmas? Responde **sí** para ejecutar, **no** para cancelar.`;
         break;
       }
 
@@ -1486,11 +1489,11 @@ async function chat(r, e, c) {
       mensajes.push({ role: 'assistant', content: rp });
       mensajes.push({
         role: 'user',
-        content: `[RESULTADOS DE HERRAMIENTAS]\n${resultados.map(rr => `- ${rr.tool}: ${rr.ok ? 'OK' : 'ERROR'} → ${rr.ok ? rr.resultado : rr.error}`).join('\n\n')}\n\nContinúa con tu respuesta final al Comandante. NO incluyas bloques \`\`\`tool a menos que necesites otra herramienta.`
+        content: `[RESULTADOS DE HERRAMIENTAS]\n${resultados.map(rr => `- ${rr.tool}: ${rr.ok ? 'OK' : 'ERROR'} → ${rr.ok ? rr.resultado : rr.error}`).join('\n\n')}\n\nContinúa con tu respuesta final al Comandante.`
       });
 
       if (iteracion === MAX_ITERACIONES_TOOL) {
-        respuestaFinal = textoLimpio || 'He ejecutado herramientas pero no puedo procesar más en esta iteración. Revisa la bandeja de acciones.';
+        respuestaFinal = textoLimpio || 'He ejecutado herramientas pero no puedo procesar más en esta iteración.';
       }
     }
 
@@ -1498,7 +1501,7 @@ async function chat(r, e, c) {
     if (afirmaAccion && !invocacionesEjecutadas.length && e.DB) {
       try {
         const ult = await e.DB.prepare("SELECT tipo FROM acciones WHERE fecha > ? ORDER BY fecha DESC LIMIT 1").bind(Date.now() - 60000).first();
-        if (!ult) respuestaFinal += '\n\n_⚠️ No tengo registro de esa acción en mi historial reciente._';
+        if (!ult) respuestaFinal += '\n\n_⚠️ No tengo registro de esa acción._';
       } catch (x) {}
     }
 
@@ -1530,7 +1533,8 @@ async function chat(r, e, c) {
       aprobacion_pendiente: aprobacionPendiente ? aprobacionPendiente.tool : null,
       cache_usado: true,
       modo_arquitecto_activo: modoArqActivo,
-      modo_intensivo_activo: modoIntActivo
+      modo_intensivo_activo: modoIntActivo,
+      confianza_actual: confianzaActual
     });
   } catch (x) {
     return J({ respuesta: 'Error: ' + x.message });
@@ -1570,12 +1574,12 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '18.0' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '19.0' });
 
     if (p === '/api/relacion/construir' && r.method === 'POST') {
       const uid = 'comandante';
       const r1 = await construirCacheRelacion(e, uid);
-      return J(r1 || { error: 'No se pudo construir (historial insuficiente o IA no disponible).' });
+      return J(r1 || { error: 'No se pudo construir.' });
     }
     if (p === '/api/relacion/leer' && r.method === 'GET') {
       const kv = gKV(e, 'agente');
@@ -1676,7 +1680,7 @@ export default {
         const kvN = gKV(e, 'agente');
         if (kvN) await kvN.delete('cron_autonomo_ultima');
         await cronAutonomo(e);
-        return J({ ok: true, mensaje: 'Pulso enviado. Cron ejecutado.' });
+        return J({ ok: true, mensaje: 'Pulso enviado.' });
       } catch (x) { return J({ error: x.message }); }
     }
 
@@ -1698,7 +1702,7 @@ export default {
       const db = gDB(e, 'agente');
       await db.prepare('INSERT INTO correcciones_voz(contexto, correccion, fecha) VALUES(?,?,?)').bind('general', correccion, Date.now()).run();
       await invalidarCache(e, 'correcciones');
-      return J({ ok: true, mensaje: 'Corrección guardada como capa. Núcleo intacto.' });
+      return J({ ok: true, mensaje: 'Corrección guardada.' });
     }
 
     if (p === '/api/areas') return J({ total: Object.keys(AREAS).length, areas: AREAS });
@@ -1802,13 +1806,13 @@ export default {
 
     if (p === '/api/componentes' && r.method === 'GET') {
       return J({
-        pestanas: ['chat','sandbox','estrategias','shadow','stats','actividad','decisiones','ideas','bandeja'],
+        pestanas: ['chat','sandbox','estrategias','shadow','stats','actividad','decisiones','ideas','bandeja','calibracion'],
         botones: ['subir','imagen','indexar','migrar','diagnostico','procesos','contexto','corregir','limpiar'],
         acciones_chat: ['enviar_mensaje','cargar_historial','corregir_voz','generar_imagen','activar_modo'],
         acciones_auto: ['indexar','migrar','analizar','encolar','publicar','simular_estrategia','ejecutar_etapa','test_500'],
         acciones_cron: ['pulso','ritmo'],
         modos_disponibles: ['arquitecto','intensivo','ausente'],
-        version: '18.0',
+        version: '19.0',
         ttls_actuales: { historial: TTL_HISTORIAL, contexto: TTL_CONTEXTO, resumenes: TTL_RESUMENES, correcciones: TTL_CORRECCIONES, estrategias: TTL_ESTRATEGIAS }
       });
     }
@@ -1954,6 +1958,84 @@ export default {
     if (p === '/api/herramientas' && r.method === 'GET') return listarHerramientas(r, e);
     if (p === '/api/aprobacion/pendiente' && r.method === 'GET') return verAprobacionPendiente(r, e);
     if (p === '/api/aprobacion/cancelar' && r.method === 'POST') return cancelarAprobacion(r, e);
+
+    // === EXAMEN DE CRITERIO ===
+    if (p === '/api/examen/generar' && r.method === 'POST') {
+      const m = await opcional('examen');
+      if (!m) return J({ error: 'examen.js no instalado.' });
+      return J(await m.generarPregunta(e));
+    }
+    if (p === '/api/examen/responder' && r.method === 'POST') {
+      const b = await r.json();
+      if (!b.id || !b.respuesta) return J({ error: 'Faltan id y respuesta.' });
+      const m = await opcional('examen');
+      if (!m) return J({ error: 'examen.js no instalado.' });
+      return J(await m.responderPregunta(e, b.id, b.respuesta));
+    }
+    if (p === '/api/examen/listar' && r.method === 'GET') {
+      const m = await opcional('examen');
+      if (!m) return J({ error: 'examen.js no instalado.' });
+      return J(await m.listarExamenes(e, 20));
+    }
+    if (p === '/api/examen/pendiente' && r.method === 'GET') {
+      const db = gDB(e, 'agente');
+      if (!db) return J({ error: 'D1 no disponible.' });
+      try {
+        const p1 = await db.prepare("SELECT id,pregunta,opcion_a,opcion_b,opcion_c,fecha FROM examen_criterio WHERE respondida=0 ORDER BY fecha DESC LIMIT 1").first();
+        return J({ ok: true, pendiente: p1 || null });
+      } catch (x) { return J({ error: x.message }); }
+    }
+
+    // === CONFIANZA ===
+    if (p === '/api/confianza' && r.method === 'GET') {
+      const m = await opcional('autonomia');
+      if (!m) return J({ error: 'autonomia.js no instalado.' });
+      return J(await m.verConfianza(e));
+    }
+    if (p === '/api/confianza/historial' && r.method === 'GET') {
+      const kv = gKV(e, 'agente');
+      const h = JSON.parse(await kv.get('confianza:historial') || '[]');
+      return J({ ok: true, total: h.length, historial: h.slice(0, 50) });
+    }
+
+    // === MUNDO INTERNO ===
+    if (p === '/api/diario/leer' && r.method === 'GET') {
+      const uu = new URL(r.url);
+      const limite = parseInt(uu.searchParams.get('limite') || '10');
+      const m = await opcional('autonomia');
+      if (!m) return J({ error: 'autonomia.js no instalado.' });
+      return J(await m.leerDiario(e, limite));
+    }
+    if (p === '/api/lecciones/leer' && r.method === 'GET') {
+      const kv = gKV(e, 'agente');
+      const lecciones = JSON.parse(await kv.get('identidad:lecciones') || '[]');
+      return J({ ok: true, total: lecciones.length, lecciones: lecciones.slice(0, 30) });
+    }
+    if (p === '/api/deseos/leer' && r.method === 'GET') {
+      const m = await opcional('autonomia');
+      if (!m) return J({ error: 'autonomia.js no instalado.' });
+      return J(await m.leerDeseosActivos(e));
+    }
+    if (p === '/api/deseos/resolver' && r.method === 'POST') {
+      const b = await r.json();
+      if (b.indice === undefined || b.aprobado === undefined) return J({ error: 'Faltan indice y aprobado.' });
+      const m = await opcional('autonomia');
+      if (!m) return J({ error: 'autonomia.js no instalado.' });
+      return J(await m.resolverDeseo(e, b.indice, b.aprobado, b.razon));
+    }
+
+    // === MISIÓN ===
+    if (p === '/api/mision' && r.method === 'GET') {
+      const m = await opcional('autonomia');
+      if (!m) return J({ error: 'autonomia.js no instalado.' });
+      return J(await m.leerMision(e));
+    }
+    if (p === '/api/mision' && r.method === 'POST') {
+      const b = await r.json();
+      const m = await opcional('autonomia');
+      if (!m) return J({ error: 'autonomia.js no instalado.' });
+      return J(await m.actualizarMision(e, b));
+    }
 
     if (p === '/feed') {
       const m = await opcional('social');
