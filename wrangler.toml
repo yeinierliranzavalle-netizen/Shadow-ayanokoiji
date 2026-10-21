@@ -39,6 +39,15 @@ binding = "ayanokoji_IA"
 [triggers]
 crons = ["*/2 * * * *"]
 
+# ===================== VARIABLES PÚBLICAS =====================
+# Estas 3 variables viven aquí (no en el dashboard) para que cada deploy las
+# restaure automáticamente. Si la auto-reparación las borra en runtime, el
+# próximo push a main las vuelve a poner.
+[vars]
+GITHUB_BRANCH = "main"
+GITHUB_REPO_BACKEND = "yeinierliranzavalle-netizen/Shadow-ayanokoiji"
+GITHUB_REPO_FRONTEND = "yeinierliranzavalle-netizen/shadow-ayano_web"
+
 # ===================== OBSERVABILIDAD =====================
 [observability]
 enabled = true
