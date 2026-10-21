@@ -1,5 +1,5 @@
 // shared.js — Helpers, esquema y constantes compartidas
-// MODELO_LIGERO usa Llama 3.1 8B Fast (formato clásico, fiable)
+// Incluye tabla examen_criterio para el sistema de calibración
 
 export const MODELO = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 export const MODELO_LIGERO = '@cf/meta/llama-3.1-8b-instruct-fast';
@@ -122,7 +122,10 @@ const ESQUEMA = {
   memoria_personaje: [['user_id','TEXT'],['personaje','TEXT'],['recuerdo','TEXT'],['fecha','INTEGER']],
 
   // --- Conciencia del Comandante ---
-  conciencia_comandante: [['accion','TEXT'],['detalle','TEXT'],['pestana','TEXT'],['fecha','INTEGER']]
+  conciencia_comandante: [['accion','TEXT'],['detalle','TEXT'],['pestana','TEXT'],['fecha','INTEGER']],
+
+  // --- Examen de Criterio (NUEVA) ---
+  examen_criterio: [['fecha','INTEGER'],['pregunta','TEXT'],['opcion_a','TEXT'],['opcion_b','TEXT'],['opcion_c','TEXT'],['contexto','TEXT'],['respuesta_usuario','TEXT'],['prediccion','TEXT'],['razon_prediccion','TEXT'],['respondida','INTEGER DEFAULT 0'],['acierto','INTEGER'],['respondida_en','INTEGER']]
 };
 
 // ============================================================
@@ -135,7 +138,7 @@ export async function migrar(e, forzar = false) {
 
   if (kv && !forzar) {
     try {
-      const hecho = await kv.get('migrado_v13');
+      const hecho = await kv.get('migrado_v14');
       if (hecho === 'ok') return { ok: true, cached: true };
     } catch (x) {}
   }
@@ -172,6 +175,9 @@ export async function migrar(e, forzar = false) {
         }
         if (tabla === 'usuarios') {
           try { await db.prepare("CREATE INDEX IF NOT EXISTS idx_usuarios_alias ON usuarios(alias)").run(); } catch (x) {}
+        }
+        if (tabla === 'examen_criterio') {
+          try { await db.prepare("CREATE INDEX IF NOT EXISTS idx_examen_respondida ON examen_criterio(respondida, fecha)").run(); } catch (x) {}
         }
       } catch (x) {
         resultado.errores.push(tabla + ' (create): ' + x.message);
@@ -244,7 +250,7 @@ export async function migrar(e, forzar = false) {
   }
 
   if (kv && resultado.errores.length === 0) {
-    try { await kv.put('migrado_v13', 'ok', { expirationTtl: 3600 }); } catch (x) {}
+    try { await kv.put('migrado_v14', 'ok', { expirationTtl: 3600 }); } catch (x) {}
   }
 
   return resultado;
