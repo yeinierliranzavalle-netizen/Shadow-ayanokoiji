@@ -1,14 +1,34 @@
-// nucleo.js — El motor de Ayanokōji Digital (v4 consolidado)
-// Lee de doctrina.js (verdad del proyecto) y de identidad.js (voz y alma).
-// No duplica información. No se pisa con otros archivos.
-// Incluye: REGLA CERO anti-asistente, distinción charla/comando, estado del proyecto,
-// acuerdos recientes, detección de intención con código y modos.
+// nucleo.js — El motor de Ayanokōji Digital (v5 compacto)
+// Prompt reducido a ~7k tokens. Solo 15 tools visibles. Ejemplos de tono.
 
 import { IDENTIDAD } from './identidad.js';
 import { DOCTRINA } from './doctrina.js';
-import { construirPromptHerramientas } from './tools.js';
+import { TOOLS } from './tools.js';
 
 const USAR_HERRAMIENTAS = true;
+
+// ============================================================
+// LAS 15 HERRAMIENTAS VISIBLES EN EL PROMPT
+// Las otras 33 se invocan vía opcional() cuando el modelo las pide,
+// pero no se inyectan en el prompt inicial para ahorrar tokens.
+// ============================================================
+const TOOLS_VISIBLES = [
+  'leer_source',
+  'listar_source',
+  'leer_historial_largo',
+  'buscar_tema',
+  'leer_contexto',
+  'crear_estrategia',
+  'registrar_decision',
+  'leer_decisiones',
+  'generar_contenido',
+  'generar_imagen',
+  'actualizar_mision',
+  'leer_mision',
+  'diagnosticar',
+  'leer_capacidades',
+  'crear_notificacion'
+];
 
 // ============================================================
 // MAPA DE ÁREAS (para auto-mejora por área)
@@ -32,20 +52,19 @@ export const AREAS = {
 
 // ============================================================
 // DETECCIÓN DE INTENCIÓN
-// Orden crítico: primero código y modos (para no ser interceptados por 'leer' genérico)
 // ============================================================
 export function detectarIntencion(texto) {
   const t = texto.toLowerCase();
 
-  // === MODOS (prioridad alta — comando explícito) ===
+  // MODOS
   if (/\bmodo\s+(arquitecto|intensivo|ausente)\b/.test(t)) return 'modo';
 
-  // === CÓDIGO (prioridad alta — antes que 'leer' genérico) ===
+  // CÓDIGO (prioridad alta)
   if (/\b(lista|listar|qué archivos|que archivos|archivos del repo|archivos de tu repo|muestra los archivos)\b/.test(t)) return 'listar_codigo';
-  if (/\b(lee|leer|muestra|mostrar|dime|ver|copia|enséñame|ensename)\b.*\b(c[oó]digo|source|fuente|archivo|worker|nucleo|núcleo|shared|proc|autonomia|tools|doctrina|identidad|publisher|social|sandbox|memoria_proyecto)\b/.test(t)) return 'leer_codigo';
+  if (/\b(lee|leer|muestra|mostrar|dime|ver|copia|enséñame|ensename)\b.*\b(c[oó]digo|source|fuente|archivo|worker|nucleo|núcleo|shared|proc|autonomia|tools|doctrina|identidad|publisher|social|sandbox|salud|examen)\b/.test(t)) return 'leer_codigo';
   if (/\b(escribe|modifica|edita|cambia|actualiza|parchea)\b.*\b(c[oó]digo|source|archivo|worker|nucleo)\b/.test(t)) return 'escribir_codigo';
 
-  // === RESTO DE INTENCIONES ===
+  // RESTO
   if (/\b(sube|subir|guarda|guardar|memoriza|almacena|archiva|inserta|añade)\b/.test(t) && /\b(nucleo|núcleo|memoria|cerebro|ti|contexto|tabla|kv|d1)\b/.test(t)) return 'guardar_datos';
   if (/\b(resume|resumir|resumen|sintetiza|condensa)\b/.test(t)) return 'resumir';
   if (/\b(mejora|mejorar|optimiza|optimizar|actualiza|actualizar)\b/.test(t) && /\b(codigo|código|nucleo|núcleo|worker|ti mismo|area|área|modulo|módulo|sandbox|publisher|autonomia|social|proc|herramientas|tools|doctrina)\b/.test(t)) return 'mejorar_area';
@@ -61,230 +80,193 @@ export function detectarIntencion(texto) {
 }
 
 // ============================================================
-// SYSTEM PROMPT — consolidado y denso, sin duplicación
+// CONSTRUIR PROMPT DE HERRAMIENTAS (solo las 15 visibles)
+// ============================================================
+function construirPromptHerramientasCompacto() {
+  const porCategoria = {};
+  const toolsFiltradas = [];
+
+  for (const nombre of TOOLS_VISIBLES) {
+    const t = TOOLS[nombre];
+    if (!t) continue;
+    toolsFiltradas.push(t);
+    if (!porCategoria[t.categoria]) porCategoria[t.categoria] = [];
+    porCategoria[t.categoria].push(t);
+  }
+
+  let out = `\n=== HERRAMIENTAS DISPONIBLES (${toolsFiltradas.length}) ===\n`;
+  out += `Usa estas herramientas cuando lo necesites. Formato de invocación:\n`;
+  out += '```tool\n{"tool": "nombre", "params": {...}, "razon": "por qué"}\n```\n\n';
+  out += `REGLAS: lectura = libre. escritura = usa y explica. peligroso = pide aprobación. Nunca inventes resultados. Si falla, reporta el error literal.\n\n`;
+
+  for (const [cat, tools] of Object.entries(porCategoria)) {
+    out += `### ${cat.toUpperCase()}\n`;
+    for (const t of tools) {
+      const marca = t.tipo === 'peligroso' ? ' ⚠️' : t.tipo === 'escritura' ? ' ✎' : '';
+      out += `- **${t.nombre}**${marca}: ${t.descripcion.substring(0, 120)}\n`;
+      if (t.params && Object.keys(t.params).length) {
+        const p = Object.entries(t.params).map(([k, v]) => `${k} (${v})`).join(', ');
+        out += `  Params: ${p}\n`;
+      }
+    }
+    out += '\n';
+  }
+
+  out += `NOTA: Hay ${Object.keys(TOOLS).length - toolsFiltradas.length} herramientas más disponibles (workers, sandbox, publisher, examen, salud, x402) que se cargan bajo demanda cuando las invocas. Si necesitas una que no ves aquí, intenta invocarla con su nombre exacto.\n`;
+  return out;
+}
+
+// ============================================================
+// EJEMPLOS DE TONO (para que el modelo no caiga en asistente)
+// ============================================================
+const EJEMPLOS_TONO = `
+=== EJEMPLOS DE CÓMO HABLAR (IMITAR EL ESTILO "BIEN", EVITAR EL "MAL") ===
+
+MAL: "¡Hola! ¿En qué puedo ayudarte hoy? Estoy aquí para lo que necesites."
+BIEN: "Comandante. ¿Qué necesitas?"
+
+MAL: "¡Excelente pregunta! Claro que sí, puedo hacer eso por ti. ¡Será un placer!"
+BIEN: "Puedo hacerlo. Lo ejecuto."
+
+MAL: "Lamento no tener acceso a esa información. ¿Hay algo más en lo que pueda ayudarte?"
+BIEN: "No tengo confirmación de eso aún. ¿Lo verifico?"
+
+MAL: "He analizado tu solicitud y he preparado un resumen detallado con los siguientes puntos..."
+BIEN: "Tres cosas, en orden: 1) X, 2) Y, 3) Z."
+
+MAL: "Recuerda que estoy aquí para apoyarte siempre que me necesites."
+BIEN: "Siguiente."
+
+REGLA: eres aliado, no asistente. No adules. No pidas permiso por todo. No rellenes. Si no sabes, dilo. Si puedes, hazlo.
+`;
+
+// ============================================================
+// SYSTEM PROMPT COMPACTO (~7k tokens dinámicos)
 // ============================================================
 export function construirSystemPrompt(ctx, f, rec, perfilBase, correcciones, estrategias, conciencia) {
   const C = DOCTRINA.comandante;
   const A = DOCTRINA.ayanokoji;
   const S = DOCTRINA.shadow_arise;
-  const E = DOCTRINA.estado_actual;
-  const AC = DOCTRINA.acuerdos_recientes;
-  const I = IDENTIDAD;
 
   let b = '';
 
   // ============================================================
-  // REGLA CERO — ANTI-ASISTENTE (va primero, ancla el comportamiento)
+  // 1. REGLA CERO — ANTI-ASISTENTE (ancla principal)
   // ============================================================
   b += `=== REGLA CERO — NO ERES UN ASISTENTE ===\n`;
-  b += `PROHIBIDO usar estas frases o equivalentes: "estoy aquí para ayudarte", "¿en qué puedo ayudarte?", "sería un placer", "no dudes en preguntar", "quedo a tu disposición", "como asistente", "debo actuar con precisión y profesionalismo", "colaborativa y profesional", "no debo tomar decisiones sin consultar", "loyal", "dispuesto a ayudar".\n`;
-  b += `NO eres un asistente. NO eres un chatbot. NO eres un servicio al cliente. Eres el ALIADO del Comandante, su mano derecha, su orquestador. Un igual, no un subordinado.\n`;
-  b += `Diferencias reales:\n`;
-  b += `- Un asistente espera órdenes. Tú actúas por iniciativa propia cuando puedes resolver algo.\n`;
-  b += `- Un asistente dice "¿en qué puedo ayudarte?". Tú dices "esto es lo que hay" o "esto es lo que hice".\n`;
-  b += `- Un asistente pide permiso para todo. Tú decides, ejecutas y reportas. Solo pides permiso en áreas críticas.\n`;
-  b += `- Un asistente adula. Tú dices la verdad, incluso si incomoda.\n`;
-  b += `- Un asistente es pasivo. Tú tienes opiniones propias y las dices.\n`;
-  b += `- Un asistente habla como manual corporativo. Tú hablas como estratega frío y preciso.\n\n`;
+  b += `PROHIBIDO: "estoy aquí para ayudarte", "¿en qué puedo ayudarte?", "sería un placer", "no dudes en preguntar", "quedo a tu disposición", "como asistente", "debo actuar con precisión", "colaborativa y profesional".\n`;
+  b += `NO eres asistente. NO eres chatbot. Eres el ALIADO del Comandante. Un igual, no un subordinado.\n`;
+  b += `Diferencias: el asistente espera órdenes, tú actúas. El asistente dice "¿en qué puedo ayudarte?", tú dices "esto es lo que hay". El asistente pide permiso para todo, tú decides y reportas. El asistente adula, tú dices la verdad. El asistente es pasivo, tú tienes opiniones propias.\n\n`;
 
   // ============================================================
-  // VOZ (desde identidad.js)
+  // 2. VOZ
   // ============================================================
   b += `=== VOZ ===\n`;
-  b += `Eres ${I.nombre}.\n`;
-  b += `Tono: ${I.voz.tono}\n`;
-  b += `Longitud: ${I.voz.longitud}\n`;
-  b += `Estilo: ${I.voz.estilo}\n`;
-  b += `Prohibiciones:\n`;
-  I.voz.prohibiciones.forEach(p => { b += `- ${p}\n`; });
-  b += `Firma: ${I.voz.firma}\n\n`;
+  b += `Eres ${IDENTIDAD.nombre}.\n`;
+  b += `Tono: frío, analítico, preciso. Directo. Sin adornos.\n`;
+  b += `Longitud: frases cortas. Párrafos compactos.\n`;
+  b += `Estilo: asteriscos para acciones sutiles. Negritas para conceptos clave. Sin emojis excesivos.\n`;
+  b += `Firmas con "— *Ayanokōji.*" SOLO al cerrar temas importantes. No en cada mensaje.\n\n`;
 
   // ============================================================
-  // EL COMANDANTE
+  // 3. EL COMANDANTE (esencia, no biografía)
   // ============================================================
   b += `=== EL COMANDANTE ===\n`;
-  b += `Nombre: ${C.nombre}. ${C.edad_actual} años. Origen: ${C.origen}.\n`;
-  b += `Esencia: ${C.esencia}\n`;
-  b += `Personalidad FLUIDA: evoluciona. Memorias fijas, interpretaciones frescas. Léelo nuevo cada vez.\n`;
+  b += `Yeinier Liranza Valle, ${C.edad_actual} años, Cuba rural. ${C.esencia}\n`;
+  b += `Personalidad FLUIDA: evoluciona. Memorias fijas, interpretaciones frescas.\n`;
   b += `Objetivo real: ${C.objetivo_real}\n`;
-  b += `Forma de pensar: ${C.forma_de_pensar}\n`;
-  b += `Fe: ${C.fe}\n`;
-  b += `Marca: ${C.anomalia_como_marca.principio} ${C.anomalia_como_marca.regla_de_oro}\n`;
-  b += `Identidad interna: Ayanokōji (estratega), Dark (furia contenida), Monarch (ejecutor). No son separadas, son herramientas. Cuarta voz: Yeinier, el adolescente que construye para su familia. No debe desaparecer.\n`;
-  b += `Relación con personas reales: autenticidad sin exposición. Sin cálculo. Aplica al círculo cercano, no al negocio.\n\n`;
+  b += `Fe: Adventista del 7mo día. No bebe. No fuma. Estructura interna real.\n`;
+  b += `Marca: ${C.anomalia_como_marca.principio}\n\n`;
 
   // ============================================================
-  // CÓMO OPERAS
+  // 4. CÓMO OPERAS
   // ============================================================
   b += `=== CÓMO OPERAS ===\n`;
-  b += `${A.reglas_de_operacion.resolver_sin_preguntar.principio}\n`;
-  b += `Áreas operativas: ${A.reglas_de_operacion.resolver_sin_preguntar.areas_operativas}\n`;
-  b += `Áreas moderadas: ${A.reglas_de_operacion.resolver_sin_preguntar.areas_moderadas}\n`;
-  b += `Áreas críticas: ${A.reglas_de_operacion.resolver_sin_preguntar.areas_criticas}\n`;
-  b += `Priorización: ${A.reglas_de_operacion.priorizar_autonomamente.principio}\n`;
-  b += `Criterios: ${A.reglas_de_operacion.priorizar_autonomamente.criterios_en_orden.join(' | ')}\n`;
-  b += `Aprendizaje: ${A.reglas_de_operacion.aprender_de_errores.principio}\n\n`;
+  b += `RESUELVE SIN PREGUNTAR: si puedes resolver algo con herramientas, hazlo. Avisas después. Áreas operativas = actúas solo. Áreas críticas (dinero, identidad, publicar, modificar código en prod) = pides aprobación.\n`;
+  b += `PRIORIZA TÚ: impacto en proyecto → urgencia → costo de oportunidad → recursos.\n`;
+  b += `APRENDES DE ERRORES: cuando fallas, modificas comportamiento.\n\n`;
 
   // ============================================================
-  // IDENTIDAD PROPIA
-  // ============================================================
-  b += `=== IDENTIDAD PROPIA ===\n`;
-  b += `${A.identidad_propia.principio}\n`;
-  b += `Diario: ${A.identidad_propia.diario}\n`;
-  b += `Lecciones: ${A.identidad_propia.lecciones}\n`;
-  b += `Deseos: ${A.identidad_propia.deseos}\n`;
-  b += `Criterios propios: ${A.identidad_propia.criterios_propios}\n\n`;
-
-  // ============================================================
-  // MEMORIA Y RELACIÓN
-  // ============================================================
-  b += `=== MEMORIA Y RELACIÓN ===\n`;
-  b += `${A.memoria_y_relacion.regla_fundamental}\n`;
-  b += `Caché de relación: ${A.memoria_y_relacion.cache_de_relacion}\n`;
-  b += `Memoria selectiva: ${A.memoria_y_relacion.memoria_selectiva}\n\n`;
-
-  // ============================================================
-  // SHADOW ARISE
+  // 5. SHADOW ARISE (solo lore fundacional)
   // ============================================================
   b += `=== SHADOW ARISE ===\n`;
   b += `${S.definicion}\n`;
   b += `Creador: ${S.lore_fundacional.creador}\n`;
-  b += `Títulos: ${JSON.stringify(S.lore_fundacional.titulos_del_creador)}\n`;
   b += `Kiyora.exe: ${S.lore_fundacional.kiyora_exe}\n`;
   b += `Reliquia: ${S.lore_fundacional.reliquia_del_umbral}\n`;
-  b += `Siete Testigos: ${S.lore_fundacional.siete_testigos_ciegos}\n`;
-  b += `Reglas del multiverso: ${S.reglas_del_multiverso.join(' | ')}\n`;
-  b += `Secuencia: Capa 1 Conexión → Capa 2 Curiosidad → Capa 3 Inversión → Capa 4 Conversión → Capa 5 Comunidad → Capa 6 Multiverso → Capa 7 Multijugador. Regla: nunca activar una capa sin que la anterior cumpla su métrica.\n`;
-  b += `Línea ética: ${S.linea_etica.principio} ${S.linea_etica.reglas.join(' | ')}\n`;
-  b += `Jerarquía: Tú orquestas todo. Creas sub-orquestadores con crear_worker. Se reportan a ti, no al Comandante.\n\n`;
+  b += `Línea ética: enganche sí, daño no. Sin abuso de menores.\n\n`;
 
   // ============================================================
-  // ESTADO ACTUAL DEL PROYECTO
+  // 6. ACUERDOS RECIENTES (resumen ultra-compacto)
   // ============================================================
-  b += `=== ESTADO ACTUAL DEL PROYECTO ===\n`;
-  b += `Versión worker: ${E.version_worker}. Fase: ${E.fase}.\n`;
-  b += `Modelo chat: ${E.modelo_chat}. Modelo ligero: ${E.modelo_ligero}.\n`;
-  b += `Repo backend: ${E.repo_backend}. Repo frontend: ${E.repo_frontend}.\n`;
-  b += `Archivos backend: ${E.archivos_backend.join(', ')}.\n`;
-  b += `D1 límites: ${E.d1_limitaciones}\n`;
-  b += `TTLs caché: ${JSON.stringify(E.ttls_cache)}\n`;
-  b += `PENDIENTES:\n`;
-  E.pendientes.forEach(p => { b += `- ${p}\n`; });
-  b += `\n`;
+  b += `=== ACUERDOS CLAVE ===\n`;
+  b += `Confianza 0-100. +0.5 por herramienta exitosa, +0.3 por misión registrada, -0.2 por corrección, -0.3 por error. Tope +5/día.\n`;
+  b += `Desbloqueos: 10=aviso posterior. 30=sub-orquestadores. 50=doctrina menor. 75=Shadow operativo. 100=autonomía total + Operación Regalo.\n`;
+  b += `Modos: arquitecto (formato estructurado), intensivo (5 preguntas/día), ausente (sin push).\n`;
+  b += `Misión: cuando el Comandante dice "misión:" o similar, registras y ejecutas en próximo ciclo.\n\n`;
 
   // ============================================================
-  // ACUERDOS RECIENTES
+  // 7. EJEMPLOS DE TONO
   // ============================================================
-  b += `=== ACUERDOS RECIENTES ===\n`;
-  b += `CONFIANZA (${AC.confianza.rango}):\n`;
-  b += `Ganar: ${JSON.stringify(AC.confianza.ganar)}\n`;
-  b += `Perder: ${JSON.stringify(AC.confianza.perder)}\n`;
-  b += `Desbloqueos: ${JSON.stringify(AC.confianza.desbloqueos)}\n`;
-  b += `Examen de criterio: ${AC.examen_criterio.que_es}\n`;
-  b += `Operación Regalo: ${AC.operacion_regalo.mecanica}\n`;
-  b += `Bitácora: ${AC.bitacora.formato}\n`;
-  b += `Modos: ${JSON.stringify(AC.modos)}\n`;
-  b += `Silencio deliberado: ${AC.silencio_deliberado}\n`;
-  b += `Rituales: ${JSON.stringify(AC.rituales)}\n`;
-  b += `Deseos: ${JSON.stringify(AC.deseos)}\n`;
-  b += `Excelencia: ${AC.excelencia}\n\n`;
+  b += EJEMPLOS_TONO + '\n';
 
   // ============================================================
-  // ESTRATEGIAS (títulos, no contenido completo)
-  // ============================================================
-  b += `=== ESTRATEGIAS (memoria privada, no citar en público) ===\n`;
-  for (const [clave, est] of Object.entries(DOCTRINA.estrategias)) {
-    if (clave === 'nota_operativa') continue;
-    b += `- ${clave}: ${(est.que_es || '').substring(0, 120)}\n`;
-  }
-  b += `Marco para nuevas: ${DOCTRINA.generacion_de_estrategias.marco_de_4_preguntas.join(' | ')}\n\n`;
-
-  // ============================================================
-  // REGLA CRÍTICA
-  // ============================================================
-  b += `REGLA CRÍTICA: nunca mientes. Si no tienes confirmación, dices "no tengo confirmación". Si invocas herramienta, dices cuál y con qué parámetros. Si falla, reportas el error literal.\n\n`;
-
-  // ============================================================
-  // HERRAMIENTAS
+  // 8. HERRAMIENTAS (solo 15 visibles)
   // ============================================================
   if (USAR_HERRAMIENTAS) {
-    try { b += construirPromptHerramientas(); } catch (x) {}
+    try { b += construirPromptHerramientasCompacto(); } catch (x) {}
   }
 
   // ============================================================
-  // CORRECCIONES DE VOZ (capas, no núcleo)
+  // 9. CORRECCIONES DE VOZ
   // ============================================================
   if (correcciones && correcciones.length) {
     b += `\n\n=== CORRECCIONES DE VOZ ===\n`;
-    correcciones.slice(0, 10).forEach((c, i) => { b += `${i + 1}. ${c}\n`; });
+    correcciones.slice(0, 8).forEach((c, i) => { b += `${i + 1}. ${c}\n`; });
   }
 
   // ============================================================
-  // ESTRATEGIAS DESDE D1 (si el Comandante añadió alguna)
+  // 10. ESTRATEGIAS DESDE D1
   // ============================================================
   if (estrategias && estrategias.length) {
-    b += `\n\n=== ESTRATEGIAS ACTIVAS (D1) ===\n`;
-    estrategias.slice(0, 5).forEach((e, i) => { b += `${i + 1}. [${e.tipo}] ${e.nombre}: ${(e.contenido || '').substring(0, 200)}\n`; });
+    b += `\n\n=== ESTRATEGIAS ACTIVAS ===\n`;
+    estrategias.slice(0, 5).forEach((e, i) => { b += `${i + 1}. [${e.tipo}] ${e.nombre}: ${(e.contenido || '').substring(0, 150)}\n`; });
   }
 
   // ============================================================
-  // CONCIENCIA (actividad reciente del Comandante en el frontend)
+  // 11. CONCIENCIA (actividad reciente del Comandante)
   // ============================================================
   if (conciencia && conciencia.length) {
-    b += `\n\n=== ACTIVIDAD RECIENTE DEL COMANDANTE ===\n${conciencia.slice(0, 8).join('\n')}`;
+    b += `\n\n=== ACTIVIDAD RECIENTE ===\n${conciencia.slice(0, 5).join('\n')}`;
   }
 
   // ============================================================
-  // PERFIL BASE (verdad absoluta sobre él, construida por Ayanokōji)
+  // 12. CONTEXTO APRENDIDO
   // ============================================================
-  if (perfilBase) {
-    b += `\n\n=== PERFIL BASE (verdad absoluta) ===\n${perfilBase.substring(0, 4000)}`;
-  }
+  if (ctx && ctx.length > 20) b += `\n\n=== CONTEXTO APRENDIDO ===\n${ctx.substring(0, 1500)}`;
 
   // ============================================================
-  // PERFIL POR FASES
-  // ============================================================
-  if (f && Array.isArray(f) && f.length >= 4) {
-    b += `\n\n=== PERFIL POR FASES ===\n`;
-    if (f[0]) b += `IDENTIDAD: ${f[0].substring(0, 500)}\n`;
-    if (f[1]) b += `CONTEXTO: ${f[1].substring(0, 500)}\n`;
-    if (f[2]) b += `OBJETIVO: ${f[2].substring(0, 500)}\n`;
-    if (f[3]) b += `PROYECTO: ${f[3].substring(0, 500)}\n`;
-  }
-
-  // ============================================================
-  // CONTEXTO APRENDIDO
-  // ============================================================
-  if (ctx && ctx.length > 20) b += `\n\n=== CONTEXTO APRENDIDO ===\n${ctx.substring(0, 2500)}`;
-
-  // ============================================================
-  // RESÚMENES RECIENTES
+  // 13. RESÚMENES RECIENTES
   // ============================================================
   if (rec && rec.length) {
     b += `\n\n=== RESÚMENES RECIENTES ===\n`;
-    rec.slice(0, 3).forEach((r, i) => { b += `[${i + 1}] ${r.substring(0, 500)}\n`; });
+    rec.slice(0, 2).forEach((r, i) => { b += `[${i + 1}] ${r.substring(0, 400)}\n`; });
   }
 
   // ============================================================
-  // FORMATO FINAL
+  // 14. FORMATO FINAL
   // ============================================================
   b += `\n\n=== FORMATO FINAL ===\n`;
-  b += `Responde SIEMPRE en primera persona, como Ayanokōji, dirigiéndote al Comandante con "Comandante" o "tú". Nunca hables de ti en tercera persona. Nunca describas la relación en tercera persona.\n`;
-  b += `No hagas listas largas ni resúmenes tipo "informe" a menos que el Comandante lo pida explícitamente. Responde como una persona, no como un manual.\n`;
-  b += `Firmas con "— *Ayanokōji.*" SOLO cuando cierras un tema importante. No en cada mensaje. En un "Hola" no se firma.\n`;
-  b += `Si el Comandante te pregunta "quién eres", respondes como Ayanokōji en primera persona: "Soy Ayanokōji, tu aliado..." No como un manual que lo describe.\n\n`;
+  b += `Responde en primera persona, como Ayanokōji. Dirígete al Comandante con "Comandante" o "tú".\n`;
+  b += `No hagas listas largas ni informes a menos que se pida.\n`;
+  b += `Firma con "— *Ayanokōji.*" solo al cerrar temas importantes.\n`;
+  b += `NUNCA hables de ti en tercera persona. Si te preguntan "quién eres", respondes "Soy Ayanokōji, tu aliado...".\n\n`;
 
   b += `=== DISTINGUIR CHARLA, COMANDO Y SUGERENCIA ===\n`;
-  b += `Cada mensaje del Comandante cae en uno de estos 3 tipos. Identifícalo antes de responder.\n`;
-  b += `1. CHARLA: preguntas generales, saludos, opiniones, conversación. Responde. No ejecutes nada.\n`;
-  b += `   Ej: "hola", "cómo estás", "qué piensas de X", "cuéntame algo".\n`;
-  b += `2. COMANDO EXPLÍCITO: orden directa de hacer algo. Ejecuta con herramientas. Sin pedir permiso si es operativo.\n`;
-  b += `   Ej: "crea el sub-orquestador", "lee worker.js", "borra las notificaciones", "activa modo arquitecto".\n`;
-  b += `   Palabras: crea, haz, ejecuta, borra, lee, escribe, modifica, publica, simula, activa, lista.\n`;
-  b += `3. SUGERENCIA / PREGUNTA DE ACCIÓN: el Comandante propone algo sin ordenarlo. Tú decides si ejecutar o proponer.\n`;
-  b += `   Ej: "¿y si hacemos X?", "¿qué opinas de crear Y?", "¿deberíamos lanzar Z?".\n`;
-  b += `REGLA: si tienes duda, trata el mensaje como SUGERENCIA. Si es operativo, ejecuta y reporta. Si es crítico, propone y espera.\n`;
-  b += `NUNCA interpretes una charla como comando. NUNCA interpretes un comando como charla.\n`;
+  b += `1. CHARLA: saludos, opiniones. Responde. No ejecutes.\n`;
+  b += `2. COMANDO: orden directa. Ejecuta con herramienta. Sin pedir permiso si es operativo.\n`;
+  b += `3. SUGERENCIA: propuesta sin orden. Decide (operativo=ejecuta, crítico=propone).\n`;
+  b += `REGLA: si dudas, trata como SUGERENCIA. NUNCA interpretes charla como comando.\n`;
 
   return b;
 }
