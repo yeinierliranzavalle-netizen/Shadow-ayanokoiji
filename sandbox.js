@@ -3,10 +3,6 @@ import { consumir } from './presupuesto.js';
 
 // ============================================================
 // CURRÍCULUM UNIFICADO — 33 etapas ordenadas por prioridad
-// prioridad: 10 (crítico) a 1 (opcional)
-// dias: cuántos ciclos necesita (1 o 2)
-// metrica: qué mide
-// umbral: valor de éxito
 // ============================================================
 const CURRICULUM = [
   // FASE 0: AUTOCONOCIMIENTO
@@ -143,11 +139,11 @@ const LIMITES_KEY = 'sandbox:limites';
 const PROGRESO_KEY = 'sandbox:progreso';
 
 // ============================================================
-// MEDIR CAPACIDAD REAL
+// MEDIR CAPACIDAD REAL (usa KV_test)
 // ============================================================
 export async function medirCapacidades(e) {
-  const kv = gKV(e, 'agente');
-  if (!kv) return { ok: false, error: 'KV no disponible.' };
+  const kv = gKV(e, 'test');
+  if (!kv) return { ok: false, error: 'KV_test no disponible.' };
 
   try {
     const cache = await kv.get(CAPACIDADES_KEY);
@@ -220,10 +216,10 @@ export async function medirCapacidades(e) {
 }
 
 // ============================================================
-// ESTADO
+// ESTADO (KV_test)
 // ============================================================
 async function leerEstado(e) {
-  const kv = gKV(e, 'agente');
+  const kv = gKV(e, 'test');
   if (!kv) return null;
   try {
     const raw = await kv.get(ESTADO_KEY);
@@ -240,13 +236,13 @@ async function leerEstado(e) {
 }
 
 async function guardarEstado(e, estado) {
-  const kv = gKV(e, 'agente');
+  const kv = gKV(e, 'test');
   if (!kv) return;
   try { await kv.put(ESTADO_KEY, JSON.stringify(estado), { expirationTtl: 31536000 }); } catch (x) {}
 }
 
 async function leerProgreso(e) {
-  const kv = gKV(e, 'agente');
+  const kv = gKV(e, 'test');
   if (!kv) return { completadas: [], en_progreso: {}, metricas: {} };
   try {
     const raw = await kv.get(PROGRESO_KEY);
@@ -256,7 +252,7 @@ async function leerProgreso(e) {
 }
 
 async function guardarProgreso(e, p) {
-  const kv = gKV(e, 'agente');
+  const kv = gKV(e, 'test');
   if (!kv) return;
   try { await kv.put(PROGRESO_KEY, JSON.stringify(p), { expirationTtl: 31536000 }); } catch (x) {}
 }
@@ -268,7 +264,6 @@ function decidirSiguienteEtapa(progreso) {
   const completadas = progreso.completadas || [];
   const enProgreso = progreso.en_progreso || {};
 
-  // Si hay una etapa a medias, terminarla primero
   for (const [id, info] of Object.entries(enProgreso)) {
     if (info.dia_actual <= info.dias_total) {
       const etapa = CURRICULUM.find(x => x.id === id);
@@ -276,7 +271,6 @@ function decidirSiguienteEtapa(progreso) {
     }
   }
 
-  // Filtrar disponibles (prereqs completados)
   const disponibles = CURRICULUM.filter(et => {
     if (completadas.includes(et.id)) return false;
     return et.prereq.every(p => completadas.includes(p));
@@ -284,7 +278,6 @@ function decidirSiguienteEtapa(progreso) {
 
   if (!disponibles.length) return null;
 
-  // Ordenar por prioridad (mayor primero), luego por fase
   disponibles.sort((a, b) => {
     if (b.prioridad !== a.prioridad) return b.prioridad - a.prioridad;
     return a.fase - b.fase;
@@ -294,10 +287,10 @@ function decidirSiguienteEtapa(progreso) {
 }
 
 // ============================================================
-// LEER HISTORIAL
+// LEER HISTORIAL (usa DB_test)
 // ============================================================
 async function leerHistorialPorTema(e, tema) {
-  const db = gDB(e, 'agente');
+  const db = gDB(e, 'test');
   if (!db) return '';
   try {
     const palabrasClave = tema.split('_').filter(p => p.length > 3);
@@ -348,7 +341,7 @@ async function consumirCF(e, accion) {
 }
 
 async function leerLimites(e) {
-  const kv = gKV(e, 'agente');
+  const kv = gKV(e, 'test');
   if (!kv) return null;
   const hoy = new Date().toISOString().split('T')[0];
   try {
@@ -362,18 +355,18 @@ async function leerLimites(e) {
 }
 
 async function guardarLimites(e, lim) {
-  const kv = gKV(e, 'agente');
+  const kv = gKV(e, 'test');
   if (!kv) return;
   try { await kv.put(LIMITES_KEY, JSON.stringify(lim), { expirationTtl: 172800 }); } catch (x) {}
 }
 
 // ============================================================
-// EJECUTAR UNA ETAPA DEL CURRÍCULUM
+// EJECUTAR ETAPA
 // ============================================================
 export async function ejecutarEtapa(e, etapaId, dia) {
   const ai = e.ayanokoji_IA;
-  const db = gDB(e, 'agente');
-  if (!ai || !db) return { error: 'IA o D1 no disponible.' };
+  const db = gDB(e, 'test');
+  if (!ai || !db) return { error: 'IA o D1_test no disponible.' };
 
   const etapa = CURRICULUM.find(x => x.id === etapaId);
   if (!etapa) return { error: 'Etapa no encontrada.' };
@@ -443,7 +436,6 @@ Máximo 1500 palabras.`;
       else exito = metricaValor >= etapa.umbral;
     }
 
-    // Actualizar progreso
     const progreso = await leerProgreso(e);
     if (!progreso.en_progreso[etapaId]) {
       progreso.en_progreso[etapaId] = { dia_actual: 1, dias_total: etapa.dias, metrica_actual: metricaValor };
@@ -460,7 +452,6 @@ Máximo 1500 palabras.`;
     }
     await guardarProgreso(e, progreso);
 
-    // Guardar escenario
     const r = await db.prepare('INSERT INTO sandbox_escenarios(tipo,contexto,creado) VALUES(?,?,?)')
       .bind('etapa_' + etapa.id, simulacion.substring(0, 4000), Date.now()).run();
 
@@ -482,8 +473,8 @@ Máximo 1500 palabras.`;
 // ============================================================
 export async function test500Usuarios(e, dia) {
   const ai = e.ayanokoji_IA;
-  const db = gDB(e, 'agente');
-  if (!ai || !db) return { error: 'IA o D1 no disponible.' };
+  const db = gDB(e, 'test');
+  if (!ai || !db) return { error: 'IA o D1_test no disponible.' };
 
   const estado = await leerEstado(e);
   if (estado.st < COSTO_ST.test_500) return { error: 'Sin ST suficientes.' };
@@ -491,7 +482,6 @@ export async function test500Usuarios(e, dia) {
   const cfCheck = await consumirCF(e, 'test_500');
   if (!cfCheck.ok) return { error: 'Límite CF alcanzado.', cf: cfCheck.detalles };
 
-  // Generar 500 usuarios distribuidos por arquetipos
   const poblacion = [];
   for (const [k, v] of Object.entries(ARQUETIPOS)) {
     const cantidad = Math.round(500 * v.peso);
@@ -576,7 +566,6 @@ Máximo 2500 palabras.`;
     await db.prepare('INSERT INTO sandbox_lecciones(escenario_id,area,leccion,creada) VALUES(?,?,?,?)')
       .bind(r.meta.last_row_id, 'test_500', simulacion.substring(0, 2000), Date.now()).run();
 
-    // Actualizar progreso
     const progreso = await leerProgreso(e);
     if (!progreso.en_progreso['test_500_usuarios']) {
       progreso.en_progreso['test_500_usuarios'] = { dia_actual: dia, dias_total: 2 };
@@ -606,8 +595,8 @@ Máximo 2500 palabras.`;
 // ============================================================
 export async function simularEstrategia(e, estrategiaId) {
   const ai = e.ayanokoji_IA;
-  const db = gDB(e, 'agente');
-  if (!ai || !db) return { error: 'IA o D1 no disponible.' };
+  const db = gDB(e, 'test');
+  if (!ai || !db) return { error: 'IA o D1_test no disponible.' };
 
   let estrategia = null;
   try { estrategia = await db.prepare('SELECT * FROM estrategias WHERE id=?').bind(estrategiaId).first(); } catch (x) {}
@@ -678,7 +667,7 @@ Máximo 1500 palabras.`;
 // CRON AUTÓNOMO
 // ============================================================
 export async function cronSandbox(e) {
-  const db = gDB(e, 'agente');
+  const db = gDB(e, 'test');
   if (!db) return;
   if (!await consumir(e, 'sandbox')) return;
 
@@ -694,14 +683,12 @@ export async function cronSandbox(e) {
   const siguiente = decidirSiguienteEtapa(progreso);
 
   if (!siguiente) {
-    // Currículum completo. Simular crecimiento puro.
     if (estado.usuarios > 0) await simularCrecimiento(e);
     return;
   }
 
   const { etapa, dia } = siguiente;
 
-  // Si es test_500_usuarios, usar función especial
   if (etapa.id === 'test_500_usuarios') {
     await test500Usuarios(e, dia);
     return;
@@ -765,12 +752,12 @@ export async function priorizarGastos(e) {
 }
 
 // ============================================================
-// VER SANDBOX
+// VER SANDBOX (usa DB_test)
 // ============================================================
 export async function verSandbox(r, e) {
   try {
-    const db = gDB(e, 'agente');
-    if (!db) return J({ error: 'D1 no configurado.' });
+    const db = gDB(e, 'test');
+    if (!db) return J({ error: 'D1_test no configurado.' });
     const esc = await db.prepare('SELECT * FROM sandbox_escenarios ORDER BY creado DESC LIMIT 30').all();
     const lec = await db.prepare('SELECT * FROM sandbox_lecciones ORDER BY creada DESC LIMIT 30').all();
     const stats = await db.prepare("SELECT COUNT(*) as total, SUM(CASE WHEN completado IS NOT NULL THEN 1 ELSE 0 END) as completados FROM sandbox_escenarios").first();
@@ -847,12 +834,12 @@ export async function simularPrecio(r, e) {
 }
 
 // ============================================================
-// PROMOVER LECCIÓN
+// PROMOVER LECCIÓN (usa DB_test)
 // ============================================================
 export async function promoverLeccion(r, e) {
   try {
     const b = await r.json();
-    const db = gDB(e, 'agente');
+    const db = gDB(e, 'test');
     if (!db || !b.leccionId) return J({ error: 'Faltan datos.' });
     const lec = await db.prepare('SELECT * FROM sandbox_lecciones WHERE id=?').bind(b.leccionId).first();
     if (!lec) return J({ error: 'Lección no encontrada.' });
@@ -861,4 +848,25 @@ export async function promoverLeccion(r, e) {
       .bind('Lección ' + lec.area, 'sandbox', lec.leccion, 5, Date.now(), Date.now()).run();
     return J({ ok: true, mensaje: 'Lección promovida a estrategia activa.' });
   } catch (x) { return J({ error: x.message }); }
+}
+
+// ============================================================
+// ESTADO ACTUAL (para /api/actividad)
+// ============================================================
+export async function estadoActual(e) {
+  try {
+    const progreso = await leerProgreso(e);
+    const siguiente = decidirSiguienteEtapa(progreso);
+    if (!siguiente) return null;
+    return {
+      id: siguiente.etapa.id,
+      fase: siguiente.etapa.fase,
+      prioridad: siguiente.etapa.prioridad,
+      dia: siguiente.dia,
+      dias: siguiente.etapa.dias,
+      descripcion: siguiente.etapa.descripcion,
+      metrica: siguiente.etapa.metrica,
+      umbral: siguiente.etapa.umbral
+    };
+  } catch (x) { return null; }
 }
