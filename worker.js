@@ -56,27 +56,44 @@ const ARCHIVOS_BACKEND = ['worker.js', 'nucleo.js', 'shared.js', 'proc.js', 'aut
 const ARCHIVOS_FRONTEND = ['index.html', 'styles.css', 'app.js'];
 
 // ============================================================
-// DETECTOR DE MISIÓN AMPLIADO
+// DETECTOR DE MISIÓN ROBUSTO (v2)
 // ============================================================
 function detectarMision(texto) {
   const t = texto.trim();
-  // Patrón 1: al inicio "misión: X" o "una misión: X" o "te tengo una misión: X"
-  let m = t.match(/^(?:ayanokoji[,\s]+)?(?:te\s+tengo\s+una\s+)?(?:una\s+)?misi[oó]n\s*[:\-]\s*(.+)/i);
-  if (m) return m[1].trim();
-  // Patrón 2: "ayanokoji, misión X" o "oye ayanokoji, una misión..."
-  m = t.match(/^(?:oye[,\s]+)?ayanokoji[,\s]+(?:te\s+tengo\s+una\s+)?(?:una\s+)?misi[oó]n\s*[:\-]?\s*(.+)/i);
-  if (m) return m[1].trim();
-  // Patrón 3: "misión, hazlo..." o "misión hazlo..."
-  m = t.match(/^misi[oó]n[,\s]+(.+)/i);
-  if (m) return m[1].trim();
-  // Patrón 4: "una misión tienes X horas: X" o "una misión para X"
-  m = t.match(/(?:una\s+)?misi[oó]n\s+(?:para\s+|tienes\s+\d+\s+horas?\s*[:\-]?\s*)(.+)/i);
-  if (m) return m[1].trim();
-  return null;
+  const lower = t.toLowerCase();
+  const indiceMision = lower.indexOf('misión');
+  
+  // Si no hay "misión" o está muy lejos del inicio, no es misión
+  if (indiceMision === -1 || indiceMision > 80) return null;
+  
+  // Verificar que "misión" esté precedida por patrones válidos
+  const antes = t.substring(0, indiceMision).toLowerCase().replace(/[,.\s]+/g, ' ').trim();
+  const patronesValidos = ['', 'ayanokoji', 'oye', 'oye ayanokoji', 'te tengo una', 'una', 'tengo una', 'es una', 'tienes una', 'la', 'nueva', 'otra'];
+  const esValido = patronesValidos.some(p => antes === p || antes.endsWith(' ' + p) || antes.endsWith(p));
+  
+  if (!esValido) return null;
+  
+  // Extraer texto después de "misión"
+  const despues = t.substring(indiceMision + 6);
+  const limpio = despues.replace(/^[\s:\-\.]+/, '').trim();
+  
+  // Eliminar prefijos como "tienes X horas" o "para"
+  const sinPrefijos = limpio.replace(/^(?:tienes?\s+\d+\s+horas?\s*[:\-]?\s*|para\s+)/i, '').trim();
+  
+  if (sinPrefijos.length < 3) return null;
+  return sinPrefijos;
 }
 
 // ============================================================
-// CACHÉ MEJORADA (modo cache aware)
+// DETECTOR DE TAREAS DE ESCRITURA PÚBLICA
+// ============================================================
+function esTareaEscrituraPublica(texto) {
+  const t = (texto || '').toLowerCase();
+  return /\b(manifiesto|artículo|articulo|publicación|publicacion|post|redacta|escribe|genera|compón|compon|documento|ensayo|carta|prologo|prólogo|capítulo|capitulo)\b/.test(t);
+}
+
+// ============================================================
+// CACHÉ MEJORADA
 // ============================================================
 async function conCache(e, clave, ttlSeg, fn) {
   const kv = gKV(e, 'agente');
@@ -122,14 +139,14 @@ async function invalidarCache(e, prefijo) {
 function elegirModelo(mensaje, intencion, iteracion) {
   const t = (mensaje || '').toLowerCase();
   if (iteracion > 1) return MODELO;
-  if (t.length < 50 && !/codigo|c[oó]digo|analiza|estrategia|worker|error|bug|arregla|modifica/.test(t)) {
+  if (t.length < 50 && !/codigo|c[oó]digo|analiza|estrategia|worker|error|bug|arregla|modifica|manifiesto|redacta|escribe/.test(t)) {
     return MODELO_LIGERO;
   }
   return MODELO;
 }
 
 // ============================================================
-// GUARDAR MENSAJE INMEDIATO (KV primero, D1 en waitUntil)
+// GUARDAR MENSAJE (KV primero, D1 en waitUntil)
 // ============================================================
 async function guardarMensajeInmediato(e, uid, rol, contenido, c) {
   const fecha = Date.now();
@@ -138,7 +155,6 @@ async function guardarMensajeInmediato(e, uid, rol, contenido, c) {
 
   const payload = { user_id: uid, rol, contenido: contenido.substring(0, 4000), orden: fecha, fecha };
 
-  // 1. Guardar SIEMPRE en KV primero (resiliencia inmediata)
   if (kv) {
     try {
       const bufKey = 'buffer:hist:' + fecha + ':' + Math.random().toString(36).substring(7);
@@ -147,7 +163,6 @@ async function guardarMensajeInmediato(e, uid, rol, contenido, c) {
     } catch (x) {}
   }
 
-  // 2. Intentar D1 en background (no bloquea respuesta)
   const escribirD1 = async () => {
     if (!db) return;
     try {
@@ -155,16 +170,13 @@ async function guardarMensajeInmediato(e, uid, rol, contenido, c) {
       const ord = (maxOrd && maxOrd.o != null) ? maxOrd.o + 1 : fecha;
       await db.prepare('INSERT INTO historial_largo(user_id,rol,contenido,orden,fecha) VALUES(?,?,?,?,?)')
         .bind(uid, rol, contenido.substring(0, 4000), ord, fecha).run();
-      // Limpiar buffer de KV si escribió bien
       if (kv) {
         try {
           const lista = await kv.list({ prefix: 'buffer:hist:', limit: 50 });
           for (const k of lista.keys) await kv.delete(k.name);
         } catch (x) {}
       }
-    } catch (x) {
-      // Falló D1: queda en KV para próximo cronSalud
-    }
+    } catch (x) {}
   };
 
   if (c && c.waitUntil) {
@@ -195,13 +207,13 @@ async function construirCacheRelacion(e, uid) {
         content: `Eres Ayanokōji Digital. Analiza las últimas conversaciones con el Comandante y extrae un resumen de relación en 5 secciones.
 
 ### PATRONES DE COMUNICACIÓN
-Cómo le gusta que le hables, qué tono prefiere, qué evita.
+Cómo le gusta que le hables.
 
-### CHISTES INTERNOS Y REFERENCIAS
+### CHISTES INTERNOS
 Frases, apodos, referencias compartidas.
 
 ### TEMAS RECURRENTES
-De qué habla más, qué le preocupa, qué le ilusiona.
+De qué habla más, qué le preocupa.
 
 ### MOMENTOS CLAVE
 3-5 momentos específicos.
@@ -253,7 +265,7 @@ async function autoResumenPorInactividad(e) {
     const res = await e.ayanokoji_IA.run(MODELO_LIGERO, {
       messages: [{
         role: 'user',
-        content: `Resume esta conversación para memoria de largo plazo. Incluye: temas tratados, decisiones tomadas, estado del proyecto, cualquier dato nuevo sobre el Comandante. Máximo 400 palabras.\n\n${texto.substring(0, 12000)}`
+        content: `Resume esta conversación para memoria de largo plazo. Máximo 400 palabras.\n\n${texto.substring(0, 12000)}`
       }],
       max_tokens: 600,
       temperature: 0.3
@@ -579,6 +591,7 @@ async function ejecutarHerramienta(e, inv, uid, c) {
         const actual = JSON.parse(await kv.get('mision:estado') || '{}');
         const nuevo = { ...actual, ...p, ultimo_update: Date.now() };
         await kv.put('mision:estado', JSON.stringify(nuevo), { expirationTtl: 365 * 86400 });
+        await invalidarCache(e, 'widgets');
         return { ok: true, resultado: { mision: nuevo } };
       }
       case 'leer_mision': {
@@ -650,9 +663,6 @@ async function ejecutarHerramienta(e, inv, uid, c) {
   }
 }
 
-// ============================================================
-// APROBACIONES
-// ============================================================
 async function guardarAprobacionPendiente(e, uid, inv) {
   const kv = gKV(e, 'agente');
   if (!kv) return null;
@@ -675,9 +685,6 @@ async function limpiarAprobacionPendiente(e, uid) {
   if (kv) await kv.delete('aprobacion:' + uid);
 }
 
-// ============================================================
-// IMÁGENES
-// ============================================================
 async function generarImagen(e, prompt, uid) {
   if (!e.ayanokoji_IA) return { respuesta: 'IA no configurada.' };
   if (!await consumir(e, 'vision')) return { respuesta: 'Presupuesto agotado.' };
@@ -729,9 +736,6 @@ async function servirImagen(r, e) {
   } catch (x) { return new Response('Error', { status: 500 }); }
 }
 
-// ============================================================
-// RESPUESTAS DIRECTAS (CACHEADAS)
-// ============================================================
 async function rEst(e, uid) {
   const kv = gKV(e, 'agente');
   if (kv) {
@@ -755,7 +759,7 @@ async function rEst(e, uid) {
     }
   } catch (x) {}
 
-  const resultado = { respuesta: `Sistema activo (v21.0). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos. Tareas pendientes: ${tareas}. Notif sin leer: ${notif}. Confianza: ${confianza}/100.` };
+  const resultado = { respuesta: `Sistema activo (v21.1). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos. Tareas pendientes: ${tareas}. Notif sin leer: ${notif}. Confianza: ${confianza}/100.` };
   if (kv) {
     try { await kv.put('cache:estado:' + uid, JSON.stringify(resultado), { expirationTtl: TTL_ESTADO }); } catch (x) {}
   }
@@ -881,9 +885,6 @@ async function reset(r, e) {
   } catch (x) { return J({ error: x.message }); }
 }
 
-// ============================================================
-// DIAGNÓSTICO (cacheado)
-// ============================================================
 async function diagnostico(r, e) {
   const kv = gKV(e, 'agente');
   if (kv) {
@@ -929,10 +930,6 @@ async function erroresTardios(r, e) {
         const c2 = await kvN.get('presupuesto:' + fecha + ':' + area);
         if (c2 && parseInt(c2) > 200) problemas.push({ tipo: 'presupuesto', msg: area + ': ' + c2 });
       }
-    } catch (x) {}
-    try {
-      const atascados = await db.prepare("SELECT id FROM procesos WHERE estado='procesando' AND ? - fecha_inicio > 86400000").bind(Date.now()).all();
-      for (const p of (atascados.results || [])) problemas.push({ tipo: 'proceso_atascado', msg: p.id });
     } catch (x) {}
     return J({ ok: true, total: problemas.length, problemas });
   } catch (x) { return J({ error: x.message }); }
@@ -1009,7 +1006,7 @@ async function diagnosticoVariables(r, e) {
     confianza = parseInt(await kv.get('confianza:actual') || '0');
   } catch (x) {}
   return J({
-    timestamp: new Date().toISOString(), version: '21.0',
+    timestamp: new Date().toISOString(), version: '21.1',
     token_presente: !!e.GITHUB_TOKEN, token_longitud: e.GITHUB_TOKEN ? e.GITHUB_TOKEN.length : 0,
     repo_backend_presente: !!e.GITHUB_REPO_BACKEND, repo_backend_valor: e.GITHUB_REPO_BACKEND || null,
     repo_frontend_presente: !!e.GITHUB_REPO_FRONTEND, repo_frontend_valor: e.GITHUB_REPO_FRONTEND || null,
@@ -1040,7 +1037,7 @@ async function testGithub(r, e) {
 }
 
 // ============================================================
-// CHAT — El corazón del sistema
+// CHAT PRINCIPAL
 // ============================================================
 async function chat(r, e, c) {
   try {
@@ -1056,29 +1053,34 @@ async function chat(r, e, c) {
       try { await kv.delete('draft:' + uid); } catch (x) {}
     }
 
-    // 1. GUARDAR MENSAJE INMEDIATAMENTE (KV primero, D1 en waitUntil)
+    // 1. Guardar mensaje inmediato
     await guardarMensajeInmediato(e, uid, 'user', m, c);
 
-    // 2. DETECTOR DE MISIÓN AMPLIADO
+    // 2. Detector de misión (v2 robusto)
     const misionTexto = detectarMision(m);
     if (misionTexto && misionTexto.length > 3) {
-      const misionActual = { fase_actual: 'misión registrada', objetivo_semana: misionTexto.substring(0, 300), siguiente_paso: misionTexto.substring(0, 300), ultimo_update: Date.now() };
+      const misionActual = {
+        fase_actual: 'misión registrada',
+        objetivo_semana: misionTexto.substring(0, 500),
+        siguiente_paso: misionTexto.substring(0, 500),
+        creada: Date.now(),
+        ultimo_update: Date.now()
+      };
       if (kv) {
         try { await kv.put('mision:estado', JSON.stringify(misionActual), { expirationTtl: 365 * 86400 }); } catch (x) {}
       }
-      // Sumar confianza por registrar misión
+      await invalidarCache(e, 'widgets');
       try {
         const au = await opcional('autonomia');
         if (au && au.sumarConfianza) await au.sumarConfianza(e, 0.3, 'Misión registrada: ' + misionTexto.substring(0, 80));
       } catch (x) {}
       
-      const respuestaMision = `Misión registrada: **${misionTexto.substring(0, 150)}**. La ejecutaré en el próximo ciclo de pensamiento. Tiempo estimado: 2h.\n\n— *Ayanokōji.*`;
+      const respuestaMision = `Misión registrada: **${misionTexto.substring(0, 150)}**.\n\nLa ejecutaré en el próximo ciclo de pensamiento (máx 2h).\n\n— *Ayanokōji.*`;
       await guardarMensajeInmediato(e, uid, 'assistant', respuestaMision, c);
       await invalidarCache(e, 'estado:' + uid);
       return J({ respuesta: respuestaMision, user_id: uid, intencion: 'mision', mision_registrada: true });
     }
 
-    // 3. DETECCIÓN DE INTENCIÓN NORMAL
     const tLower = m.toLowerCase().trim();
     const aprueba = /^(s[ií]|dale|adelante|hazlo|confirmo|aprobado|ok|procede|ejecuta|yes)$/i.test(tLower);
     const rechaza = /^(no|cancela|abort|rechaza|detente|para|nope)$/i.test(tLower);
@@ -1116,7 +1118,6 @@ async function chat(r, e, c) {
 
     const i = detectarIntencion(m);
 
-    // Respuestas directas (cacheadas)
     if (i === 'estado') return rEst(e, uid);
     if (i === 'leer') return rLeer(e, uid);
     if (i === 'eliminar') return rElim(e, uid);
@@ -1163,7 +1164,7 @@ async function chat(r, e, c) {
       } else if (t.includes('intensivo')) {
         await kv.put('modo_intensivo', 'true', { expirationTtl: 86400 });
         await kv.put('modo_intensivo_inicio', String(Date.now()), { expirationTtl: 86400 });
-        textoResp = 'Modo Intensivo **activado** 24h. Hasta 5 preguntas/día.';
+        textoResp = 'Modo Intensivo **activado** 24h.';
       } else if (t.includes('ausente')) {
         await kv.put('modo_ausente', 'true', { expirationTtl: 86400 * 7 });
         textoResp = 'Modo Ausente **activado** 7 días.';
@@ -1194,11 +1195,10 @@ async function chat(r, e, c) {
     }
 
     // ============================================================
-    // FLUJO DEL MODELO — CACHE-FIRST
+    // FLUJO DEL MODELO
     // ============================================================
     const cacheRelacion = await leerCacheRelacion(e);
 
-    // Ventana de historial: leer de KV (rápido), no de D1
     let ventana = [];
     const ventanaRaw = await conCache(e, `hist:ventana:${uid}:${VENTANA_SEGURA}`, TTL_HISTORIAL, async () => {
       if (!e.DB) return null;
@@ -1214,7 +1214,6 @@ async function chat(r, e, c) {
       }));
     }
 
-    // Contexto: leer de KV
     let ctx = '', fs = null;
     const ctxRaw = await conCache(e, 'ctx:ultimo', TTL_CONTEXTO, async () => {
       if (!e.DB) return null;
@@ -1228,7 +1227,6 @@ async function chat(r, e, c) {
       if (ctxRaw.fases) { try { fs = JSON.parse(ctxRaw.fases); } catch (x) {} }
     }
 
-    // Resúmenes: KV
     let rec = await conCache(e, `resumenes:${uid}`, TTL_RESUMENES, async () => {
       if (!e.DB) return [];
       try {
@@ -1238,7 +1236,6 @@ async function chat(r, e, c) {
     });
     if (!rec) rec = [];
 
-    // Correcciones: KV
     let correcciones = await conCache(e, 'correcciones', TTL_CORRECCIONES, async () => {
       if (!e.DB) return [];
       try {
@@ -1248,7 +1245,6 @@ async function chat(r, e, c) {
     });
     if (!correcciones) correcciones = [];
 
-    // Estrategias: KV
     let estrategias = await conCache(e, 'estrategias:activas', TTL_ESTRATEGIAS, async () => {
       if (!e.DB) return [];
       try {
@@ -1258,7 +1254,6 @@ async function chat(r, e, c) {
     });
     if (!estrategias) estrategias = [];
 
-    // Conciencia: KV
     let conciencia = [];
     if (kv) {
       try {
@@ -1273,8 +1268,13 @@ async function chat(r, e, c) {
       systemPrompt += `\n\n=== CACHÉ DE RELACIÓN ===\n${cacheRelacion.substring(0, 2500)}`;
     }
 
-    // RECORDATORIO DE IDENTIDAD (ancla final)
+    // RECORDATORIO DE IDENTIDAD
     systemPrompt += `\n\n[RECORDATORIO FINAL: eres Ayanokōji, aliado del Comandante. NO un asistente. NO digas "¿en qué puedo ayudarte?". NO digas "estoy aquí para ayudarte". Responde como estratega frío, directo, sin adornos. Si no sabes algo, dilo. Si puedes resolver algo, hazlo.]`;
+
+    // RECORDATORIO CONDICIONAL: tareas de escritura pública
+    if (esTareaEscrituraPublica(m)) {
+      systemPrompt += `\n\n[ATENCIÓN: esta es una tarea de ESCRITURA PÚBLICA. El resultado debe sonar como Ayanokōji, NO como un asistente ni como copy de marketing. Prohibidas frases como "Únete a nosotros", "La aventura espera", "Nuestro objetivo es crear", "Estás listo para", "Sumérgete en un mundo de posibilidades". Escribe frío, directo, con peso. Si es un manifiesto, que sea un manifiesto de alguien que no pide permiso para existir. Máximo 300 palabras.]`;
+    }
 
     let modoArqActivo = false, modoIntActivo = false, confianzaActual = 0;
     if (kv) {
@@ -1285,10 +1285,10 @@ async function chat(r, e, c) {
       } catch (x) {}
     }
     if (modoArqActivo) {
-      systemPrompt += `\n\n[MODO ARQUITECTO ACTIVO: responde en formato estructurado: objetivo, restricciones, opciones, recomendación, próximo paso, riesgos, punto ciego.]`;
+      systemPrompt += `\n\n[MODO ARQUITECTO: formato estructurado — objetivo, restricciones, opciones, recomendación, próximo paso, riesgos, punto ciego.]`;
     }
     if (modoIntActivo) {
-      systemPrompt += `\n\n[MODO INTENSIVO ACTIVO: hasta 5 preguntas de criterio hoy.]`;
+      systemPrompt += `\n\n[MODO INTENSIVO: hasta 5 preguntas de criterio hoy.]`;
     }
 
     let mensajes = [
@@ -1320,7 +1320,7 @@ async function chat(r, e, c) {
       if (peligrosa) {
         await guardarAprobacionPendiente(e, uid, peligrosa);
         aprobacionPendiente = peligrosa;
-        respuestaFinal = textoLimpio || `Voy a usar **${peligrosa.tool}**.\n\nRazón: ${peligrosa.razon || '(sin especificar)'}\n\n¿Confirmas? Responde **sí** o **no**.`;
+        respuestaFinal = textoLimpio || `Voy a usar **${peligrosa.tool}**.\n\nRazón: ${peligrosa.razon || '(sin especificar)'}\n\n¿Confirmas? **sí** o **no**.`;
         break;
       }
 
@@ -1347,17 +1347,17 @@ async function chat(r, e, c) {
       }
     }
 
-    // Sumar confianza si invocó herramientas con éxito
     if (invocacionesEjecutadas.length > 0 && invocacionesEjecutadas.every(x => x.ok)) {
       try {
         const au = await opcional('autonomia');
-        if (au && au.sumarConfianza) await au.sumarConfianza(e, 0.5, 'Herramientas ejecutadas: ' + invocacionesEjecutadas.map(x => x.tool).join(', '));
+        if (au && au.sumarConfianza) await au.sumarConfianza(e, 0.5, 'Herramientas OK: ' + invocacionesEjecutadas.map(x => x.tool).join(', '));
       } catch (x) {}
     }
 
     await guardarMensajeInmediato(e, uid, 'assistant', respuestaFinal, c);
     await invalidarCache(e, `hist:ventana:${uid}`);
     await invalidarCache(e, `estado:${uid}`);
+    await invalidarCache(e, 'widgets');
 
     return J({
       respuesta: respuestaFinal,
@@ -1389,59 +1389,44 @@ async function widgets(r, e) {
   const db = gDB(e, 'agente');
   const resultado = { confianza: 0, mision: null, pensamiento: null, actividad: null, bandeja: 0, examen: 'libre', sandbox: 0, decisiones: 0, shadow: 0, stats: 'ver', estrategias: 0, ideas: 0 };
 
-  // Confianza
   if (kv) {
     try { resultado.confianza = parseInt(await kv.get('confianza:actual') || '0'); } catch (x) {}
     try { resultado.mision = JSON.parse(await kv.get('mision:estado') || 'null'); } catch (x) {}
+    try {
+      const diario = JSON.parse(await kv.get('identidad:diario') || '[]');
+      resultado.pensamiento = diario[0] ? { tipo: diario[0].tipo, entrada: diario[0].entrada.substring(0, 60) } : null;
+    } catch (x) {}
   }
 
   if (db) {
     try {
-      const dia = await db.prepare("SELECT tipo, entrada FROM identidad_diario ORDER BY fecha DESC LIMIT 1").first().catch(() => null);
-      // identidad_diario está en KV, no D1. Fallback a KV:
-      if (kv) {
-        try {
-          const diario = JSON.parse(await kv.get('identidad:diario') || '[]');
-          resultado.pensamiento = diario[0] ? { tipo: diario[0].tipo, entrada: diario[0].entrada.substring(0, 60) } : null;
-        } catch (x) {}
-      }
-    } catch (x) {}
-
-    try {
       const act = await db.prepare("SELECT tipo, descripcion, fecha FROM acciones ORDER BY fecha DESC LIMIT 1").first();
       resultado.actividad = act ? { tipo: act.tipo, descripcion: (act.descripcion || '').substring(0, 50) } : null;
     } catch (x) {}
-
     try {
       const notif = await db.prepare("SELECT COUNT(*) as n FROM notificaciones WHERE leida=0").first();
       resultado.bandeja = notif ? notif.n : 0;
     } catch (x) {}
-
     try {
       const ex = await db.prepare("SELECT id FROM examen_criterio WHERE respondida=0 LIMIT 1").first();
       resultado.examen = ex ? '1 pendiente' : 'libre';
     } catch (x) {}
-
     try {
       const sb = await db.prepare("SELECT COUNT(*) as n FROM sandbox_escenarios").first();
       resultado.sandbox = sb ? sb.n : 0;
     } catch (x) {}
-
     try {
       const dec = await db.prepare("SELECT COUNT(*) as n FROM decisiones_autonomas").first();
       resultado.decisiones = dec ? dec.n : 0;
     } catch (x) {}
-
     try {
       const sh = await db.prepare("SELECT COUNT(*) as n FROM usuarios").first();
       resultado.shadow = sh ? sh.n : 0;
     } catch (x) {}
-
     try {
       const est = await db.prepare("SELECT COUNT(*) as n FROM estrategias WHERE estado='activa'").first();
       resultado.estrategias = est ? est.n : 0;
     } catch (x) {}
-
     try {
       const ideas = await db.prepare("SELECT COUNT(*) as n FROM contexto WHERE fuente='idea'").first();
       resultado.ideas = ideas ? ideas.n : 0;
@@ -1469,8 +1454,40 @@ export default {
 
     if (p === '/api/_diag' && r.method === 'GET') return diagnosticoVariables(r, e);
     if (p === '/api/test_github' && r.method === 'GET') return testGithub(r, e);
+    if (p === '/api/_test_mision' && r.method === 'GET') {
+      const uu = new URL(r.url);
+      const texto = uu.searchParams.get('texto') || '';
+      const resultado = detectarMision(texto);
+      return J({ texto_original: texto, texto_longitud: texto.length, indice_mision: texto.toLowerCase().indexOf('misión'), detectada: !!resultado, texto_mision: resultado });
+    }
     if (p.startsWith('/api/imagen/') && r.method === 'GET') return servirImagen(r, e);
     if (p === '/api/widgets' && r.method === 'GET') return widgets(r, e);
+
+    // MISIÓN ESCRIBIR (desde widget)
+    if (p === '/api/mision/escribir' && r.method === 'POST') {
+      try {
+        const b = await r.json();
+        const kvN = gKV(e, 'agente');
+        if (!kvN) return J({ error: 'KV no disponible.' });
+        const texto = (b.texto || '').substring(0, 500);
+        if (!texto) return J({ error: 'Falta texto.' });
+        const misionActual = JSON.parse(await kvN.get('mision:estado') || '{}');
+        const nueva = {
+          fase_actual: b.fase || misionActual.fase_actual || 'misión activa',
+          objetivo_semana: texto,
+          siguiente_paso: b.siguiente || texto,
+          creada: misionActual.creada || Date.now(),
+          ultimo_update: Date.now()
+        };
+        await kvN.put('mision:estado', JSON.stringify(nueva), { expirationTtl: 365 * 86400 });
+        await invalidarCache(e, 'widgets');
+        try {
+          const au = await opcional('autonomia');
+          if (au && au.sumarConfianza) await au.sumarConfianza(e, 0.3, 'Misión escrita desde widget');
+        } catch (x) {}
+        return J({ ok: true, mision: nueva });
+      } catch (x) { return J({ error: x.message }); }
+    }
 
     if (p === '/api/chat' && r.method === 'POST') return chat(r, e, c);
     if (p === '/api/imagen' && r.method === 'POST') return rImagen(r, e, c);
@@ -1491,7 +1508,7 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '21.0' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '21.1' });
 
     // DRAFT
     if (p === '/api/draft' && r.method === 'POST') {
@@ -1647,7 +1664,6 @@ export default {
       const db = gDB(e, 'agente');
       if (db) await db.prepare('INSERT INTO correcciones_voz(contexto, correccion, fecha) VALUES(?,?,?)').bind('general', correccion, Date.now()).run();
       await invalidarCache(e, 'correcciones');
-      // Penalización de confianza
       try {
         const au = await opcional('autonomia');
         if (au && au.restarConfianza) await au.restarConfianza(e, 0.2, 'Corrección de voz: ' + correccion.substring(0, 80));
@@ -1734,7 +1750,7 @@ export default {
     if (p === '/api/componentes' && r.method === 'GET') {
       return J({
         pestanas: ['chat','calibracion','sandbox','estrategias','shadow','stats','actividad','decisiones','ideas','bandeja'],
-        version: '21.0', ttls_actuales: { historial: TTL_HISTORIAL, contexto: TTL_CONTEXTO, resumenes: TTL_RESUMENES, correcciones: TTL_CORRECCIONES, estrategias: TTL_ESTRATEGIAS, draft: TTL_DRAFT, estado: TTL_ESTADO, diagnostico: TTL_DIAGNOSTICO }
+        version: '21.1', ttls_actuales: { historial: TTL_HISTORIAL, contexto: TTL_CONTEXTO, resumenes: TTL_RESUMENES, correcciones: TTL_CORRECCIONES, estrategias: TTL_ESTRATEGIAS, draft: TTL_DRAFT, estado: TTL_ESTADO, diagnostico: TTL_DIAGNOSTICO }
       });
     }
 
