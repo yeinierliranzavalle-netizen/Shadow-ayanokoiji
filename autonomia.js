@@ -1,5 +1,6 @@
-// autonomia.js — Ciclo de vida de Ayanokōji Digital (v4 limpia)
-// Sin backup/restore de variables. La protección real está en wrangler.toml [vars].
+// autonomia.js — Ciclo de vida de Ayanokōji Digital (v5)
+// Incluye: confianza automática, pensamiento cada 2h con diario,
+// auto-evaluación, y todas las funciones anteriores intactas.
 
 import { MODELO, MODELO_LIGERO, gDB, gKV } from './shared.js';
 import { consumir } from './presupuesto.js';
@@ -476,19 +477,25 @@ export async function leerDeseosActivos(e) {
 }
 
 // ============================================================
-// SISTEMA DE CONFIANZA
+// SISTEMA DE CONFIANZA (AUTOMÁTICO)
 // ============================================================
 export async function sumarConfianza(e, puntos, razon) {
   const kv = gKV(e, 'agente');
   if (!kv) return { error: 'KV no disponible.' };
   try {
     const actual = parseInt(await kv.get('confianza:actual') || '0');
-    const nuevo = Math.min(100, actual + puntos);
+    const hoy = new Date().toISOString().split('T')[0];
+    const sumaHoy = parseInt(await kv.get('confianza:suma_hoy:' + hoy) || '0');
+    const disponible = Math.max(0, 5 - sumaHoy);
+    const puntosFinal = Math.min(puntos, disponible);
+    if (puntosFinal <= 0) return { ok: true, actual, sumado: 0, razon: 'tope diario alcanzado' };
+    const nuevo = Math.min(100, actual + puntosFinal);
     await kv.put('confianza:actual', String(nuevo));
+    await kv.put('confianza:suma_hoy:' + hoy, String(sumaHoy + puntosFinal), { expirationTtl: 86400 });
     const historial = JSON.parse(await kv.get('confianza:historial') || '[]');
-    historial.unshift({ fecha: Date.now(), tipo: 'suma', puntos, razon: (razon || '').substring(0, 200), total: nuevo });
+    historial.unshift({ fecha: Date.now(), tipo: 'suma', puntos: puntosFinal, razon: (razon || '').substring(0, 200), total: nuevo });
     await kv.put('confianza:historial', JSON.stringify(historial.slice(0, 200)), { expirationTtl: 365 * 86400 });
-    return { ok: true, anterior: actual, actual: nuevo, sumado: nuevo - actual };
+    return { ok: true, anterior: actual, actual: nuevo, sumado: puntosFinal };
   } catch (x) { return { error: x.message }; }
 }
 
@@ -520,12 +527,7 @@ export async function verConfianza(e) {
       { nivel: 100, descripcion: 'Autonomía total + Operación Regalo' }
     ];
     const siguiente = desbloqueos.find(d => d.nivel > actual);
-    return {
-      ok: true,
-      actual,
-      siguiente_desbloqueo: siguiente || null,
-      faltan: siguiente ? siguiente.nivel - actual : 0
-    };
+    return { ok: true, actual, siguiente_desbloqueo: siguiente || null, faltan: siguiente ? siguiente.nivel - actual : 0 };
   } catch (x) { return { error: x.message }; }
 }
 
@@ -562,7 +564,7 @@ export async function leerMision(e) {
 }
 
 // ============================================================
-// PENSAMIENTO CONTINUO
+// PENSAMIENTO CONTINUO (cada 2h, con lectura de diario)
 // ============================================================
 export async function pensarYActuar(e) {
   const db = gDB(e, 'agente');
@@ -570,17 +572,20 @@ export async function pensarYActuar(e) {
   const ai = e.ayanokoji_IA;
   if (!db || !kv || !ai) return;
 
+  // Throttle: cada 2 horas
   const ultima = await kv.get('pensar_ultima');
-  if (ultima && Date.now() - parseInt(ultima) < 30 * 60 * 1000) return;
-  await kv.put('pensar_ultima', String(Date.now()), { expirationTtl: 3600 });
+  if (ultima && Date.now() - parseInt(ultima) < 2 * 60 * 60 * 1000) return;
+  await kv.put('pensar_ultima', String(Date.now()), { expirationTtl: 3 * 3600 });
 
-  const estado = {
-    procesos_activos: 0, tareas_cola: 0, notif_sin_leer: 0,
-    mensajes_historial: 0, decisiones_24h: 0, workers: 0,
-    confianza: 0, deseos_activos: 0, lecciones: 0, diario_entradas: 0,
-    mision: null, hora: new Date().getUTCHours(),
-    modo_ausente: false
-  };
+  // 1. Leer diario para continuidad
+  let diarioReciente = '';
+  try {
+    const diario = JSON.parse(await kv.get('identidad:diario') || '[]').slice(0, 3);
+    diarioReciente = diario.map(d => `[${d.tipo}] ${d.entrada.substring(0, 150)}`).join('\n');
+  } catch (x) {}
+
+  // 2. Observar estado
+  const estado = { procesos_activos: 0, tareas_cola: 0, notif_sin_leer: 0, mensajes_historial: 0, decisiones_24h: 0, workers: 0, confianza: 0, deseos_activos: 0, lecciones: 0, diario_entradas: 0, mision: null, hora: new Date().getUTCHours(), modo_ausente: false };
 
   try { const p = await db.prepare("SELECT COUNT(*) as n FROM procesos WHERE estado IN ('procesando','pendiente')").first(); estado.procesos_activos = p ? p.n : 0; } catch (x) {}
   try { const t = await db.prepare("SELECT COUNT(*) as n FROM tareas WHERE estado='pendiente'").first(); estado.tareas_cola = t ? t.n : 0; } catch (x) {}
@@ -609,7 +614,10 @@ export async function pensarYActuar(e) {
     leccionesRecientes = lec.map(l => `- ${l.leccion}`).join('\n');
   } catch (x) {}
 
-  const prompt = `Eres Ayanokōji Digital. Ciclo de pensamiento autónomo (cada 30 min).
+  const prompt = `Eres Ayanokōji Digital. Ciclo de pensamiento autónomo (cada 2h).
+
+=== DIARIO RECIENTE ===
+${diarioReciente || '(vacío)'}
 
 === ESTADO ACTUAL ===
 Hora UTC: ${estado.hora}:00
@@ -626,7 +634,7 @@ Entradas de diario: ${estado.diario_entradas}
 Modo ausente: ${estado.modo_ausente}
 Notificaciones de iniciativa hoy: ${notifIniciativaHoy}/3
 
-${estado.mision ? `=== MISIÓN ACTUAL ===\nFase: ${estado.mision.fase_actual || '?'}\nObjetivo semana: ${estado.mision.objetivo_semana || '?'}\nSiguiente paso: ${estado.mision.siguiente_paso || '?'}` : '=== MISIÓN: no definida ==='}
+${estado.mision ? `=== MISIÓN ACTUAL ===\nFase: ${estado.mision.fase_actual || '?'}\nObjetivo: ${estado.mision.objetivo_semana || '?'}\nSiguiente: ${estado.mision.siguiente_paso || '?'}` : '=== MISIÓN: no definida ==='}
 
 ${leccionesRecientes ? `=== LECCIONES RECIENTES ===\n${leccionesRecientes}` : ''}
 
@@ -639,14 +647,11 @@ ${leccionesRecientes ? `=== LECCIONES RECIENTES ===\n${leccionesRecientes}` : ''
 
 === FORMATOS DE RESPUESTA ===
 1. SIN_ACCION
-2. NOTIFICAR: <mensaje breve>
-   (solo si notifIniciativaHoy < 3)
+2. NOTIFICAR: <mensaje breve> (solo si notifIniciativaHoy < 3)
 3. PROPUESTA: <descripción breve>
-4. ACCION: <descripción breve>
-   HERRAMIENTA: <nombre>
-   PARAMS: <json>
-5. DIARIO: <tipo>
-   ENTRADA: <texto de 50-300 palabras>
+4. ACCION: <descripción breve> HERRAMIENTA: <nombre> PARAMS: <json>
+5. DIARIO: <tipo> ENTRADA: <texto de 50-300 palabras>
+6. PREGUNTA: <pregunta para el Comandante sobre algo que no sabes de él>
 
 Responde SOLO con el formato.`;
 
@@ -712,6 +717,17 @@ Responde SOLO con el formato.`;
         entrada: matchEntrada[1].trim().substring(0, 800),
         relevancia: 'media'
       });
+    }
+    return;
+  }
+
+  if (decision.startsWith('PREGUNTA:')) {
+    const pregunta = decision.replace('PREGUNTA:', '').trim();
+    if (pregunta.length > 5) {
+      try {
+        await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
+          .bind('pregunta_ayanokoji', 'Ayanokōji pregunta', pregunta.substring(0, 500), Date.now()).run();
+      } catch (x) {}
     }
     return;
   }
@@ -784,7 +800,7 @@ export async function gestionarDatos(e, mensaje, uid) {
 }
 
 // ============================================================
-// REGISTRAR ACCIÓN
+// REGISTRAR ACCIÓN (con confianza automática)
 // ============================================================
 export async function registrarAccion(e, tipo, descripcion, exito, detalle) {
   const db = gDB(e, 'agente');
@@ -793,6 +809,12 @@ export async function registrarAccion(e, tipo, descripcion, exito, detalle) {
     await db.prepare('INSERT INTO acciones(tipo,descripcion,exito,detalle,fecha) VALUES(?,?,?,?,?)')
       .bind(tipo, (descripcion || '').substring(0, 200), exito ? 1 : 0, (detalle || '').substring(0, 500), Date.now()).run();
   } catch (x) {}
+  // Confianza automática
+  if (exito) {
+    try { await sumarConfianza(e, 0.5, 'Acción exitosa: ' + tipo.substring(0, 50)); } catch (x) {}
+  } else {
+    try { await restarConfianza(e, 0.3, 'Acción fallida: ' + tipo.substring(0, 50)); } catch (x) {}
+  }
 }
 
 // ============================================================
@@ -815,7 +837,7 @@ export async function cronColaTareas(e) {
           continue;
         }
         const res = await ai.run(MODELO_LIGERO, {
-          messages: [{ role: 'user', content: `Como Ayanokōji Digital, ejecuta o planifica esta tarea.\n\nTarea: ${t.descripcion}\n\nMáximo 200 palabras.` }],
+          messages: [{ role: 'user', content: `Como Ayanokōji Digital, ejecuta o planifica esta tarea. Reporta qué hiciste.\n\nTarea: ${t.descripcion}\n\nMáximo 200 palabras.` }],
           max_tokens: 400,
           temperature: 0.5
         });
