@@ -1,6 +1,10 @@
-// autonomia.js — Ciclo de vida de Ayanokōji Digital (v5)
-// Incluye: confianza automática, pensamiento cada 2h con diario,
-// auto-evaluación, y todas las funciones anteriores intactas.
+// autonomia.js — Ciclo de vida de Ayanokōji Digital (v5.1)
+// Cambios v5.1:
+// - validarSintaxis + deploySeguro (validación antes de desplegar, snapshot, verificación, reversión)
+// - autoreparar usa deploySeguro (simplificado, sin doble snapshot)
+// - autoMejorar usa deploySeguro cuando autoDesplegar=true
+// - pensarYActuar ejecuta ACCION: con ejecutarHerramienta (importación dinámica de worker.js)
+// - pensarYActuar tiene flag anti-reentrada (en_ciclo_autonomo)
 
 import { MODELO, MODELO_LIGERO, gDB, gKV } from './shared.js';
 import { consumir } from './presupuesto.js';
@@ -149,7 +153,7 @@ export async function revertir(e, nombre) {
 }
 
 // ============================================================
-// AUTO-MEJORA
+// AUTO-MEJORA — v5.1: deploySeguro cuando autoDesplegar=true
 // ============================================================
 export async function autoMejorar(e, body) {
   try {
@@ -158,7 +162,10 @@ export async function autoMejorar(e, body) {
     const actual = await leerCodigoWorker(e, nombre);
     if (actual.error) return { error: 'No pude leer el código actual: ' + actual.error };
     if (!await consumir(e, 'procesamiento')) return { error: 'Presupuesto agotado.' };
-    await crearSnapshot(e, nombre);
+    // Snapshot solo si NO vamos a desplegar (deploySeguro ya lo hace)
+    if (!autoDesplegar) {
+      await crearSnapshot(e, nombre);
+    }
     const prompt = `Tienes este código de Cloudflare Worker. El Comandante quiere mejorar el área "${area || 'general'}".
 
 Instrucciones específicas: ${instrucciones || 'Mejora general sin romper funcionalidad.'}
@@ -192,9 +199,9 @@ ${actual.codigo.substring(0, 25000)}`;
       } catch (x) {}
     }
     if (autoDesplegar) {
-      const r = await actualizarWorker(e, nombre, nuevoCodigo);
+      const r = await deploySeguro(e, nombre, nuevoCodigo);
       await registrarAccion(e, 'auto_mejora_desplegada', area, r.ok, r.mensaje || r.error);
-      return { ok: true, desplegado: r.ok, mensaje: r.mensaje || r.error, area };
+      return { ok: true, desplegado: r.ok, verificado: r.verificado || false, mensaje: r.mensaje || r.error, area };
     }
     return { ok: true, guardado: true, mensaje: 'Versión mejorada guardada en KV.', area };
   } catch (x) { return { error: x.message }; }
@@ -254,6 +261,7 @@ REGLAS:
   } catch (x) { return { error: x.message }; }
 }
 
+// v5.1: autoreparar usa deploySeguro (validación + snapshot + deploy + verificación + reversión)
 export async function autoreparar(e, tipoError, muestras) {
   const db = gDB(e, 'agente');
   const kv = gKV(e, 'agente');
@@ -263,9 +271,6 @@ export async function autoreparar(e, tipoError, muestras) {
     const pausada = await kv.get('auto_reparacion_pausada');
     if (pausada === 'true') return { ok: false, error: 'Auto-reparación pausada.' };
   } catch (x) {}
-
-  const snap = await crearSnapshot(e, 'shadow-ayano');
-  if (snap.error) return { error: 'Snapshot falló: ' + snap.error };
 
   const analisis = await analizarErrorRecurrente(e, tipoError, muestras);
   if (analisis.error) return { error: 'Análisis falló: ' + analisis.error };
@@ -284,31 +289,28 @@ export async function autoreparar(e, tipoError, muestras) {
     return { error: 'La IA no devolvió código válido.', analisis: textoAnalisis };
   }
 
-  const upd = await actualizarWorker(e, 'shadow-ayano', codigoPropuesto);
+  const upd = await deploySeguro(e, 'shadow-ayano', codigoPropuesto);
   if (!upd.ok) {
-    const rev = await revertir(e, 'shadow-ayano');
-    return { error: 'Despliegue falló: ' + (upd.error || ''), revertido: rev.ok === true, analisis: textoAnalisis };
+    return {
+      error: 'Deploy seguro falló: ' + (upd.error || ''),
+      fase: upd.fase || 'deploy',
+      revertido: upd.revertido === true,
+      analisis: textoAnalisis
+    };
   }
-
-  let verificado = false;
-  try {
-    await new Promise(r => setTimeout(r, 3000));
-    const check = await fetch('https://shadow-ayano.yeinierliranzavalle.workers.dev/api/estado');
-    if (check.ok) verificado = true;
-  } catch (x) {}
 
   try {
     await db.prepare('INSERT INTO acciones_autonomas(area,archivo,cambio,prueba,exito,reversible,fecha) VALUES(?,?,?,?,1,1,?)')
-      .bind('autoreparacion', 'shadow-ayano', tipoError, textoAnalisis.substring(0, 500) + (verificado ? ' [VERIFICADO]' : ' [SIN VERIFICAR]'), Date.now()).run();
+      .bind('autoreparacion', 'shadow-ayano', tipoError, textoAnalisis.substring(0, 500) + ' [VERIFICADO]', Date.now()).run();
   } catch (x) {}
 
   try {
     await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
-      .bind('autoreparacion', `✓ Reparación ${verificado ? 'verificada' : 'aplicada'}`,
+      .bind('autoreparacion', '✓ Reparación verificada',
         `Error: ${tipoError}\n\n${textoAnalisis.substring(0, 800)}`, Date.now()).run();
   } catch (x) {}
 
-  return { ok: true, tipoError, analisis: textoAnalisis, codigoAplicado: codigoPropuesto.length, snapshot: snap.ts, verificado };
+  return { ok: true, tipoError, analisis: textoAnalisis, codigoAplicado: codigoPropuesto.length, snapshot: upd.snapshot, verificado: true };
 }
 
 export async function cronAutoReparacion(e) {
@@ -564,9 +566,26 @@ export async function leerMision(e) {
 }
 
 // ============================================================
-// PENSAMIENTO CONTINUO (cada 2h, con lectura de diario)
+// PENSAMIENTO CONTINUO — v5.1: wrapper anti-reentrada + ejecutor de misiones
 // ============================================================
 export async function pensarYActuar(e) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return;
+
+  // Anti-reentrada: si ya hay un ciclo en ejecución, salir
+  let enCiclo = null;
+  try { enCiclo = await kv.get('en_ciclo_autonomo'); } catch (x) {}
+  if (enCiclo === 'true') return;
+  try { await kv.put('en_ciclo_autonomo', 'true', { expirationTtl: 600 }); } catch (x) {}
+
+  try {
+    await _pensarYActuarInterno(e);
+  } finally {
+    try { await kv.delete('en_ciclo_autonomo'); } catch (x) {}
+  }
+}
+
+async function _pensarYActuarInterno(e) {
   const db = gDB(e, 'agente');
   const kv = gKV(e, 'agente');
   const ai = e.ayanokoji_IA;
@@ -699,11 +718,44 @@ Responde SOLO con el formato.`;
     return;
   }
 
+  // v5.1: ACCION ejecuta la herramienta si confianza >= 10 y hay HERRAMIENTA + PARAMS
   if (decision.startsWith('ACCION:')) {
-    const autoEjecutar = estado.confianza >= 10;
+    const accionTexto = decision.replace('ACCION:', '').trim();
+    const matchHerr = accionTexto.match(/HERRAMIENTA:\s*(\w+)/);
+    const matchParams = accionTexto.match(/PARAMS:\s*(\{[\s\S]*\})/);
+
+    let resultado = 'registrada_sin_ejecutar';
+    let exito = false;
+    let detalle = '';
+
+    if (estado.confianza >= 10 && matchHerr) {
+      try {
+        const nombreHerr = matchHerr[1];
+        let params = {};
+        if (matchParams) {
+          try { params = JSON.parse(matchParams[1]); } catch (x) { params = {}; }
+        }
+        const inv = { tool: nombreHerr, params, razon: 'Ciclo autónomo' };
+        const workerMod = await import('./worker.js');
+        if (workerMod && typeof workerMod.ejecutarHerramienta === 'function') {
+          const r = await workerMod.ejecutarHerramienta(e, inv, 'comandante', null);
+          exito = r.ok;
+          resultado = exito ? 'ejecutada_ok' : 'ejecutada_error';
+          detalle = exito
+            ? JSON.stringify(r.resultado || {}).substring(0, 500)
+            : (r.error || 'sin detalle');
+        } else {
+          resultado = 'ejecutor_no_disponible';
+        }
+      } catch (x) {
+        resultado = 'ejecutada_error';
+        detalle = x.message;
+      }
+    }
+
     try {
-      await db.prepare('INSERT INTO decisiones_autonomas(tipo,contexto,decision,simulacion,aplicada,resultado,fecha) VALUES(?,?,?,?,?,?,?)')
-        .bind('accion_pensamiento', 'Ciclo autónomo', decision.substring(0, 500), '', autoEjecutar ? 1 : 0, autoEjecutar ? 'ejecutada_pendiente' : 'registrada_sin_ejecutar', Date.now()).run();
+      await db.prepare('INSERT INTO decisiones_autonomas(tipo,contexto,decision,simulacion,aplicada,resultado,exito,fecha) VALUES(?,?,?,?,?,?,?,?)')
+        .bind('accion_pensamiento', 'Ciclo autónomo', accionTexto.substring(0, 500), '', exito ? 1 : 0, resultado, exito ? 1 : 0, Date.now()).run();
     } catch (x) {}
     return;
   }
@@ -809,7 +861,6 @@ export async function registrarAccion(e, tipo, descripcion, exito, detalle) {
     await db.prepare('INSERT INTO acciones(tipo,descripcion,exito,detalle,fecha) VALUES(?,?,?,?,?)')
       .bind(tipo, (descripcion || '').substring(0, 200), exito ? 1 : 0, (detalle || '').substring(0, 500), Date.now()).run();
   } catch (x) {}
-  // Confianza automática
   if (exito) {
     try { await sumarConfianza(e, 0.5, 'Acción exitosa: ' + tipo.substring(0, 50)); } catch (x) {}
   } else {
@@ -936,4 +987,92 @@ export async function informeDiario(e) {
     await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
       .bind('informe_diario', 'Informe diario', resumen, Date.now()).run();
   } catch (x) {}
+}
+
+// ============================================================
+// VALIDACIÓN DE SINTAXIS — v5.1 (nuevo)
+// Verifica que el código propuesto sea un worker válido antes de desplegarlo.
+// ============================================================
+function validarSintaxis(codigo) {
+  try {
+    // 1. Imports relativos deben apuntar a archivos conocidos
+    const imports = codigo.match(/import\s+.*?\s+from\s+['"](.+?)['"]/g) || [];
+    const archivosConocidos = [
+      './shared.js', './proc.js', './presupuesto.js', './nucleo.js', './tools.js',
+      './autonomia.js', './salud.js', './examen.js', './publisher.js', './social.js',
+      './sandbox.js', './notify.js', './doctrina.js', './identidad.js'
+    ];
+    for (const imp of imports) {
+      const match = imp.match(/from\s+['"](.+?)['"]/);
+      if (match && match[1].startsWith('./') && !archivosConocidos.includes(match[1])) {
+        return { ok: false, error: 'Import desconocido: ' + match[1] };
+      }
+    }
+    // 2. Debe tener export default (es un worker)
+    if (!codigo.includes('export default')) {
+      return { ok: false, error: 'Falta export default (no es un worker válido)' };
+    }
+    // 3. Debe tener método fetch
+    if (!codigo.includes('async fetch')) {
+      return { ok: false, error: 'Falta método fetch' };
+    }
+    // 4. Llaves balanceadas
+    const apertura = (codigo.match(/{/g) || []).length;
+    const cierre = (codigo.match(/}/g) || []).length;
+    if (apertura !== cierre) {
+      return { ok: false, error: `Llaves desbalanceadas: ${apertura} abiertas, ${cierre} cerradas` };
+    }
+    return { ok: true };
+  } catch (x) {
+    return { ok: false, error: x.message };
+  }
+}
+
+// ============================================================
+// DEPLOY SEGURO — v5.1 (nuevo)
+// Flujo: validar sintaxis → snapshot → deploy → verificar → revertir si falla.
+// ============================================================
+export async function deploySeguro(e, nombre, codigo) {
+  // 1. Validar sintaxis
+  const validacion = validarSintaxis(codigo);
+  if (!validacion.ok) {
+    return { ok: false, error: 'Validación falló: ' + validacion.error, fase: 'validacion' };
+  }
+
+  // 2. Snapshot del actual
+  const snap = await crearSnapshot(e, nombre);
+  if (snap.error) {
+    return { ok: false, error: 'Snapshot falló: ' + snap.error, fase: 'snapshot' };
+  }
+
+  // 3. Deploy
+  const upd = await actualizarWorker(e, nombre, codigo);
+  if (!upd.ok) {
+    return { ok: false, error: 'Deploy falló: ' + upd.error, fase: 'deploy', snapshot: snap.ts };
+  }
+
+  // 4. Verificar post-deploy
+  let verificado = false;
+  let errorVerificacion = null;
+  try {
+    await new Promise(r => setTimeout(r, 3000));
+    const check = await fetch('https://shadow-ayano.yeinierliranzavalle.workers.dev/api/estado');
+    if (check.ok) {
+      const data = await check.json();
+      if (data.estado === 'activo') verificado = true;
+      else errorVerificacion = 'Worker responde pero no está activo: ' + JSON.stringify(data);
+    } else {
+      errorVerificacion = 'Worker responde con status ' + check.status;
+    }
+  } catch (x) {
+    errorVerificacion = x.message;
+  }
+
+  // 5. Si no verifica, revertir
+  if (!verificado) {
+    const rev = await revertir(e, nombre);
+    return { ok: false, error: 'Verificación falló: ' + errorVerificacion, fase: 'verificacion', revertido: rev.ok === true, snapshot: snap.ts };
+  }
+
+  return { ok: true, mensaje: 'Deploy seguro completado', verificado: true, snapshot: snap.ts, commit: upd.commit };
 }
