@@ -1,3 +1,10 @@
+// worker.js — v21.2
+// Cambios v21.2:
+// - ejecutarHerramienta ahora es export (para autonomia.js)
+// - guardarMensajeInmediato: borra solo el buffer propio
+// - elegirModelo: chat siempre 70B
+// - chat: pasa perfilBase + cacheRelacion a construirSystemPrompt (8 args)
+
 import { MODELO, MODELO_LIGERO, MODELO_VISION, MODELO_RAZONAMIENTO, CORS, J, gDB, gKV, VENTANA, migrar } from './shared.js';
 import { subir, procesar, resumir, verProceso, retomar, cronRetomar, cronAutonomo, resumirChats, importar, analizarArchivo, indexarHistorial, buscarPorTema, construirPerfilBase } from './proc.js';
 import { estadoPresupuesto, consumir } from './presupuesto.js';
@@ -62,24 +69,20 @@ function detectarMision(texto) {
   const t = texto.trim();
   const lower = t.toLowerCase();
   const indiceMision = lower.indexOf('misión');
-  
-  // Si no hay "misión" o está muy lejos del inicio, no es misión
+
   if (indiceMision === -1 || indiceMision > 80) return null;
-  
-  // Verificar que "misión" esté precedida por patrones válidos
+
   const antes = t.substring(0, indiceMision).toLowerCase().replace(/[,.\s]+/g, ' ').trim();
   const patronesValidos = ['', 'ayanokoji', 'oye', 'oye ayanokoji', 'te tengo una', 'una', 'tengo una', 'es una', 'tienes una', 'la', 'nueva', 'otra'];
   const esValido = patronesValidos.some(p => antes === p || antes.endsWith(' ' + p) || antes.endsWith(p));
-  
+
   if (!esValido) return null;
-  
-  // Extraer texto después de "misión"
+
   const despues = t.substring(indiceMision + 6);
   const limpio = despues.replace(/^[\s:\-\.]+/, '').trim();
-  
-  // Eliminar prefijos como "tienes X horas" o "para"
+
   const sinPrefijos = limpio.replace(/^(?:tienes?\s+\d+\s+horas?\s*[:\-]?\s*|para\s+)/i, '').trim();
-  
+
   if (sinPrefijos.length < 3) return null;
   return sinPrefijos;
 }
@@ -136,17 +139,16 @@ async function invalidarCache(e, prefijo) {
   } catch (x) {}
 }
 
+// ============================================================
+// ELEGIR MODELO — v21.2: chat siempre 70B (preserva voz)
+// 8B se reserva para tareas internas (pensarYActuar, sandbox, resumenes, proc)
+// ============================================================
 function elegirModelo(mensaje, intencion, iteracion) {
-  const t = (mensaje || '').toLowerCase();
-  if (iteracion > 1) return MODELO;
-  if (t.length < 50 && !/codigo|c[oó]digo|analiza|estrategia|worker|error|bug|arregla|modifica|manifiesto|redacta|escribe/.test(t)) {
-    return MODELO_LIGERO;
-  }
   return MODELO;
 }
 
 // ============================================================
-// GUARDAR MENSAJE (KV primero, D1 en waitUntil)
+// GUARDAR MENSAJE — v21.2: borra solo el buffer propio
 // ============================================================
 async function guardarMensajeInmediato(e, uid, rol, contenido, c) {
   const fecha = Date.now();
@@ -154,10 +156,11 @@ async function guardarMensajeInmediato(e, uid, rol, contenido, c) {
   const db = gDB(e, 'agente');
 
   const payload = { user_id: uid, rol, contenido: contenido.substring(0, 4000), orden: fecha, fecha };
+  // bufKey fuera del bloque if(kv) para que esté en scope del closure
+  const bufKey = 'buffer:hist:' + fecha + ':' + Math.random().toString(36).substring(7);
 
   if (kv) {
     try {
-      const bufKey = 'buffer:hist:' + fecha + ':' + Math.random().toString(36).substring(7);
       await kv.put(bufKey, JSON.stringify(payload), { expirationTtl: 3 * 86400 });
       await kv.put('buffer:hist:ultimo', String(fecha), { expirationTtl: 3 * 86400 });
     } catch (x) {}
@@ -170,11 +173,9 @@ async function guardarMensajeInmediato(e, uid, rol, contenido, c) {
       const ord = (maxOrd && maxOrd.o != null) ? maxOrd.o + 1 : fecha;
       await db.prepare('INSERT INTO historial_largo(user_id,rol,contenido,orden,fecha) VALUES(?,?,?,?,?)')
         .bind(uid, rol, contenido.substring(0, 4000), ord, fecha).run();
+      // Borrar SOLO el propio buffer, no todos
       if (kv) {
-        try {
-          const lista = await kv.list({ prefix: 'buffer:hist:', limit: 50 });
-          for (const k of lista.keys) await kv.delete(k.name);
-        } catch (x) {}
+        try { await kv.delete(bufKey); } catch (x) {}
       }
     } catch (x) {}
   };
@@ -486,9 +487,9 @@ function esFrontend(mensaje) {
 }
 
 // ============================================================
-// EJECUTOR DE HERRAMIENTAS
+// EJECUTOR DE HERRAMIENTAS — v21.2: ahora es export
 // ============================================================
-async function ejecutarHerramienta(e, inv, uid, c) {
+export async function ejecutarHerramienta(e, inv, uid, c) {
   const t = inv.tool;
   const p = inv.params || {};
   if (!herramientaExiste(t)) return { ok: false, error: `Herramienta desconocida: ${t}` };
@@ -759,7 +760,7 @@ async function rEst(e, uid) {
     }
   } catch (x) {}
 
-  const resultado = { respuesta: `Sistema activo (v21.1). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos. Tareas pendientes: ${tareas}. Notif sin leer: ${notif}. Confianza: ${confianza}/100.` };
+  const resultado = { respuesta: `Sistema activo (v21.2). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos. Tareas pendientes: ${tareas}. Notif sin leer: ${notif}. Confianza: ${confianza}/100.` };
   if (kv) {
     try { await kv.put('cache:estado:' + uid, JSON.stringify(resultado), { expirationTtl: TTL_ESTADO }); } catch (x) {}
   }
@@ -1006,7 +1007,7 @@ async function diagnosticoVariables(r, e) {
     confianza = parseInt(await kv.get('confianza:actual') || '0');
   } catch (x) {}
   return J({
-    timestamp: new Date().toISOString(), version: '21.1',
+    timestamp: new Date().toISOString(), version: '21.2',
     token_presente: !!e.GITHUB_TOKEN, token_longitud: e.GITHUB_TOKEN ? e.GITHUB_TOKEN.length : 0,
     repo_backend_presente: !!e.GITHUB_REPO_BACKEND, repo_backend_valor: e.GITHUB_REPO_BACKEND || null,
     repo_frontend_presente: !!e.GITHUB_REPO_FRONTEND, repo_frontend_valor: e.GITHUB_REPO_FRONTEND || null,
@@ -1037,7 +1038,7 @@ async function testGithub(r, e) {
 }
 
 // ============================================================
-// CHAT PRINCIPAL
+// CHAT PRINCIPAL — v21.2: pasa perfilBase + cacheRelacion a construirSystemPrompt
 // ============================================================
 async function chat(r, e, c) {
   try {
@@ -1074,7 +1075,7 @@ async function chat(r, e, c) {
         const au = await opcional('autonomia');
         if (au && au.sumarConfianza) await au.sumarConfianza(e, 0.3, 'Misión registrada: ' + misionTexto.substring(0, 80));
       } catch (x) {}
-      
+
       const respuestaMision = `Misión registrada: **${misionTexto.substring(0, 150)}**.\n\nLa ejecutaré en el próximo ciclo de pensamiento (máx 2h).\n\n— *Ayanokōji.*`;
       await guardarMensajeInmediato(e, uid, 'assistant', respuestaMision, c);
       await invalidarCache(e, 'estado:' + uid);
@@ -1262,11 +1263,13 @@ async function chat(r, e, c) {
       } catch (x) {}
     }
 
-    let systemPrompt = construirSystemPrompt(ctx, fs, rec, '', correcciones, estrategias, conciencia);
-
-    if (cacheRelacion && cacheRelacion.length > 100) {
-      systemPrompt += `\n\n=== CACHÉ DE RELACIÓN ===\n${cacheRelacion.substring(0, 2500)}`;
+    // v21.2: obtener perfilBase de KV y pasarlo a construirSystemPrompt
+    let perfilBase = '';
+    if (kv) {
+      try { perfilBase = await kv.get('perfil_base') || ''; } catch (x) {}
     }
+
+    let systemPrompt = construirSystemPrompt(ctx, fs, rec, perfilBase, correcciones, estrategias, conciencia, cacheRelacion);
 
     // RECORDATORIO DE IDENTIDAD
     systemPrompt += `\n\n[RECORDATORIO FINAL: eres Ayanokōji, aliado del Comandante. NO un asistente. NO digas "¿en qué puedo ayudarte?". NO digas "estoy aquí para ayudarte". Responde como estratega frío, directo, sin adornos. Si no sabes algo, dilo. Si puedes resolver algo, hazlo.]`;
@@ -1508,7 +1511,7 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '21.1' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '21.2' });
 
     // DRAFT
     if (p === '/api/draft' && r.method === 'POST') {
@@ -1750,7 +1753,7 @@ export default {
     if (p === '/api/componentes' && r.method === 'GET') {
       return J({
         pestanas: ['chat','calibracion','sandbox','estrategias','shadow','stats','actividad','decisiones','ideas','bandeja'],
-        version: '21.1', ttls_actuales: { historial: TTL_HISTORIAL, contexto: TTL_CONTEXTO, resumenes: TTL_RESUMENES, correcciones: TTL_CORRECCIONES, estrategias: TTL_ESTRATEGIAS, draft: TTL_DRAFT, estado: TTL_ESTADO, diagnostico: TTL_DIAGNOSTICO }
+        version: '21.2', ttls_actuales: { historial: TTL_HISTORIAL, contexto: TTL_CONTEXTO, resumenes: TTL_RESUMENES, correcciones: TTL_CORRECCIONES, estrategias: TTL_ESTRATEGIAS, draft: TTL_DRAFT, estado: TTL_ESTADO, diagnostico: TTL_DIAGNOSTICO }
       });
     }
 
