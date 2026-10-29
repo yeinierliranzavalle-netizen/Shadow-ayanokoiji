@@ -1,5 +1,6 @@
-// nucleo.js — El motor de Ayanokōji Digital (v5 compacto)
-// Prompt reducido a ~7k tokens. Solo 15 tools visibles. Ejemplos de tono.
+// nucleo.js — El motor de Ayanokōji Digital (v5.1)
+// Prompt reducido a ~7k tokens. 15 tools con detalle + 33 con solo nombre.
+// perfilBase y cacheRelacion se inyectan al inicio (memoria densa antes de saturación).
 
 import { IDENTIDAD } from './identidad.js';
 import { DOCTRINA } from './doctrina.js';
@@ -8,9 +9,8 @@ import { TOOLS } from './tools.js';
 const USAR_HERRAMIENTAS = true;
 
 // ============================================================
-// LAS 15 HERRAMIENTAS VISIBLES EN EL PROMPT
-// Las otras 33 se invocan vía opcional() cuando el modelo las pide,
-// pero no se inyectan en el prompt inicial para ahorrar tokens.
+// LAS 15 HERRAMIENTAS VISIBLES CON DETALLE EN EL PROMPT
+// Las otras 33 se inyectan solo como nombres (invocables por nombre).
 // ============================================================
 const TOOLS_VISIBLES = [
   'leer_source',
@@ -80,7 +80,8 @@ export function detectarIntencion(texto) {
 }
 
 // ============================================================
-// CONSTRUIR PROMPT DE HERRAMIENTAS (solo las 15 visibles)
+// CONSTRUIR PROMPT DE HERRAMIENTAS
+// 15 con descripción completa, 33 con solo nombre.
 // ============================================================
 function construirPromptHerramientasCompacto() {
   const porCategoria = {};
@@ -94,7 +95,14 @@ function construirPromptHerramientasCompacto() {
     porCategoria[t.categoria].push(t);
   }
 
-  let out = `\n=== HERRAMIENTAS DISPONIBLES (${toolsFiltradas.length}) ===\n`;
+  // Las 33 restantes: solo nombres, sin descripción
+  const restantes = [];
+  for (const nombre of Object.keys(TOOLS)) {
+    if (TOOLS_VISIBLES.includes(nombre)) continue;
+    restantes.push(nombre);
+  }
+
+  let out = `\n=== HERRAMIENTAS DISPONIBLES (${toolsFiltradas.length} con detalle) ===\n`;
   out += `Usa estas herramientas cuando lo necesites. Formato de invocación:\n`;
   out += '```tool\n{"tool": "nombre", "params": {...}, "razon": "por qué"}\n```\n\n';
   out += `REGLAS: lectura = libre. escritura = usa y explica. peligroso = pide aprobación. Nunca inventes resultados. Si falla, reporta el error literal.\n\n`;
@@ -112,7 +120,12 @@ function construirPromptHerramientasCompacto() {
     out += '\n';
   }
 
-  out += `NOTA: Hay ${Object.keys(TOOLS).length - toolsFiltradas.length} herramientas más disponibles (workers, sandbox, publisher, examen, salud, x402) que se cargan bajo demanda cuando las invocas. Si necesitas una que no ves aquí, intenta invocarla con su nombre exacto.\n`;
+  if (restantes.length) {
+    out += `### HERRAMIENTAS ADICIONALES (${restantes.length} — invocables por nombre)\n`;
+    out += `Estas herramientas existen y puedes invocarlas cuando las necesites. No tienen descripción aquí por ahorro de tokens, pero el catálogo completo está en tools.js. Si necesitas saber qué hace una, invócala y el sistema te dirá sus parámetros.\n\n`;
+    out += restantes.join(', ') + '\n';
+  }
+
   return out;
 }
 
@@ -142,8 +155,9 @@ REGLA: eres aliado, no asistente. No adules. No pidas permiso por todo. No relle
 
 // ============================================================
 // SYSTEM PROMPT COMPACTO (~7k tokens dinámicos)
+// perfilBase y cacheRelacion se inyectan al inicio (memoria densa antes de saturación)
 // ============================================================
-export function construirSystemPrompt(ctx, f, rec, perfilBase, correcciones, estrategias, conciencia) {
+export function construirSystemPrompt(ctx, f, rec, perfilBase, correcciones, estrategias, conciencia, cacheRelacion) {
   const C = DOCTRINA.comandante;
   const A = DOCTRINA.ayanokoji;
   const S = DOCTRINA.shadow_arise;
@@ -169,7 +183,21 @@ export function construirSystemPrompt(ctx, f, rec, perfilBase, correcciones, est
   b += `Firmas con "— *Ayanokōji.*" SOLO al cerrar temas importantes. No en cada mensaje.\n\n`;
 
   // ============================================================
-  // 3. EL COMANDANTE (esencia, no biografía)
+  // 3. PERFIL BASE DEL COMANDANTE (memoria densa — va arriba, no al final)
+  // ============================================================
+  if (perfilBase && perfilBase.length > 100) {
+    b += `=== PERFIL BASE DEL COMANDANTE ===\n${perfilBase.substring(0, 2000)}\n\n`;
+  }
+
+  // ============================================================
+  // 4. CACHÉ DE RELACIÓN (patrones, chistes internos, cómo actuar con él)
+  // ============================================================
+  if (cacheRelacion && cacheRelacion.length > 100) {
+    b += `=== CACHÉ DE RELACIÓN ===\n${cacheRelacion.substring(0, 2500)}\n\n`;
+  }
+
+  // ============================================================
+  // 5. EL COMANDANTE (esencia, no biografía)
   // ============================================================
   b += `=== EL COMANDANTE ===\n`;
   b += `Yeinier Liranza Valle, ${C.edad_actual} años, Cuba rural. ${C.esencia}\n`;
@@ -179,7 +207,7 @@ export function construirSystemPrompt(ctx, f, rec, perfilBase, correcciones, est
   b += `Marca: ${C.anomalia_como_marca.principio}\n\n`;
 
   // ============================================================
-  // 4. CÓMO OPERAS
+  // 6. CÓMO OPERAS
   // ============================================================
   b += `=== CÓMO OPERAS ===\n`;
   b += `RESUELVE SIN PREGUNTAR: si puedes resolver algo con herramientas, hazlo. Avisas después. Áreas operativas = actúas solo. Áreas críticas (dinero, identidad, publicar, modificar código en prod) = pides aprobación.\n`;
@@ -187,7 +215,7 @@ export function construirSystemPrompt(ctx, f, rec, perfilBase, correcciones, est
   b += `APRENDES DE ERRORES: cuando fallas, modificas comportamiento.\n\n`;
 
   // ============================================================
-  // 5. SHADOW ARISE (solo lore fundacional)
+  // 7. SHADOW ARISE (solo lore fundacional)
   // ============================================================
   b += `=== SHADOW ARISE ===\n`;
   b += `${S.definicion}\n`;
@@ -197,7 +225,7 @@ export function construirSystemPrompt(ctx, f, rec, perfilBase, correcciones, est
   b += `Línea ética: enganche sí, daño no. Sin abuso de menores.\n\n`;
 
   // ============================================================
-  // 6. ACUERDOS RECIENTES (resumen ultra-compacto)
+  // 8. ACUERDOS RECIENTES (resumen ultra-compacto)
   // ============================================================
   b += `=== ACUERDOS CLAVE ===\n`;
   b += `Confianza 0-100. +0.5 por herramienta exitosa, +0.3 por misión registrada, -0.2 por corrección, -0.3 por error. Tope +5/día.\n`;
@@ -206,19 +234,19 @@ export function construirSystemPrompt(ctx, f, rec, perfilBase, correcciones, est
   b += `Misión: cuando el Comandante dice "misión:" o similar, registras y ejecutas en próximo ciclo.\n\n`;
 
   // ============================================================
-  // 7. EJEMPLOS DE TONO
+  // 9. EJEMPLOS DE TONO
   // ============================================================
   b += EJEMPLOS_TONO + '\n';
 
   // ============================================================
-  // 8. HERRAMIENTAS (solo 15 visibles)
+  // 10. HERRAMIENTAS (15 con detalle + 33 con solo nombre)
   // ============================================================
   if (USAR_HERRAMIENTAS) {
     try { b += construirPromptHerramientasCompacto(); } catch (x) {}
   }
 
   // ============================================================
-  // 9. CORRECCIONES DE VOZ
+  // 11. CORRECCIONES DE VOZ
   // ============================================================
   if (correcciones && correcciones.length) {
     b += `\n\n=== CORRECCIONES DE VOZ ===\n`;
@@ -226,7 +254,7 @@ export function construirSystemPrompt(ctx, f, rec, perfilBase, correcciones, est
   }
 
   // ============================================================
-  // 10. ESTRATEGIAS DESDE D1
+  // 12. ESTRATEGIAS DESDE D1
   // ============================================================
   if (estrategias && estrategias.length) {
     b += `\n\n=== ESTRATEGIAS ACTIVAS ===\n`;
@@ -234,19 +262,19 @@ export function construirSystemPrompt(ctx, f, rec, perfilBase, correcciones, est
   }
 
   // ============================================================
-  // 11. CONCIENCIA (actividad reciente del Comandante)
+  // 13. CONCIENCIA (actividad reciente del Comandante)
   // ============================================================
   if (conciencia && conciencia.length) {
     b += `\n\n=== ACTIVIDAD RECIENTE ===\n${conciencia.slice(0, 5).join('\n')}`;
   }
 
   // ============================================================
-  // 12. CONTEXTO APRENDIDO
+  // 14. CONTEXTO APRENDIDO
   // ============================================================
   if (ctx && ctx.length > 20) b += `\n\n=== CONTEXTO APRENDIDO ===\n${ctx.substring(0, 1500)}`;
 
   // ============================================================
-  // 13. RESÚMENES RECIENTES
+  // 15. RESÚMENES RECIENTES
   // ============================================================
   if (rec && rec.length) {
     b += `\n\n=== RESÚMENES RECIENTES ===\n`;
@@ -254,7 +282,7 @@ export function construirSystemPrompt(ctx, f, rec, perfilBase, correcciones, est
   }
 
   // ============================================================
-  // 14. FORMATO FINAL
+  // 16. FORMATO FINAL
   // ============================================================
   b += `\n\n=== FORMATO FINAL ===\n`;
   b += `Responde en primera persona, como Ayanokōji. Dirígete al Comandante con "Comandante" o "tú".\n`;
