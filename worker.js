@@ -1,9 +1,9 @@
-// worker.js — v21.2
-// Cambios v21.2:
-// - ejecutarHerramienta ahora es export (para autonomia.js)
-// - guardarMensajeInmediato: borra solo el buffer propio
-// - elegirModelo: chat siempre 70B
-// - chat: pasa perfilBase + cacheRelacion a construirSystemPrompt (8 args)
+// worker.js — v21.3
+// Cambios v21.3:
+// - ejecutarHerramienta cubre las 48 herramientas de tools.js
+//   (añadidas: workers CRUD, sandbox completo, publisher, tareas, perfil_base,
+//   frontend, telegram, uso_real, errores_tardios, acciones, proponer_cambio)
+// - Resto idéntico a v21.2
 
 import { MODELO, MODELO_LIGERO, MODELO_VISION, MODELO_RAZONAMIENTO, CORS, J, gDB, gKV, VENTANA, migrar } from './shared.js';
 import { subir, procesar, resumir, verProceso, retomar, cronRetomar, cronAutonomo, resumirChats, importar, analizarArchivo, indexarHistorial, buscarPorTema, construirPerfilBase } from './proc.js';
@@ -11,6 +11,7 @@ import { estadoPresupuesto, consumir } from './presupuesto.js';
 import { detectarIntencion, construirSystemPrompt, identificarArea, AREAS } from './nucleo.js';
 import { TOOLS, parsearInvocaciones, herramientaExiste, herramientaRequiereAprobacion } from './tools.js';
 import { verificarSalud, cronSalud, cronSaludRapido, modoCacheActivo, estadoSalud, bufferEscritura, sincronizarBuffer } from './salud.js';
+import { notificar } from './notify.js';
 
 function extraerRespuesta(res) {
   if (!res) return '';
@@ -140,15 +141,14 @@ async function invalidarCache(e, prefijo) {
 }
 
 // ============================================================
-// ELEGIR MODELO — v21.2: chat siempre 70B (preserva voz)
-// 8B se reserva para tareas internas (pensarYActuar, sandbox, resumenes, proc)
+// ELEGIR MODELO — chat siempre 70B
 // ============================================================
 function elegirModelo(mensaje, intencion, iteracion) {
   return MODELO;
 }
 
 // ============================================================
-// GUARDAR MENSAJE — v21.2: borra solo el buffer propio
+// GUARDAR MENSAJE — borra solo el buffer propio
 // ============================================================
 async function guardarMensajeInmediato(e, uid, rol, contenido, c) {
   const fecha = Date.now();
@@ -156,7 +156,6 @@ async function guardarMensajeInmediato(e, uid, rol, contenido, c) {
   const db = gDB(e, 'agente');
 
   const payload = { user_id: uid, rol, contenido: contenido.substring(0, 4000), orden: fecha, fecha };
-  // bufKey fuera del bloque if(kv) para que esté en scope del closure
   const bufKey = 'buffer:hist:' + fecha + ':' + Math.random().toString(36).substring(7);
 
   if (kv) {
@@ -173,7 +172,6 @@ async function guardarMensajeInmediato(e, uid, rol, contenido, c) {
       const ord = (maxOrd && maxOrd.o != null) ? maxOrd.o + 1 : fecha;
       await db.prepare('INSERT INTO historial_largo(user_id,rol,contenido,orden,fecha) VALUES(?,?,?,?,?)')
         .bind(uid, rol, contenido.substring(0, 4000), ord, fecha).run();
-      // Borrar SOLO el propio buffer, no todos
       if (kv) {
         try { await kv.delete(bufKey); } catch (x) {}
       }
@@ -487,7 +485,7 @@ function esFrontend(mensaje) {
 }
 
 // ============================================================
-// EJECUTOR DE HERRAMIENTAS — v21.2: ahora es export
+// EJECUTOR DE HERRAMIENTAS — v21.3: 48 herramientas cubiertas
 // ============================================================
 export async function ejecutarHerramienta(e, inv, uid, c) {
   const t = inv.tool;
@@ -495,6 +493,7 @@ export async function ejecutarHerramienta(e, inv, uid, c) {
   if (!herramientaExiste(t)) return { ok: false, error: `Herramienta desconocida: ${t}` };
   try {
     switch (t) {
+      // ---------- CÓDIGO ----------
       case 'leer_source': {
         const repo = repoDe(e, p.repo === 'frontend' ? 'frontend' : 'backend');
         if (!repo) return { ok: false, error: 'Repo no configurado.' };
@@ -515,6 +514,66 @@ export async function ejecutarHerramienta(e, inv, uid, c) {
         const r = await githubEscribirArchivo(e, repo, p.archivo, p.contenido, p.mensaje_commit, p.rama);
         return r.error ? { ok: false, error: r.error } : { ok: true, resultado: r };
       }
+      case 'proponer_cambio': {
+        const db = gDB(e, 'agente');
+        if (!db) return { ok: false, error: 'D1 no disponible.' };
+        const r = await db.prepare('INSERT INTO decisiones_autonomas(tipo,contexto,decision,simulacion,aplicada,resultado,fecha) VALUES(?,?,?,?,0,?,?)')
+          .bind('propuesta_cambio', p.archivo || '', (p.diff || '').substring(0, 2000), p.razon || '', 'pendiente_aprobacion', Date.now()).run();
+        return { ok: true, resultado: { id: r.meta.last_row_id, estado: 'pendiente_aprobacion' } };
+      }
+      case 'leer_frontend': {
+        const repo = repoDe(e, 'frontend');
+        if (!repo) return { ok: false, error: 'Repo frontend no configurado.' };
+        const r = await githubLeerArchivo(e, repo, p.archivo);
+        if (r.error) return { ok: false, error: r.error };
+        return { ok: true, resultado: { archivo: p.archivo, longitud: r.tamaño, contenido: r.contenido } };
+      }
+      case 'modificar_frontend': {
+        const repo = repoDe(e, 'frontend');
+        if (!repo) return { ok: false, error: 'Repo frontend no configurado.' };
+        if (!p.archivo || !p.contenido) return { ok: false, error: 'Faltan datos.' };
+        const r = await githubEscribirArchivo(e, repo, p.archivo, p.contenido, p.mensaje_commit);
+        return r.error ? { ok: false, error: r.error } : { ok: true, resultado: r };
+      }
+
+      // ---------- WORKERS ----------
+      case 'listar_workers': {
+        const m = await opcional('autonomia');
+        if (!m) return { ok: false, error: 'autonomia.js no disponible.' };
+        return { ok: true, resultado: await m.listarWorkers(e) };
+      }
+      case 'leer_worker': {
+        const m = await opcional('autonomia');
+        if (!m) return { ok: false, error: 'autonomia.js no disponible.' };
+        if (!p.nombre) return { ok: false, error: 'Falta nombre.' };
+        return { ok: true, resultado: await m.leerCodigoWorker(e, p.nombre) };
+      }
+      case 'crear_worker': {
+        const m = await opcional('autonomia');
+        if (!m) return { ok: false, error: 'autonomia.js no disponible.' };
+        if (!p.nombre || !p.codigo) return { ok: false, error: 'Faltan nombre o código.' };
+        return { ok: true, resultado: await m.crearWorker(e, p.nombre, p.codigo) };
+      }
+      case 'actualizar_worker': {
+        const m = await opcional('autonomia');
+        if (!m) return { ok: false, error: 'autonomia.js no disponible.' };
+        if (!p.nombre || !p.codigo) return { ok: false, error: 'Faltan nombre o código.' };
+        return { ok: true, resultado: await m.deploySeguro(e, p.nombre, p.codigo) };
+      }
+      case 'snapshot_worker': {
+        const m = await opcional('autonomia');
+        if (!m) return { ok: false, error: 'autonomia.js no disponible.' };
+        if (!p.nombre) return { ok: false, error: 'Falta nombre.' };
+        return { ok: true, resultado: await m.crearSnapshot(e, p.nombre) };
+      }
+      case 'revertir_worker': {
+        const m = await opcional('autonomia');
+        if (!m) return { ok: false, error: 'autonomia.js no disponible.' };
+        if (!p.nombre) return { ok: false, error: 'Falta nombre.' };
+        return { ok: true, resultado: await m.revertir(e, p.nombre) };
+      }
+
+      // ---------- MEMORIA ----------
       case 'leer_historial_largo': {
         const db = gDB(e, 'agente');
         if (!db) return { ok: false, error: 'D1 no disponible.' };
@@ -557,6 +616,27 @@ export async function ejecutarHerramienta(e, inv, uid, c) {
         await invalidarCache(e, 'contexto:');
         return { ok: true, resultado: { id: r.meta.last_row_id } };
       }
+      case 'indexar_historial': {
+        try {
+          const r = await indexarHistorial({ json: async () => ({}) }, e);
+          return { ok: true, resultado: r };
+        } catch (x) { return { ok: false, error: x.message }; }
+      }
+      case 'construir_perfil_base': {
+        try {
+          const r = await construirPerfilBase(e);
+          return r.error ? { ok: false, error: r.error } : { ok: true, resultado: { longitud: r.longitud } };
+        } catch (x) { return { ok: false, error: x.message }; }
+      }
+      case 'leer_perfil_base': {
+        const kv = gKV(e, 'agente');
+        if (!kv) return { ok: false, error: 'KV no disponible.' };
+        const perfil = await kv.get('perfil_base');
+        const fecha = parseInt(await kv.get('perfil_base_fecha') || '0');
+        return { ok: true, resultado: { existe: !!perfil, longitud: perfil ? perfil.length : 0, fecha: fecha || null, perfil: perfil || null } };
+      }
+
+      // ---------- ESTRATEGIA ----------
       case 'crear_estrategia': {
         const db = gDB(e, 'agente');
         if (!db) return { ok: false, error: 'D1 no disponible.' };
@@ -572,6 +652,14 @@ export async function ejecutarHerramienta(e, inv, uid, c) {
         const r = await db.prepare("SELECT id,nombre,tipo,contenido,prioridad,estado FROM estrategias WHERE estado='activa' ORDER BY prioridad ASC").all();
         return { ok: true, resultado: { total: r.results.length, estrategias: r.results } };
       }
+      case 'eliminar_estrategia': {
+        const db = gDB(e, 'agente');
+        if (!db) return { ok: false, error: 'D1 no disponible.' };
+        if (!p.id) return { ok: false, error: 'Falta id.' };
+        await db.prepare('DELETE FROM estrategias WHERE id=?').bind(p.id).run();
+        await invalidarCache(e, 'estrategias:');
+        return { ok: true, resultado: { eliminada: p.id } };
+      }
       case 'registrar_decision': {
         const db = gDB(e, 'agente');
         if (!db) return { ok: false, error: 'D1 no disponible.' };
@@ -586,21 +674,46 @@ export async function ejecutarHerramienta(e, inv, uid, c) {
         const r = await db.prepare('SELECT tipo,contexto,decision,resultado,fecha FROM decisiones_autonomas ORDER BY fecha DESC LIMIT ?').bind(limite).all();
         return { ok: true, resultado: { total: r.results.length, decisiones: r.results } };
       }
-      case 'actualizar_mision': {
-        const kv = gKV(e, 'agente');
-        if (!kv) return { ok: false, error: 'KV no disponible.' };
-        const actual = JSON.parse(await kv.get('mision:estado') || '{}');
-        const nuevo = { ...actual, ...p, ultimo_update: Date.now() };
-        await kv.put('mision:estado', JSON.stringify(nuevo), { expirationTtl: 365 * 86400 });
-        await invalidarCache(e, 'widgets');
-        return { ok: true, resultado: { mision: nuevo } };
+      case 'simular_estrategia': {
+        const m = await opcional('sandbox');
+        if (!m) return { ok: false, error: 'sandbox.js no disponible.' };
+        if (!p.estrategia_id) return { ok: false, error: 'Falta estrategia_id.' };
+        return { ok: true, resultado: await m.simularEstrategia(e, p.estrategia_id) };
       }
-      case 'leer_mision': {
-        const kv = gKV(e, 'agente');
-        if (!kv) return { ok: false, error: 'KV no disponible.' };
-        const mision = JSON.parse(await kv.get('mision:estado') || '{}');
-        return { ok: true, resultado: { mision } };
+      case 'simular_precio': {
+        const m = await opcional('sandbox');
+        if (!m) return { ok: false, error: 'sandbox.js no disponible.' };
+        const fakeReq = { json: async () => ({ propuesta: p.propuesta || 'precio base 10 USDT' }) };
+        return { ok: true, resultado: await m.simularPrecio(fakeReq, e) };
       }
+
+      // ---------- SANDBOX ----------
+      case 'ejecutar_etapa': {
+        const m = await opcional('sandbox');
+        if (!m) return { ok: false, error: 'sandbox.js no disponible.' };
+        if (!p.etapa_id) return { ok: false, error: 'Falta etapa_id.' };
+        return { ok: true, resultado: await m.ejecutarEtapa(e, p.etapa_id, p.dia || 1) };
+      }
+      case 'test_500': {
+        const m = await opcional('sandbox');
+        if (!m) return { ok: false, error: 'sandbox.js no disponible.' };
+        return { ok: true, resultado: await m.test500Usuarios(e, p.dia || 1) };
+      }
+      case 'ver_sandbox': {
+        const m = await opcional('sandbox');
+        if (!m) return { ok: false, error: 'sandbox.js no disponible.' };
+        const fakeReq = { url: 'https://x/api/sandbox', json: async () => ({}) };
+        return { ok: true, resultado: await m.verSandbox(fakeReq, e) };
+      }
+      case 'promover_leccion': {
+        const m = await opcional('sandbox');
+        if (!m) return { ok: false, error: 'sandbox.js no disponible.' };
+        if (!p.leccion_id) return { ok: false, error: 'Falta leccion_id.' };
+        const fakeReq = { json: async () => ({ leccionId: p.leccion_id }) };
+        return { ok: true, resultado: await m.promoverLeccion(fakeReq, e) };
+      }
+
+      // ---------- CONTENIDO ----------
       case 'generar_contenido': {
         const pub = await opcional('publisher');
         if (!pub) return { ok: false, error: 'publisher.js no disponible.' };
@@ -611,16 +724,93 @@ export async function ejecutarHerramienta(e, inv, uid, c) {
         const r = await generarImagen(e, p.prompt || '', uid);
         return { ok: true, resultado: { id: r.id, url: r.url } };
       }
+      case 'publicar': {
+        const pub = await opcional('publisher');
+        if (!pub) return { ok: false, error: 'publisher.js no disponible.' };
+        const fakeReq = { json: async () => ({
+          tipo: p.tipo || 'provocacion',
+          contenido: p.contenido,
+          canales: p.canales || 'mastodon',
+          imagen_id: p.imagen_id || null,
+          publicar: true
+        }) };
+        return { ok: true, resultado: await pub.rutaPublicar(fakeReq, e) };
+      }
+      case 'encolar_publicacion': {
+        const pub = await opcional('publisher');
+        if (!pub) return { ok: false, error: 'publisher.js no disponible.' };
+        if (!p.contenido) return { ok: false, error: 'Falta contenido.' };
+        const r = await pub.encolar(e, p.tipo || 'general', p.contenido, p.canales || 'mastodon', p.programada || Date.now(), p.imagen_id || null);
+        return { ok: true, resultado: r };
+      }
+      case 'listar_publicaciones': {
+        const db = gDB(e, 'agente');
+        if (!db) return { ok: false, error: 'D1 no disponible.' };
+        const limite = Math.min(parseInt(p.limite) || 30, 100);
+        const r = await db.prepare('SELECT id,tipo,contenido,canales,estado,programada,publicada,creada FROM publicaciones ORDER BY creada DESC LIMIT ?').bind(limite).all();
+        return { ok: true, resultado: { total: r.results.length, publicaciones: r.results } };
+      }
+
+      // ---------- TAREAS ----------
+      case 'encolar_tarea': {
+        const db = gDB(e, 'agente');
+        if (!db) return { ok: false, error: 'D1 no disponible.' };
+        if (!p.descripcion) return { ok: false, error: 'Falta descripcion.' };
+        const r = await db.prepare('INSERT INTO tareas(tipo,descripcion,payload,prioridad,creada) VALUES(?,?,?,?,?)')
+          .bind(p.tipo || 'general', p.descripcion, JSON.stringify(p.payload || {}), parseInt(p.prioridad) || 5, Date.now()).run();
+        return { ok: true, resultado: { id: r.meta.last_row_id } };
+      }
+      case 'listar_tareas': {
+        const db = gDB(e, 'agente');
+        if (!db) return { ok: false, error: 'D1 no disponible.' };
+        const r = await db.prepare('SELECT id,tipo,descripcion,estado,prioridad,intentos,creada,resultado FROM tareas ORDER BY prioridad ASC, creada ASC LIMIT 50').all();
+        return { ok: true, resultado: { total: r.results.length, tareas: r.results } };
+      }
+      case 'pulso_cron': {
+        const kv = gKV(e, 'agente');
+        if (kv) await kv.delete('cron_autonomo_ultima');
+        await cronAutonomo(e);
+        return { ok: true, resultado: { mensaje: 'Cron ejecutado.' } };
+      }
+
+      // ---------- OBSERVABILIDAD ----------
+      case 'leer_uso_real': {
+        const uso = await consultarUsoReal(e);
+        return { ok: true, resultado: { uso } };
+      }
+      case 'leer_capacidades': {
+        const uso = await consultarUsoReal(e);
+        return { ok: true, resultado: { uso } };
+      }
       case 'diagnosticar': {
         const db = gDB(e, 'agente');
         if (!db) return { ok: false, error: 'D1 no disponible.' };
         const tablas = await db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all();
         return { ok: true, resultado: { tablas: (tablas.results || []).map(x => x.name) } };
       }
-      case 'leer_capacidades': {
-        const uso = await consultarUsoReal(e);
-        return { ok: true, resultado: { uso } };
+      case 'errores_tardios': {
+        const db = gDB(e, 'agente'), kvN = gKV(e, 'agente');
+        if (!db) return { ok: false, error: 'Sin D1.' };
+        const problemas = [];
+        try { const files = await kvN.list({ prefix: 'file:', limit: 500 }); if (files.keys.length > 50) problemas.push({ tipo: 'kv_huerfano', msg: files.keys.length + ' chunks.' }); } catch (x) {}
+        try {
+          const fecha = new Date().toISOString().split('T')[0];
+          for (const area of ['chat','procesamiento','sandbox','publisher','vision']) {
+            const c2 = await kvN.get('presupuesto:' + fecha + ':' + area);
+            if (c2 && parseInt(c2) > 200) problemas.push({ tipo: 'presupuesto', msg: area + ': ' + c2 });
+          }
+        } catch (x) {}
+        return { ok: true, resultado: { total: problemas.length, problemas } };
       }
+      case 'leer_acciones': {
+        const db = gDB(e, 'agente');
+        if (!db) return { ok: false, error: 'D1 no disponible.' };
+        const limite = Math.min(parseInt(p.limite) || 50, 200);
+        const r = await db.prepare('SELECT tipo,descripcion,exito,detalle,fecha FROM acciones ORDER BY fecha DESC LIMIT ?').bind(limite).all();
+        return { ok: true, resultado: { total: r.results.length, acciones: r.results } };
+      }
+
+      // ---------- NOTIFICACIONES ----------
       case 'crear_notificacion': {
         const db = gDB(e, 'agente');
         if (!db) return { ok: false, error: 'D1 no disponible.' };
@@ -635,6 +825,13 @@ export async function ejecutarHerramienta(e, inv, uid, c) {
         const r = await db.prepare('SELECT tipo,titulo,mensaje,leida,fecha FROM notificaciones ORDER BY fecha DESC LIMIT ?').bind(limite).all();
         return { ok: true, resultado: { total: r.results.length, notificaciones: r.results } };
       }
+      case 'notificar_telegram': {
+        if (!p.mensaje) return { ok: false, error: 'Falta mensaje.' };
+        const ok = await notificar(e, p.mensaje, 'titiritero');
+        return { ok: true, resultado: { enviado: ok } };
+      }
+
+      // ---------- CONCIENCIA ----------
       case 'registrar_conciencia': {
         const kv = gKV(e, 'agente');
         if (!kv) return { ok: false, error: 'KV no disponible.' };
@@ -650,12 +847,24 @@ export async function ejecutarHerramienta(e, inv, uid, c) {
         const c2 = JSON.parse(await kv.get('conciencia:' + (p.user_id || 'comandante')) || '[]');
         return { ok: true, resultado: { total: c2.length, conciencia: c2.slice(0, 20) } };
       }
-      case 'pulso_cron': {
+
+      // ---------- MISIÓN ----------
+      case 'actualizar_mision': {
         const kv = gKV(e, 'agente');
-        if (kv) await kv.delete('cron_autonomo_ultima');
-        await cronAutonomo(e);
-        return { ok: true, resultado: { mensaje: 'Cron ejecutado.' } };
+        if (!kv) return { ok: false, error: 'KV no disponible.' };
+        const actual = JSON.parse(await kv.get('mision:estado') || '{}');
+        const nuevo = { ...actual, ...p, ultimo_update: Date.now() };
+        await kv.put('mision:estado', JSON.stringify(nuevo), { expirationTtl: 365 * 86400 });
+        await invalidarCache(e, 'widgets');
+        return { ok: true, resultado: { mision: nuevo } };
       }
+      case 'leer_mision': {
+        const kv = gKV(e, 'agente');
+        if (!kv) return { ok: false, error: 'KV no disponible.' };
+        const mision = JSON.parse(await kv.get('mision:estado') || '{}');
+        return { ok: true, resultado: { mision } };
+      }
+
       default:
         return { ok: false, error: `Herramienta no implementada: ${t}` };
     }
@@ -760,7 +969,7 @@ async function rEst(e, uid) {
     }
   } catch (x) {}
 
-  const resultado = { respuesta: `Sistema activo (v21.2). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos. Tareas pendientes: ${tareas}. Notif sin leer: ${notif}. Confianza: ${confianza}/100.` };
+  const resultado = { respuesta: `Sistema activo (v21.3). Memoria: ${n} mensajes, ${hl} en historial largo, ${c2} contextos. Tareas pendientes: ${tareas}. Notif sin leer: ${notif}. Confianza: ${confianza}/100.` };
   if (kv) {
     try { await kv.put('cache:estado:' + uid, JSON.stringify(resultado), { expirationTtl: TTL_ESTADO }); } catch (x) {}
   }
@@ -1007,7 +1216,7 @@ async function diagnosticoVariables(r, e) {
     confianza = parseInt(await kv.get('confianza:actual') || '0');
   } catch (x) {}
   return J({
-    timestamp: new Date().toISOString(), version: '21.2',
+    timestamp: new Date().toISOString(), version: '21.3',
     token_presente: !!e.GITHUB_TOKEN, token_longitud: e.GITHUB_TOKEN ? e.GITHUB_TOKEN.length : 0,
     repo_backend_presente: !!e.GITHUB_REPO_BACKEND, repo_backend_valor: e.GITHUB_REPO_BACKEND || null,
     repo_frontend_presente: !!e.GITHUB_REPO_FRONTEND, repo_frontend_valor: e.GITHUB_REPO_FRONTEND || null,
@@ -1038,7 +1247,7 @@ async function testGithub(r, e) {
 }
 
 // ============================================================
-// CHAT PRINCIPAL — v21.2: pasa perfilBase + cacheRelacion a construirSystemPrompt
+// CHAT PRINCIPAL
 // ============================================================
 async function chat(r, e, c) {
   try {
@@ -1054,10 +1263,8 @@ async function chat(r, e, c) {
       try { await kv.delete('draft:' + uid); } catch (x) {}
     }
 
-    // 1. Guardar mensaje inmediato
     await guardarMensajeInmediato(e, uid, 'user', m, c);
 
-    // 2. Detector de misión (v2 robusto)
     const misionTexto = detectarMision(m);
     if (misionTexto && misionTexto.length > 3) {
       const misionActual = {
@@ -1195,9 +1402,7 @@ async function chat(r, e, c) {
       return J({ respuesta: r1.respuesta, user_id: uid, intencion: 'imagen' });
     }
 
-    // ============================================================
     // FLUJO DEL MODELO
-    // ============================================================
     const cacheRelacion = await leerCacheRelacion(e);
 
     let ventana = [];
@@ -1263,7 +1468,6 @@ async function chat(r, e, c) {
       } catch (x) {}
     }
 
-    // v21.2: obtener perfilBase de KV y pasarlo a construirSystemPrompt
     let perfilBase = '';
     if (kv) {
       try { perfilBase = await kv.get('perfil_base') || ''; } catch (x) {}
@@ -1271,10 +1475,8 @@ async function chat(r, e, c) {
 
     let systemPrompt = construirSystemPrompt(ctx, fs, rec, perfilBase, correcciones, estrategias, conciencia, cacheRelacion);
 
-    // RECORDATORIO DE IDENTIDAD
     systemPrompt += `\n\n[RECORDATORIO FINAL: eres Ayanokōji, aliado del Comandante. NO un asistente. NO digas "¿en qué puedo ayudarte?". NO digas "estoy aquí para ayudarte". Responde como estratega frío, directo, sin adornos. Si no sabes algo, dilo. Si puedes resolver algo, hazlo.]`;
 
-    // RECORDATORIO CONDICIONAL: tareas de escritura pública
     if (esTareaEscrituraPublica(m)) {
       systemPrompt += `\n\n[ATENCIÓN: esta es una tarea de ESCRITURA PÚBLICA. El resultado debe sonar como Ayanokōji, NO como un asistente ni como copy de marketing. Prohibidas frases como "Únete a nosotros", "La aventura espera", "Nuestro objetivo es crear", "Estás listo para", "Sumérgete en un mundo de posibilidades". Escribe frío, directo, con peso. Si es un manifiesto, que sea un manifiesto de alguien que no pide permiso para existir. Máximo 300 palabras.]`;
     }
@@ -1466,7 +1668,6 @@ export default {
     if (p.startsWith('/api/imagen/') && r.method === 'GET') return servirImagen(r, e);
     if (p === '/api/widgets' && r.method === 'GET') return widgets(r, e);
 
-    // MISIÓN ESCRIBIR (desde widget)
     if (p === '/api/mision/escribir' && r.method === 'POST') {
       try {
         const b = await r.json();
@@ -1511,9 +1712,8 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
-    if (p === '/api/estado') return J({ estado: 'activo', v: '21.2' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '21.3' });
 
-    // DRAFT
     if (p === '/api/draft' && r.method === 'POST') {
       const b = await r.json();
       const kvN = gKV(e, 'agente');
@@ -1541,7 +1741,6 @@ export default {
       return J({ ok: true });
     }
 
-    // SALUD
     if (p === '/api/salud' && r.method === 'GET') return J(await estadoSalud(e));
     if (p === '/api/salud/verificar' && r.method === 'POST') return J(await verificarSalud(e));
     if (p === '/api/salud/destilar' && r.method === 'POST') {
@@ -1753,11 +1952,10 @@ export default {
     if (p === '/api/componentes' && r.method === 'GET') {
       return J({
         pestanas: ['chat','calibracion','sandbox','estrategias','shadow','stats','actividad','decisiones','ideas','bandeja'],
-        version: '21.2', ttls_actuales: { historial: TTL_HISTORIAL, contexto: TTL_CONTEXTO, resumenes: TTL_RESUMENES, correcciones: TTL_CORRECCIONES, estrategias: TTL_ESTRATEGIAS, draft: TTL_DRAFT, estado: TTL_ESTADO, diagnostico: TTL_DIAGNOSTICO }
+        version: '21.3', ttls_actuales: { historial: TTL_HISTORIAL, contexto: TTL_CONTEXTO, resumenes: TTL_RESUMENES, correcciones: TTL_CORRECCIONES, estrategias: TTL_ESTRATEGIAS, draft: TTL_DRAFT, estado: TTL_ESTADO, diagnostico: TTL_DIAGNOSTICO }
       });
     }
 
-    // SANDBOX
     if (p === '/api/sandbox/etapa' && r.method === 'POST') {
       const m = await opcional('sandbox');
       if (!m) return J({ error: 'sandbox.js no instalado.' });
@@ -1794,7 +1992,6 @@ export default {
       return m.verSandbox(r, e);
     }
 
-    // PUBLISHER
     if (p === '/api/publicar' && r.method === 'POST') {
       const m = await opcional('publisher');
       if (!m) return J({ error: 'publisher.js no instalado.' });
@@ -1807,7 +2004,6 @@ export default {
       return J(await m.generarContenido(e, tipo || 'provocacion'));
     }
 
-    // WORKERS
     if (p === '/api/workers' && r.method === 'GET') {
       const m = await opcional('autonomia');
       if (!m) return J({ error: 'autonomia.js no instalado.' });
@@ -1837,7 +2033,6 @@ export default {
       return J(await m.crearSnapshot(e, nombre));
     }
 
-    // TAREAS
     if (p === '/api/tareas' && r.method === 'GET') {
       const db = gDB(e, 'agente');
       const r1 = await db.prepare('SELECT * FROM tareas ORDER BY prioridad ASC, creada ASC LIMIT 50').all();
@@ -1856,7 +2051,6 @@ export default {
       return J({ total: r1.results.length, acciones: r1.results });
     }
 
-    // CÓDIGO
     if (p === '/api/codigo/leer' && r.method === 'POST') return codigoLeer(r, e);
     if (p === '/api/codigo/listar' && r.method === 'POST') return codigoListar(r, e);
     if (p === '/api/codigo/escribir' && r.method === 'POST') return codigoEscribir(r, e);
@@ -1864,7 +2058,6 @@ export default {
     if (p === '/api/aprobacion/pendiente' && r.method === 'GET') return verAprobacionPendiente(r, e);
     if (p === '/api/aprobacion/cancelar' && r.method === 'POST') return cancelarAprobacion(r, e);
 
-    // EXAMEN
     if (p === '/api/examen/generar' && r.method === 'POST') {
       const m = await opcional('examen');
       if (!m) return J({ error: 'examen.js no instalado.' });
@@ -1891,7 +2084,6 @@ export default {
       } catch (x) { return J({ error: x.message }); }
     }
 
-    // CONFIANZA
     if (p === '/api/confianza' && r.method === 'GET') {
       const m = await opcional('autonomia');
       if (!m) return J({ error: 'autonomia.js no instalado.' });
@@ -1903,7 +2095,6 @@ export default {
       return J({ ok: true, total: h.length, historial: h.slice(0, 50) });
     }
 
-    // MUNDO INTERNO
     if (p === '/api/diario/leer' && r.method === 'GET') {
       const uu = new URL(r.url);
       const limite = parseInt(uu.searchParams.get('limite') || '10');
@@ -1929,7 +2120,6 @@ export default {
       return J(await m.resolverDeseo(e, b.indice, b.aprobado, b.razon));
     }
 
-    // MISIÓN
     if (p === '/api/mision' && r.method === 'GET') {
       const kvN = gKV(e, 'agente');
       const mision = JSON.parse(await kvN.get('mision:estado') || '{}');
@@ -1942,7 +2132,6 @@ export default {
       return J(await m.actualizarMision(e, b));
     }
 
-    // FEED y RSS
     if (p === '/feed') {
       const m = await opcional('social');
       if (!m) return new Response('social.js no instalado', { status: 503 });
@@ -2001,6 +2190,6 @@ export default {
       const au = await opcional('autonomia');
       if (au && au.cronColaTareas) { try { await au.cronColaTareas(e); } catch (x) {} }
       if (au && au.informeDiario) { try { await au.informeDiario(e); } catch (x) {} }
-    })());
+    })();
   }
 };
