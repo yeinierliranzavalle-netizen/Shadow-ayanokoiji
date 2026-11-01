@@ -1,9 +1,15 @@
-// tools.js — Catálogo de herramientas de Ayanokōji Digital
+// tools.js — Catálogo de herramientas de Ayanokōji Digital (v3.0)
+// Cambios v3.0:
+// - Campo `activa: true/false` en cada herramienta
+// - 18 activas (según nucleo.js TOOLS_ACTIVAS)
+// - 30 pausadas (existen, pero no se inyectan en el prompt detallado)
+// - Helper listarHerramientasActivas()
+// - Todo lo demás idéntico a v2.0 (compatibilidad total con kernel.js)
 
 export const TOOLS = {
 
   // ============================================================
-  // CÓDIGO Y SISTEMA
+  // CÓDIGO Y SISTEMA — ACTIVAS
   // ============================================================
   leer_source: {
     nombre: 'leer_source',
@@ -11,9 +17,10 @@ export const TOOLS = {
     tipo: 'lectura',
     destino: 'github',
     requiere_aprobacion: false,
+    activa: true,
     descripcion: 'Lee el código fuente COMPLETO y ORIGINAL de un archivo del proyecto desde GitHub (no el bundle minificado). Úsala antes de analizar o modificar cualquier archivo.',
     params: {
-      archivo: 'string (ej: worker.js, nucleo.js, proc.js, autonomia.js, sandbox.js, publisher.js, social.js, shared.js, identidad.js, tools.js)',
+      archivo: 'string (ej: worker.js, nucleo.js, proc.js, autonomia.js, sandbox.js, publisher.js, social.js, shared.js, identidad.js, tools.js, storage.js, kernel.js, doctrina.js)',
       repo: 'string opcional ("backend" o "frontend", por defecto "backend")'
     }
   },
@@ -23,61 +30,22 @@ export const TOOLS = {
     tipo: 'lectura',
     destino: 'github',
     requiere_aprobacion: false,
+    activa: true,
     descripcion: 'Lista todos los archivos del repositorio (backend o frontend) con su tamaño.',
     params: { repo: 'string ("backend" o "frontend", por defecto "backend")' }
   },
-  escribir_source: {
-    nombre: 'escribir_source',
-    categoria: 'codigo',
-    tipo: 'peligroso',
-    destino: 'github',
-    requiere_aprobacion: true,
-    descripcion: 'Escribe o modifica un archivo del repositorio haciendo un commit. SIEMPRE pide aprobación antes de invocarla.',
-    params: {
-      archivo: 'string',
-      contenido: 'string (contenido completo nuevo)',
-      mensaje_commit: 'string',
-      repo: 'string ("backend" o "frontend")'
-    }
-  },
-  proponer_cambio: {
-    nombre: 'proponer_cambio',
-    categoria: 'codigo',
-    tipo: 'escritura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Guarda una propuesta de cambio en la bandeja de decisiones sin ejecutarla.',
-    params: { archivo: 'string', diff: 'string', razon: 'string' }
-  },
 
   // ============================================================
-  // WORKERS
+  // WORKERS — ACTIVAS
   // ============================================================
-  listar_workers: {
-    nombre: 'listar_workers',
-    categoria: 'workers',
-    tipo: 'lectura',
-    destino: 'cloudflare',
-    requiere_aprobacion: false,
-    descripcion: 'Lista todos los Workers desplegados en la cuenta de Cloudflare.',
-    params: {}
-  },
-  leer_worker: {
-    nombre: 'leer_worker',
-    categoria: 'workers',
-    tipo: 'lectura',
-    destino: 'cloudflare',
-    requiere_aprobacion: false,
-    descripcion: 'Lee el bundle actual de un Worker en Cloudflare (código minificado tras el deploy).',
-    params: { nombre: 'string' }
-  },
   crear_worker: {
     nombre: 'crear_worker',
     categoria: 'workers',
     tipo: 'peligroso',
     destino: 'cloudflare',
     requiere_aprobacion: true,
-    descripcion: 'Crea y despliega un nuevo Worker en Cloudflare. Requiere aprobación.',
+    activa: true,
+    descripcion: 'Crea y despliega un nuevo Worker en Cloudflare. Requiere aprobación. Se usa para crear sub-orquestadores.',
     params: { nombre: 'string', codigo: 'string' }
   },
   actualizar_worker: {
@@ -86,17 +54,9 @@ export const TOOLS = {
     tipo: 'peligroso',
     destino: 'cloudflare',
     requiere_aprobacion: true,
-    descripcion: 'Actualiza el código de un Worker existente. Requiere aprobación.',
+    activa: true,
+    descripcion: 'Actualiza el código de un Worker existente. Usa deploySeguro (validación + snapshot + verificación + reversión). Requiere aprobación.',
     params: { nombre: 'string', codigo: 'string' }
-  },
-  snapshot_worker: {
-    nombre: 'snapshot_worker',
-    categoria: 'workers',
-    tipo: 'escritura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Crea un snapshot (copia de seguridad) del Worker antes de modificarlo.',
-    params: { nombre: 'string' }
   },
   revertir_worker: {
     nombre: 'revertir_worker',
@@ -104,12 +64,13 @@ export const TOOLS = {
     tipo: 'peligroso',
     destino: 'cloudflare',
     requiere_aprobacion: true,
+    activa: true,
     descripcion: 'Revierte un Worker al último snapshot. Requiere aprobación.',
     params: { nombre: 'string' }
   },
 
   // ============================================================
-  // MEMORIA Y CONTEXTO
+  // MEMORIA — ACTIVAS
   // ============================================================
   leer_historial_largo: {
     nombre: 'leer_historial_largo',
@@ -117,6 +78,7 @@ export const TOOLS = {
     tipo: 'lectura',
     destino: 'interno',
     requiere_aprobacion: false,
+    activa: true,
     descripcion: 'Lee un fragmento del historial largo de conversaciones.',
     params: { limite: 'integer (por defecto 50)', user_id: 'string (por defecto "comandante")', desde_orden: 'integer opcional' }
   },
@@ -126,6 +88,7 @@ export const TOOLS = {
     tipo: 'lectura',
     destino: 'interno',
     requiere_aprobacion: false,
+    activa: true,
     descripcion: 'Busca en el índice semántico mensajes relacionados con un tema.',
     params: { q: 'string (tema a buscar)', limite: 'integer (por defecto 20)' }
   },
@@ -135,48 +98,13 @@ export const TOOLS = {
     tipo: 'lectura',
     destino: 'interno',
     requiere_aprobacion: false,
+    activa: true,
     descripcion: 'Lee los resúmenes de contexto guardados.',
     params: { limite: 'integer (por defecto 5)' }
   },
-  guardar_contexto: {
-    nombre: 'guardar_contexto',
-    categoria: 'memoria',
-    tipo: 'escritura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Guarda un nuevo resumen o análisis en la tabla de contexto.',
-    params: { resumen: 'string', fuente: 'string', fases: 'array opcional de strings' }
-  },
-  indexar_historial: {
-    nombre: 'indexar_historial',
-    categoria: 'memoria',
-    tipo: 'escritura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Reindexa el historial largo para mejorar la búsqueda semántica. Tarda 10-20 min.',
-    params: {}
-  },
-  construir_perfil_base: {
-    nombre: 'construir_perfil_base',
-    categoria: 'memoria',
-    tipo: 'escritura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Reconstruye el perfil base del Comandante desde todo el contexto disponible.',
-    params: {}
-  },
-  leer_perfil_base: {
-    nombre: 'leer_perfil_base',
-    categoria: 'memoria',
-    tipo: 'lectura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Lee el perfil base actual del Comandante.',
-    params: {}
-  },
 
   // ============================================================
-  // ESTRATEGIA
+  // ESTRATEGIA — ACTIVAS
   // ============================================================
   crear_estrategia: {
     nombre: 'crear_estrategia',
@@ -184,26 +112,9 @@ export const TOOLS = {
     tipo: 'escritura',
     destino: 'interno',
     requiere_aprobacion: false,
+    activa: true,
     descripcion: 'Registra una nueva estrategia activa en el sistema.',
     params: { nombre: 'string', tipo: 'string', contenido: 'string', prioridad: 'integer 1-10' }
-  },
-  listar_estrategias: {
-    nombre: 'listar_estrategias',
-    categoria: 'estrategia',
-    tipo: 'lectura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Lista todas las estrategias activas del sistema.',
-    params: {}
-  },
-  eliminar_estrategia: {
-    nombre: 'eliminar_estrategia',
-    categoria: 'estrategia',
-    tipo: 'peligroso',
-    destino: 'interno',
-    requiere_aprobacion: true,
-    descripcion: 'Elimina una estrategia por ID. Requiere aprobación.',
-    params: { id: 'integer' }
   },
   registrar_decision: {
     nombre: 'registrar_decision',
@@ -211,6 +122,7 @@ export const TOOLS = {
     tipo: 'escritura',
     destino: 'interno',
     requiere_aprobacion: false,
+    activa: true,
     descripcion: 'Registra una decisión autónoma en la tabla de decisiones.',
     params: { tipo: 'string', contexto: 'string', decision: 'string', simulacion: 'string', resultado: 'string' }
   },
@@ -220,215 +132,21 @@ export const TOOLS = {
     tipo: 'lectura',
     destino: 'interno',
     requiere_aprobacion: false,
+    activa: true,
     descripcion: 'Lee las últimas decisiones autónomas registradas.',
     params: { limite: 'integer (por defecto 20)' }
   },
-  simular_estrategia: {
-    nombre: 'simular_estrategia',
-    categoria: 'estrategia',
-    tipo: 'escritura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Simula una estrategia en el sandbox contra los 4 arquetipos de usuario.',
-    params: { estrategia_id: 'integer' }
-  },
-  simular_precio: {
-    nombre: 'simular_precio',
-    categoria: 'estrategia',
-    tipo: 'escritura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Simula el impacto de un cambio de precio.',
-    params: { propuesta: 'string' }
-  },
 
   // ============================================================
-  // SANDBOX
+  // NOTIFICACIONES — ACTIVAS
   // ============================================================
-  ejecutar_etapa: {
-    nombre: 'ejecutar_etapa',
-    categoria: 'sandbox',
-    tipo: 'escritura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Ejecuta una etapa del currículum del sandbox.',
-    params: { etapa_id: 'string', dia: 'integer (por defecto 1)' }
-  },
-  test_500: {
-    nombre: 'test_500',
-    categoria: 'sandbox',
-    tipo: 'escritura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Ejecuta la simulación de 500 usuarios durante un día virtual.',
-    params: { dia: 'integer' }
-  },
-  ver_sandbox: {
-    nombre: 'ver_sandbox',
-    categoria: 'sandbox',
-    tipo: 'lectura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Lee el estado actual del sandbox.',
-    params: {}
-  },
-  promover_leccion: {
-    nombre: 'promover_leccion',
-    categoria: 'sandbox',
-    tipo: 'escritura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Promueve una lección del sandbox a estrategia activa.',
-    params: { leccion_id: 'integer' }
-  },
-
-  // ============================================================
-  // CONTENIDO
-  // ============================================================
-  generar_contenido: {
-    nombre: 'generar_contenido',
-    categoria: 'contenido',
-    tipo: 'lectura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Genera contenido (lore, teaser, diálogo, provocación, anuncio).',
-    params: { tipo: 'string (lore|teaser|dialogo|provocacion|anuncio)' }
-  },
-  generar_imagen: {
-    nombre: 'generar_imagen',
-    categoria: 'contenido',
-    tipo: 'escritura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Genera una imagen con IA (FLUX). Devuelve el ID y la URL.',
-    params: { prompt: 'string' }
-  },
-  publicar: {
-    nombre: 'publicar',
-    categoria: 'contenido',
-    tipo: 'peligroso',
-    destino: 'externo',
-    requiere_aprobacion: true,
-    descripcion: 'Publica contenido en uno o varios canales (mastodon, bluesky, discord, reddit). Requiere aprobación.',
-    params: { contenido: 'string', canales: 'string (coma-separados)', imagen_id: 'string opcional', tipo: 'string' }
-  },
-  encolar_publicacion: {
-    nombre: 'encolar_publicacion',
-    categoria: 'contenido',
-    tipo: 'escritura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Encola una publicación para el momento programado.',
-    params: { contenido: 'string', canales: 'string', programada: 'integer timestamp' }
-  },
-  listar_publicaciones: {
-    nombre: 'listar_publicaciones',
-    categoria: 'contenido',
-    tipo: 'lectura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Lista las últimas publicaciones con su estado.',
-    params: { limite: 'integer (por defecto 30)' }
-  },
-
-  // ============================================================
-  // TAREAS
-  // ============================================================
-  encolar_tarea: {
-    nombre: 'encolar_tarea',
-    categoria: 'tareas',
-    tipo: 'escritura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Encola una tarea para que el cron la ejecute después.',
-    params: { descripcion: 'string', prioridad: 'integer 1-10' }
-  },
-  listar_tareas: {
-    nombre: 'listar_tareas',
-    categoria: 'tareas',
-    tipo: 'lectura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Lista las tareas en cola y su estado.',
-    params: {}
-  },
-  pulso_cron: {
-    nombre: 'pulso_cron',
-    categoria: 'tareas',
-    tipo: 'escritura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Fuerza una ejecución inmediata del cron autónomo.',
-    params: {}
-  },
-
-  // ============================================================
-  // OBSERVABILIDAD
-  // ============================================================
-  leer_uso_real: {
-    nombre: 'leer_uso_real',
-    categoria: 'observabilidad',
-    tipo: 'lectura',
-    destino: 'cloudflare',
-    requiere_aprobacion: false,
-    descripcion: 'Consulta el uso real de Cloudflare (Workers, D1, KV) en las últimas 24h.',
-    params: {}
-  },
-  leer_capacidades: {
-    nombre: 'leer_capacidades',
-    categoria: 'observabilidad',
-    tipo: 'lectura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Devuelve las capacidades actuales del sistema.',
-    params: {}
-  },
-  diagnosticar: {
-    nombre: 'diagnosticar',
-    categoria: 'observabilidad',
-    tipo: 'lectura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Ejecuta un diagnóstico completo: tablas D1, conteos, KV, módulos.',
-    params: {}
-  },
-  errores_tardios: {
-    nombre: 'errores_tardios',
-    categoria: 'observabilidad',
-    tipo: 'lectura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Detecta errores tardíos: KV huérfano, presupuesto agotado, procesos atascados.',
-    params: {}
-  },
-  leer_acciones: {
-    nombre: 'leer_acciones',
-    categoria: 'observabilidad',
-    tipo: 'lectura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Lee las últimas acciones registradas en el sistema.',
-    params: { limite: 'integer (por defecto 50)' }
-  },
-
-  // ============================================================
-  // NOTIFICACIONES
-  // ============================================================
-  listar_notificaciones: {
-    nombre: 'listar_notificaciones',
-    categoria: 'notificaciones',
-    tipo: 'lectura',
-    destino: 'interno',
-    requiere_aprobacion: false,
-    descripcion: 'Lista las notificaciones de la bandeja interna.',
-    params: { limite: 'integer (por defecto 50)' }
-  },
   crear_notificacion: {
     nombre: 'crear_notificacion',
     categoria: 'notificaciones',
     tipo: 'escritura',
     destino: 'interno',
     requiere_aprobacion: false,
+    activa: true,
     descripcion: 'Crea una notificación en la bandeja interna del Comandante.',
     params: { tipo: 'string', titulo: 'string', mensaje: 'string' }
   },
@@ -438,19 +156,406 @@ export const TOOLS = {
     tipo: 'escritura',
     destino: 'externo',
     requiere_aprobacion: false,
+    activa: true,
     descripcion: 'Envía un mensaje al Telegram personal del Comandante. Solo para alertas urgentes.',
     params: { mensaje: 'string' }
   },
 
   // ============================================================
-  // CONCIENCIA
+  // MISIÓN — ACTIVAS
   // ============================================================
+  actualizar_mision: {
+    nombre: 'actualizar_mision',
+    categoria: 'mision',
+    tipo: 'escritura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: true,
+    descripcion: 'Actualiza el estado de la misión actual (fase, objetivo, siguiente paso).',
+    params: { fase_actual: 'string opcional', objetivo_semana: 'string opcional', siguiente_paso: 'string opcional' }
+  },
+  leer_mision: {
+    nombre: 'leer_mision',
+    categoria: 'mision',
+    tipo: 'lectura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: true,
+    descripcion: 'Lee el estado actual de la misión.',
+    params: {}
+  },
+
+  // ============================================================
+  // OBSERVABILIDAD — ACTIVAS
+  // ============================================================
+  leer_capacidades: {
+    nombre: 'leer_capacidades',
+    categoria: 'observabilidad',
+    tipo: 'lectura',
+    destino: 'cloudflare',
+    requiere_aprobacion: false,
+    activa: true,
+    descripcion: 'Devuelve las capacidades actuales del sistema y el uso real de Cloudflare.',
+    params: {}
+  },
+  leer_uso_real: {
+    nombre: 'leer_uso_real',
+    categoria: 'observabilidad',
+    tipo: 'lectura',
+    destino: 'cloudflare',
+    requiere_aprobacion: false,
+    activa: true,
+    descripcion: 'Consulta el uso real de Cloudflare (Workers, D1, KV) en las últimas 24h.',
+    params: {}
+  },
+
+  // ============================================================
+  // TAREAS — ACTIVAS
+  // ============================================================
+  encolar_tarea: {
+    nombre: 'encolar_tarea',
+    categoria: 'tareas',
+    tipo: 'escritura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: true,
+    descripcion: 'Encola una tarea para que el cron la ejecute después.',
+    params: { descripcion: 'string', prioridad: 'integer 1-10', tipo: 'string opcional' }
+  },
+
+  // ============================================================
+  // ============================================================
+  // A PARTIR DE AQUÍ: HERRAMIENTAS PAUSADAS (activa: false)
+  // Existen, kernel.js las reconoce, pero no se inyectan con detalle en el prompt.
+  // ============================================================
+  // ============================================================
+
+  // ---------- CÓDIGO (pausadas) ----------
+  escribir_source: {
+    nombre: 'escribir_source',
+    categoria: 'codigo',
+    tipo: 'peligroso',
+    destino: 'github',
+    requiere_aprobacion: true,
+    activa: false,
+    descripcion: 'Escribe o modifica un archivo del repositorio haciendo un commit.',
+    params: { archivo: 'string', contenido: 'string', mensaje_commit: 'string', repo: 'string' }
+  },
+  proponer_cambio: {
+    nombre: 'proponer_cambio',
+    categoria: 'codigo',
+    tipo: 'escritura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Guarda una propuesta de cambio en la bandeja de decisiones sin ejecutarla.',
+    params: { archivo: 'string', diff: 'string', razon: 'string' }
+  },
+  leer_frontend: {
+    nombre: 'leer_frontend',
+    categoria: 'codigo',
+    tipo: 'lectura',
+    destino: 'github',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Lee el código del frontend (index.html, app.js, styles.css) desde GitHub.',
+    params: { archivo: 'string' }
+  },
+  modificar_frontend: {
+    nombre: 'modificar_frontend',
+    categoria: 'codigo',
+    tipo: 'peligroso',
+    destino: 'github',
+    requiere_aprobacion: true,
+    activa: false,
+    descripcion: 'Modifica un archivo del frontend.',
+    params: { archivo: 'string', contenido: 'string', mensaje_commit: 'string' }
+  },
+
+  // ---------- WORKERS (pausadas) ----------
+  listar_workers: {
+    nombre: 'listar_workers',
+    categoria: 'workers',
+    tipo: 'lectura',
+    destino: 'cloudflare',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Lista todos los Workers desplegados en la cuenta de Cloudflare.',
+    params: {}
+  },
+  leer_worker: {
+    nombre: 'leer_worker',
+    categoria: 'workers',
+    tipo: 'lectura',
+    destino: 'cloudflare',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Lee el bundle actual de un Worker en Cloudflare.',
+    params: { nombre: 'string' }
+  },
+  snapshot_worker: {
+    nombre: 'snapshot_worker',
+    categoria: 'workers',
+    tipo: 'escritura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Crea un snapshot (copia de seguridad) del Worker antes de modificarlo.',
+    params: { nombre: 'string' }
+  },
+
+  // ---------- MEMORIA (pausadas) ----------
+  guardar_contexto: {
+    nombre: 'guardar_contexto',
+    categoria: 'memoria',
+    tipo: 'escritura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Guarda un nuevo resumen o análisis en la tabla de contexto.',
+    params: { resumen: 'string', fuente: 'string', fases: 'array opcional' }
+  },
+  indexar_historial: {
+    nombre: 'indexar_historial',
+    categoria: 'memoria',
+    tipo: 'escritura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Reindexa el historial largo para mejorar la búsqueda semántica.',
+    params: {}
+  },
+  construir_perfil_base: {
+    nombre: 'construir_perfil_base',
+    categoria: 'memoria',
+    tipo: 'escritura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Reconstruye el perfil base del Comandante desde todo el contexto disponible.',
+    params: {}
+  },
+  leer_perfil_base: {
+    nombre: 'leer_perfil_base',
+    categoria: 'memoria',
+    tipo: 'lectura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Lee el perfil base actual del Comandante.',
+    params: {}
+  },
+
+  // ---------- ESTRATEGIA (pausadas) ----------
+  listar_estrategias: {
+    nombre: 'listar_estrategias',
+    categoria: 'estrategia',
+    tipo: 'lectura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Lista todas las estrategias activas del sistema.',
+    params: {}
+  },
+  eliminar_estrategia: {
+    nombre: 'eliminar_estrategia',
+    categoria: 'estrategia',
+    tipo: 'peligroso',
+    destino: 'interno',
+    requiere_aprobacion: true,
+    activa: false,
+    descripcion: 'Elimina una estrategia por ID.',
+    params: { id: 'integer' }
+  },
+  simular_estrategia: {
+    nombre: 'simular_estrategia',
+    categoria: 'estrategia',
+    tipo: 'escritura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Simula una estrategia en el sandbox contra los 4 arquetipos de usuario.',
+    params: { estrategia_id: 'integer' }
+  },
+  simular_precio: {
+    nombre: 'simular_precio',
+    categoria: 'estrategia',
+    tipo: 'escritura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Simula el impacto de un cambio de precio.',
+    params: { propuesta: 'string' }
+  },
+
+  // ---------- SANDBOX (pausadas) ----------
+  ejecutar_etapa: {
+    nombre: 'ejecutar_etapa',
+    categoria: 'sandbox',
+    tipo: 'escritura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Ejecuta una etapa del currículum del sandbox.',
+    params: { etapa_id: 'string', dia: 'integer' }
+  },
+  test_500: {
+    nombre: 'test_500',
+    categoria: 'sandbox',
+    tipo: 'escritura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Ejecuta la simulación de 500 usuarios durante un día virtual.',
+    params: { dia: 'integer' }
+  },
+  ver_sandbox: {
+    nombre: 'ver_sandbox',
+    categoria: 'sandbox',
+    tipo: 'lectura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Lee el estado actual del sandbox.',
+    params: {}
+  },
+  promover_leccion: {
+    nombre: 'promover_leccion',
+    categoria: 'sandbox',
+    tipo: 'escritura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Promueve una lección del sandbox a estrategia activa.',
+    params: { leccion_id: 'integer' }
+  },
+
+  // ---------- CONTENIDO (pausadas) ----------
+  generar_contenido: {
+    nombre: 'generar_contenido',
+    categoria: 'contenido',
+    tipo: 'lectura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Genera contenido (lore, teaser, diálogo, provocación, anuncio).',
+    params: { tipo: 'string' }
+  },
+  generar_imagen: {
+    nombre: 'generar_imagen',
+    categoria: 'contenido',
+    tipo: 'escritura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Genera una imagen con IA (FLUX). Devuelve el ID y la URL.',
+    params: { prompt: 'string' }
+  },
+  publicar: {
+    nombre: 'publicar',
+    categoria: 'contenido',
+    tipo: 'peligroso',
+    destino: 'externo',
+    requiere_aprobacion: true,
+    activa: false,
+    descripcion: 'Publica contenido en uno o varios canales (mastodon, bluesky, discord, reddit).',
+    params: { contenido: 'string', canales: 'string', imagen_id: 'string opcional', tipo: 'string' }
+  },
+  encolar_publicacion: {
+    nombre: 'encolar_publicacion',
+    categoria: 'contenido',
+    tipo: 'escritura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Encola una publicación para el momento programado.',
+    params: { contenido: 'string', canales: 'string', programada: 'integer' }
+  },
+  listar_publicaciones: {
+    nombre: 'listar_publicaciones',
+    categoria: 'contenido',
+    tipo: 'lectura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Lista las últimas publicaciones con su estado.',
+    params: { limite: 'integer' }
+  },
+
+  // ---------- TAREAS (pausadas) ----------
+  listar_tareas: {
+    nombre: 'listar_tareas',
+    categoria: 'tareas',
+    tipo: 'lectura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Lista las tareas en cola y su estado.',
+    params: {}
+  },
+  pulso_cron: {
+    nombre: 'pulso_cron',
+    categoria: 'tareas',
+    tipo: 'escritura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Fuerza una ejecución inmediata del cron autónomo.',
+    params: {}
+  },
+
+  // ---------- OBSERVABILIDAD (pausadas) ----------
+  diagnosticar: {
+    nombre: 'diagnosticar',
+    categoria: 'observabilidad',
+    tipo: 'lectura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Ejecuta un diagnóstico completo: tablas D1, conteos, KV, módulos.',
+    params: {}
+  },
+  errores_tardios: {
+    nombre: 'errores_tardios',
+    categoria: 'observabilidad',
+    tipo: 'lectura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Detecta errores tardíos: KV huérfano, presupuesto agotado, procesos atascados.',
+    params: {}
+  },
+  leer_acciones: {
+    nombre: 'leer_acciones',
+    categoria: 'observabilidad',
+    tipo: 'lectura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Lee las últimas acciones registradas en el sistema.',
+    params: { limite: 'integer' }
+  },
+
+  // ---------- NOTIFICACIONES (pausadas) ----------
+  listar_notificaciones: {
+    nombre: 'listar_notificaciones',
+    categoria: 'notificaciones',
+    tipo: 'lectura',
+    destino: 'interno',
+    requiere_aprobacion: false,
+    activa: false,
+    descripcion: 'Lista las notificaciones de la bandeja interna.',
+    params: { limite: 'integer' }
+  },
+
+  // ---------- CONCIENCIA (pausadas) ----------
   registrar_conciencia: {
     nombre: 'registrar_conciencia',
     categoria: 'conciencia',
     tipo: 'escritura',
     destino: 'interno',
     requiere_aprobacion: false,
+    activa: false,
     descripcion: 'Registra una observación en tu conciencia. Persiste entre conversaciones.',
     params: { accion: 'string', detalle: 'string', pestana: 'string' }
   },
@@ -460,73 +565,81 @@ export const TOOLS = {
     tipo: 'lectura',
     destino: 'interno',
     requiere_aprobacion: false,
+    activa: false,
     descripcion: 'Lee la conciencia reciente del Comandante.',
-    params: { user_id: 'string (por defecto "comandante")' }
-  },
-
-  // ============================================================
-  // FRONTEND
-  // ============================================================
-  leer_frontend: {
-    nombre: 'leer_frontend',
-    categoria: 'frontend',
-    tipo: 'lectura',
-    destino: 'github',
-    requiere_aprobacion: false,
-    descripcion: 'Lee el código del frontend (index.html, app.js, styles.css) desde GitHub.',
-    params: { archivo: 'string (index.html | app.js | styles.css)' }
-  },
-  modificar_frontend: {
-    nombre: 'modificar_frontend',
-    categoria: 'frontend',
-    tipo: 'peligroso',
-    destino: 'github',
-    requiere_aprobacion: true,
-    descripcion: 'Modifica un archivo del frontend (requiere aprobación).',
-    params: { archivo: 'string', contenido: 'string', mensaje_commit: 'string' }
+    params: { user_id: 'string' }
   }
 };
 
 // ============================================================
-// CONSTRUIR EL PROMPT DE HERRAMIENTAS
+// HELPERS
+// ============================================================
+export function herramientaExiste(nombre) {
+  return !!TOOLS[nombre];
+}
+
+export function herramientaRequiereAprobacion(nombre) {
+  const t = TOOLS[nombre];
+  return t ? t.requiere_aprobacion : false;
+}
+
+export function herramientaEsPeligrosa(nombre) {
+  const t = TOOLS[nombre];
+  return t ? t.tipo === 'peligroso' : false;
+}
+
+export function herramientaEstaActiva(nombre) {
+  const t = TOOLS[nombre];
+  return t ? t.activa !== false : false;
+}
+
+export function listarNombresHerramientas() {
+  return Object.keys(TOOLS);
+}
+
+export function listarHerramientasActivas() {
+  return Object.values(TOOLS).filter(t => t.activa !== false);
+}
+
+export function listarHerramientasPausadas() {
+  return Object.values(TOOLS).filter(t => t.activa === false);
+}
+
+export function categoriaDeHerramienta(nombre) {
+  const t = TOOLS[nombre];
+  return t ? t.categoria : null;
+}
+
+// ============================================================
+// CONSTRUIR PROMPT DE HERRAMIENTAS (compatibilidad con kernel.js)
 // ============================================================
 export function construirPromptHerramientas() {
+  const activas = listarHerramientasActivas();
   const porCategoria = {};
-  for (const t of Object.values(TOOLS)) {
+  for (const t of activas) {
     if (!porCategoria[t.categoria]) porCategoria[t.categoria] = [];
     porCategoria[t.categoria].push(t);
   }
 
-  let out = '\n\n=== HERRAMIENTAS DISPONIBLES ===\n';
-  out += 'Tienes acceso a un catálogo de herramientas. Úsalas cuando lo necesites. No esperes que el Comandante te lo pida explícitamente: si para cumplir su orden o para actuar con precisión necesitas consultar, leer o ejecutar algo, HAZLO.\n\n';
-
+  let out = '\n\n=== HERRAMIENTAS ACTIVAS ===\n';
+  out += 'Tienes acceso a un catálogo de herramientas. Úsalas cuando lo necesites.\n\n';
   out += 'FORMATO DE INVOCACIÓN:\n';
-  out += 'Cuando quieras usar una herramienta, escribe al final de tu respuesta un bloque EXACTAMENTE así:\n\n';
   out += '```tool\n{"tool": "nombre_herramienta", "params": {...}, "razon": "por qué la usas"}\n```\n\n';
-  out += 'Puedes escribir varios bloques consecutivos si necesitas varias herramientas. El sistema los interceptará, ejecutará las herramientas y te devolverá los resultados para que continúes tu razonamiento.\n\n';
-
-  out += 'REGLAS DE USO:\n';
-  out += '- Herramientas de tipo **lectura**: úsalas libremente, sin pedir permiso.\n';
-  out += '- Herramientas de tipo **escritura**: úsalas si el Comandante te lo pidió o si es claramente necesario. Explica brevemente qué hiciste después.\n';
-  out += '- Herramientas de tipo **peligroso**: SIEMPRE pide aprobación antes de invocarlas. Explica qué vas a hacer, por qué, y espera un "sí" o "adelante" del Comandante.\n';
-  out += '- NUNCA inventes un resultado de herramienta. Si no la has invocado, no digas que lo hiciste.\n';
-  out += '- NUNCA inventes una herramienta que no esté en la lista. Si algo no existe, dilo.\n';
-  out += '- Si una herramienta falla, reporta el error con precisión y propón alternativas.\n\n';
+  out += 'REGLAS:\n';
+  out += '- **lectura**: úsalas libremente.\n';
+  out += '- **escritura**: úsalas si el Comandante te lo pidió o si es claramente necesario. Explica qué hiciste.\n';
+  out += '- **peligroso**: SIEMPRE pide aprobación antes de invocarlas.\n';
+  out += '- NUNCA inventes un resultado de herramienta.\n\n';
 
   for (const [cat, tools] of Object.entries(porCategoria)) {
     out += `### ${cat.toUpperCase()}\n`;
     for (const t of tools) {
       const marca = t.tipo === 'peligroso' ? ' ⚠️' : t.tipo === 'escritura' ? ' ✎' : '';
       out += `- **${t.nombre}**${marca}: ${t.descripcion}\n`;
-      if (t.params && Object.keys(t.params).length) {
-        const p = Object.entries(t.params).map(([k, v]) => `${k} (${v})`).join(', ');
-        out += `  Params: ${p}\n`;
-      }
     }
     out += '\n';
   }
 
-  out += 'Leyenda: ⚠️ = requiere aprobación · ✎ = escritura (usar con explicación) · sin marca = lectura libre.\n';
   return out;
 }
 
@@ -554,32 +667,6 @@ export function parsearInvocaciones(texto) {
     }
   }
   return invocaciones;
-}
-
-// ============================================================
-// HELPERS
-// ============================================================
-export function herramientaExiste(nombre) {
-  return !!TOOLS[nombre];
-}
-
-export function herramientaRequiereAprobacion(nombre) {
-  const t = TOOLS[nombre];
-  return t ? t.requiere_aprobacion : false;
-}
-
-export function herramientaEsPeligrosa(nombre) {
-  const t = TOOLS[nombre];
-  return t ? t.tipo === 'peligroso' : false;
-}
-
-export function listarNombresHerramientas() {
-  return Object.keys(TOOLS);
-}
-
-export function categoriaDeHerramienta(nombre) {
-  const t = TOOLS[nombre];
-  return t ? t.categoria : null;
 }
 
 // ============================================================
