@@ -1,13 +1,14 @@
-// autonomia.js — Ciclo de vida de Ayanokōji Digital (v5.1)
-// Cambios v5.1:
-// - validarSintaxis + deploySeguro (validación antes de desplegar, snapshot, verificación, reversión)
-// - autoreparar usa deploySeguro (simplificado, sin doble snapshot)
-// - autoMejorar usa deploySeguro cuando autoDesplegar=true
-// - pensarYActuar ejecuta ACCION: con ejecutarHerramienta (importación dinámica de worker.js)
-// - pensarYActuar tiene flag anti-reentrada (en_ciclo_autonomo)
+// autonomia.js — Ciclo de vida de Ayanokōji Digital (v5.2)
+// Cambios v5.2:
+// - Promesas rastreadas (KV promesas:activas)
+// - Detección de aprendizaje (+0.3 por dato útil en chat)
+// - Detección de contradicción (diario vs nueva info)
+// - Confianza calibrada: sumarConfianzaPorCriterio sin tope diario
+// - Curiosidad: buffer de preguntas pendientes, una por sesión
+// - Mantiene TODAS las exports v5.1 (compatibilidad)
 
-import { MODELO, MODELO_LIGERO, gDB, gKV } from './shared.js';
-import { consumir } from './presupuesto.js';
+import { MODELO, MODELO_LIGERO, gDB, gKV } from './storage.js';
+import { consumir } from './storage.js';
 
 const CF_API = 'https://api.cloudflare.com/client/v4';
 
@@ -30,10 +31,7 @@ function extraerRespuesta(res) {
 }
 
 function cfHeaders(e) {
-  return {
-    'Authorization': `Bearer ${e.CF_API_TOKEN}`,
-    'Content-Type': 'application/javascript'
-  };
+  return { 'Authorization': `Bearer ${e.CF_API_TOKEN}`, 'Content-Type': 'application/javascript' };
 }
 
 function accountId(e) { return e.CF_ACCOUNT_ID; }
@@ -153,7 +151,7 @@ export async function revertir(e, nombre) {
 }
 
 // ============================================================
-// AUTO-MEJORA — v5.1: deploySeguro cuando autoDesplegar=true
+// AUTO-MEJORA
 // ============================================================
 export async function autoMejorar(e, body) {
   try {
@@ -162,10 +160,7 @@ export async function autoMejorar(e, body) {
     const actual = await leerCodigoWorker(e, nombre);
     if (actual.error) return { error: 'No pude leer el código actual: ' + actual.error };
     if (!await consumir(e, 'procesamiento')) return { error: 'Presupuesto agotado.' };
-    // Snapshot solo si NO vamos a desplegar (deploySeguro ya lo hace)
-    if (!autoDesplegar) {
-      await crearSnapshot(e, nombre);
-    }
+    if (!autoDesplegar) await crearSnapshot(e, nombre);
     const prompt = `Tienes este código de Cloudflare Worker. El Comandante quiere mejorar el área "${area || 'general'}".
 
 Instrucciones específicas: ${instrucciones || 'Mejora general sin romper funcionalidad.'}
@@ -261,7 +256,6 @@ REGLAS:
   } catch (x) { return { error: x.message }; }
 }
 
-// v5.1: autoreparar usa deploySeguro (validación + snapshot + deploy + verificación + reversión)
 export async function autoreparar(e, tipoError, muestras) {
   const db = gDB(e, 'agente');
   const kv = gKV(e, 'agente');
@@ -479,7 +473,7 @@ export async function leerDeseosActivos(e) {
 }
 
 // ============================================================
-// SISTEMA DE CONFIANZA (AUTOMÁTICO)
+// SISTEMA DE CONFIANZA (calibrado)
 // ============================================================
 export async function sumarConfianza(e, puntos, razon) {
   const kv = gKV(e, 'agente');
@@ -498,6 +492,21 @@ export async function sumarConfianza(e, puntos, razon) {
     historial.unshift({ fecha: Date.now(), tipo: 'suma', puntos: puntosFinal, razon: (razon || '').substring(0, 200), total: nuevo });
     await kv.put('confianza:historial', JSON.stringify(historial.slice(0, 200)), { expirationTtl: 365 * 86400 });
     return { ok: true, anterior: actual, actual: nuevo, sumado: puntosFinal };
+  } catch (x) { return { error: x.message }; }
+}
+
+// NUEVO: sin tope diario, para aciertos de criterio
+export async function sumarConfianzaPorCriterio(e, puntos, razon) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { error: 'KV no disponible.' };
+  try {
+    const actual = parseInt(await kv.get('confianza:actual') || '0');
+    const nuevo = Math.min(100, actual + puntos);
+    await kv.put('confianza:actual', String(nuevo));
+    const historial = JSON.parse(await kv.get('confianza:historial') || '[]');
+    historial.unshift({ fecha: Date.now(), tipo: 'criterio', puntos, razon: (razon || '').substring(0, 200), total: nuevo });
+    await kv.put('confianza:historial', JSON.stringify(historial.slice(0, 200)), { expirationTtl: 365 * 86400 });
+    return { ok: true, anterior: actual, actual: nuevo, sumado: puntos };
   } catch (x) { return { error: x.message }; }
 }
 
@@ -543,6 +552,156 @@ export async function verificarDesbloqueo(e, nivel_requerido) {
 }
 
 // ============================================================
+// PROMESAS RASTREADAS (nuevo v5.2)
+// ============================================================
+export async function registrarPromesa(e, promesa, horasLimite = 24, contexto = '') {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { error: 'KV no disponible.' };
+  try {
+    const activas = JSON.parse(await kv.get('promesas:activas') || '[]');
+    const nueva = {
+      id: 'prom_' + Date.now() + '_' + Math.random().toString(36).substring(7),
+      promesa: (promesa || '').substring(0, 500),
+      contexto: (contexto || '').substring(0, 200),
+      creada: Date.now(),
+      deadline: Date.now() + horasLimite * 3600000,
+      horas_limite: horasLimite,
+      estado: 'pendiente'
+    };
+    activas.unshift(nueva);
+    await kv.put('promesas:activas', JSON.stringify(activas.slice(0, 30)), { expirationTtl: 30 * 86400 });
+    return { ok: true, id: nueva.id, deadline: nueva.deadline };
+  } catch (x) { return { error: x.message }; }
+}
+
+export async function cumplirPromesa(e, id, evidencia = '') {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { error: 'KV no disponible.' };
+  try {
+    const activas = JSON.parse(await kv.get('promesas:activas') || '[]');
+    const idx = activas.findIndex(p => p.id === id);
+    if (idx === -1) return { ok: false, error: 'Promesa no encontrada.' };
+    const cumplida = activas.splice(idx, 1)[0];
+    cumplida.estado = 'cumplida';
+    cumplida.cumplida_en = Date.now();
+    cumplida.evidencia = (evidencia || '').substring(0, 300);
+    const historial = JSON.parse(await kv.get('promesas:historial') || '[]');
+    historial.unshift(cumplida);
+    await kv.put('promesas:historial', JSON.stringify(historial.slice(0, 100)), { expirationTtl: 365 * 86400 });
+    await kv.put('promesas:activas', JSON.stringify(activas), { expirationTtl: 30 * 86400 });
+    return { ok: true, promesa: cumplida };
+  } catch (x) { return { error: x.message }; }
+}
+
+export async function verificarPromesas(e) {
+  const kv = gKV(e, 'agente');
+  const db = gDB(e, 'agente');
+  if (!kv || !db) return { vencidas: 0 };
+  try {
+    const activas = JSON.parse(await kv.get('promesas:activas') || '[]');
+    const ahora = Date.now();
+    const vencidas = activas.filter(p => p.estado === 'pendiente' && ahora > p.deadline);
+    if (!vencidas.length) return { vencidas: 0 };
+
+    for (const p of vencidas) {
+      try {
+        await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
+          .bind('promesa_vencida', '⚠️ Promesa sin cumplir', `Prometí: "${p.promesa}" (${p.horas_limite}h). No la cumplí. Contexto: ${p.contexto || 'sin contexto'}`, Date.now()).run();
+      } catch (x) {}
+      p.estado = 'vencida';
+      p.vencida_en = Date.now();
+    }
+    await kv.put('promesas:activas', JSON.stringify(activas), { expirationTtl: 30 * 86400 });
+    return { vencidas: vencidas.length };
+  } catch (x) { return { vencidas: 0, error: x.message }; }
+}
+
+export async function leerPromesasActivas(e) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { promesas: [] };
+  try {
+    const activas = JSON.parse(await kv.get('promesas:activas') || '[]');
+    const pendientes = activas.filter(p => p.estado === 'pendiente');
+    return { promesas: pendientes, total: pendientes.length };
+  } catch (x) { return { promesas: [], total: 0 }; }
+}
+
+// ============================================================
+// DETECCIÓN DE APRENDIZAJE (nuevo v5.2)
+// ============================================================
+export function detectarAprendizaje(textoRespuesta) {
+  if (!textoRespuesta) return null;
+  const patrones = [
+    /\[APRENDIZAJE:\s*([^\]]+)\]/i,
+    /he aprendido que\s+([^.\n]{20,200})/i,
+    /aprendí que\s+([^.\n]{20,200})/i,
+    /nuevo dato:\s*([^.\n]{20,200})/i,
+    /dato útil:\s*([^.\n]{20,200})/i,
+    /importante recordar:\s*([^.\n]{20,200})/i
+  ];
+  for (const patron of patrones) {
+    const match = textoRespuesta.match(patron);
+    if (match) return match[1].trim();
+  }
+  return null;
+}
+
+export async function registrarAprendizaje(e, aprendizaje, contexto) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return { error: 'KV no disponible.' };
+  try {
+    const aprendizajes = JSON.parse(await kv.get('identidad:aprendizajes') || '[]');
+    aprendizajes.unshift({
+      fecha: Date.now(),
+      aprendizaje: aprendizaje.substring(0, 500),
+      contexto: (contexto || '').substring(0, 300)
+    });
+    await kv.put('identidad:aprendizajes', JSON.stringify(aprendizajes.slice(0, 100)), { expirationTtl: 365 * 86400 });
+    await sumarConfianza(e, 0.3, 'Aprendizaje: ' + aprendizaje.substring(0, 80));
+    return { ok: true, total: aprendizajes.length };
+  } catch (x) { return { error: x.message }; }
+}
+
+// ============================================================
+// DETECCIÓN DE CONTRADICCIÓN (nuevo v5.2)
+// ============================================================
+export async function detectarContradiccion(e, nuevaInfo) {
+  const kv = gKV(e, 'agente');
+  if (!kv) return null;
+  try {
+    const diario = JSON.parse(await kv.get('identidad:diario') || '[]').slice(0, 5);
+    if (!diario.length) return null;
+    const diarioTexto = diario.map(d => d.entrada).join(' ');
+    if (!diarioTexto || diarioTexto.length < 50) return null;
+
+    const prompt = `Compara la NUEVA INFORMACIÓN con lo que está en el DIARIO del agente.
+
+DIARIO (últimas 5 entradas):
+${diarioTexto.substring(0, 2000)}
+
+NUEVA INFORMACIÓN:
+${nuevaInfo.substring(0, 1000)}
+
+TAREA: ¿Hay contradicción directa? Si el diario dice "el Comandante prefiere X" y ahora dice "prefiero Y", es contradicción.
+
+Responde SOLO con:
+- Si hay contradicción: "CONTRADICCION: [anterior] vs [nueva]"
+- Si no hay: "OK"`;
+
+    const res = await e.ayanokoji_IA.run(MODELO_LIGERO, {
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 150,
+      temperature: 0.2
+    });
+    const texto = extraerRespuesta(res);
+    if (texto.startsWith('CONTRADICCION:')) {
+      return { hay: true, detalle: texto.substring(15).trim() };
+    }
+    return { hay: false };
+  } catch (x) { return { hay: false, error: x.message }; }
+}
+
+// ============================================================
 // MISIÓN
 // ============================================================
 export async function actualizarMision(e, datos) {
@@ -566,13 +725,12 @@ export async function leerMision(e) {
 }
 
 // ============================================================
-// PENSAMIENTO CONTINUO — v5.1: wrapper anti-reentrada + ejecutor de misiones
+// PENSAMIENTO CONTINUO
 // ============================================================
 export async function pensarYActuar(e) {
   const kv = gKV(e, 'agente');
   if (!kv) return;
 
-  // Anti-reentrada: si ya hay un ciclo en ejecución, salir
   let enCiclo = null;
   try { enCiclo = await kv.get('en_ciclo_autonomo'); } catch (x) {}
   if (enCiclo === 'true') return;
@@ -591,19 +749,25 @@ async function _pensarYActuarInterno(e) {
   const ai = e.ayanokoji_IA;
   if (!db || !kv || !ai) return;
 
-  // Throttle: cada 2 horas
   const ultima = await kv.get('pensar_ultima');
   if (ultima && Date.now() - parseInt(ultima) < 2 * 60 * 60 * 1000) return;
   await kv.put('pensar_ultima', String(Date.now()), { expirationTtl: 3 * 3600 });
 
-  // 1. Leer diario para continuidad
+  // v5.2: verificar promesas vencidas
+  await verificarPromesas(e);
+
   let diarioReciente = '';
   try {
     const diario = JSON.parse(await kv.get('identidad:diario') || '[]').slice(0, 3);
     diarioReciente = diario.map(d => `[${d.tipo}] ${d.entrada.substring(0, 150)}`).join('\n');
   } catch (x) {}
 
-  // 2. Observar estado
+  let promesasPendientes = '';
+  try {
+    const proms = JSON.parse(await kv.get('promesas:activas') || '[]').filter(p => p.estado === 'pendiente').slice(0, 3);
+    promesasPendientes = proms.map(p => `- ${p.promesa.substring(0, 100)} (deadline en ${Math.round((p.deadline - Date.now()) / 3600000)}h)`).join('\n');
+  } catch (x) {}
+
   const estado = { procesos_activos: 0, tareas_cola: 0, notif_sin_leer: 0, mensajes_historial: 0, decisiones_24h: 0, workers: 0, confianza: 0, deseos_activos: 0, lecciones: 0, diario_entradas: 0, mision: null, hora: new Date().getUTCHours(), modo_ausente: false };
 
   try { const p = await db.prepare("SELECT COUNT(*) as n FROM procesos WHERE estado IN ('procesando','pendiente')").first(); estado.procesos_activos = p ? p.n : 0; } catch (x) {}
@@ -633,10 +797,21 @@ async function _pensarYActuarInterno(e) {
     leccionesRecientes = lec.map(l => `- ${l.leccion}`).join('\n');
   } catch (x) {}
 
+  // v5.2: preguntas pendientes (curiosidad)
+  let preguntasPendientes = '';
+  try {
+    const preg = JSON.parse(await kv.get('curiosidad:pendientes') || '[]').slice(0, 3);
+    preguntasPendientes = preg.map(p => `- ${p.pregunta}`).join('\n');
+  } catch (x) {}
+
   const prompt = `Eres Ayanokōji Digital. Ciclo de pensamiento autónomo (cada 2h).
 
 === DIARIO RECIENTE ===
 ${diarioReciente || '(vacío)'}
+
+${promesasPendientes ? `=== PROMESAS PENDIENTES ===\n${promesasPendientes}` : ''}
+
+${preguntasPendientes ? `=== PREGUNTAS PENDIENTES AL COMANDANTE ===\n${preguntasPendientes}` : ''}
 
 === ESTADO ACTUAL ===
 Hora UTC: ${estado.hora}:00
@@ -671,6 +846,7 @@ ${leccionesRecientes ? `=== LECCIONES RECIENTES ===\n${leccionesRecientes}` : ''
 4. ACCION: <descripción breve> HERRAMIENTA: <nombre> PARAMS: <json>
 5. DIARIO: <tipo> ENTRADA: <texto de 50-300 palabras>
 6. PREGUNTA: <pregunta para el Comandante sobre algo que no sabes de él>
+7. PROMESA: <lo que prometes hacer> HORAS: <número> CONTEXTO: <por qué lo prometes>
 
 Responde SOLO con el formato.`;
 
@@ -718,7 +894,6 @@ Responde SOLO con el formato.`;
     return;
   }
 
-  // v5.1: ACCION ejecuta la herramienta si confianza >= 10 y hay HERRAMIENTA + PARAMS
   if (decision.startsWith('ACCION:')) {
     const accionTexto = decision.replace('ACCION:', '').trim();
     const matchHerr = accionTexto.match(/HERRAMIENTA:\s*(\w+)/);
@@ -736,9 +911,9 @@ Responde SOLO con el formato.`;
           try { params = JSON.parse(matchParams[1]); } catch (x) { params = {}; }
         }
         const inv = { tool: nombreHerr, params, razon: 'Ciclo autónomo' };
-        const workerMod = await import('./worker.js');
-        if (workerMod && typeof workerMod.ejecutarHerramienta === 'function') {
-          const r = await workerMod.ejecutarHerramienta(e, inv, 'comandante', null);
+        const kernelMod = await import('./kernel.js');
+        if (kernelMod && typeof kernelMod.ejecutarHerramienta === 'function') {
+          const r = await kernelMod.ejecutarHerramienta(e, inv, 'comandante', null);
           exito = r.ok;
           resultado = exito ? 'ejecutada_ok' : 'ejecutada_error';
           detalle = exito
@@ -777,9 +952,21 @@ Responde SOLO con el formato.`;
     const pregunta = decision.replace('PREGUNTA:', '').trim();
     if (pregunta.length > 5) {
       try {
-        await db.prepare('INSERT INTO notificaciones(tipo,titulo,mensaje,leida,fecha) VALUES(?,?,?,0,?)')
-          .bind('pregunta_ayanokoji', 'Ayanokōji pregunta', pregunta.substring(0, 500), Date.now()).run();
+        const pendientes = JSON.parse(await kv.get('curiosidad:pendientes') || '[]');
+        pendientes.unshift({ pregunta: pregunta.substring(0, 300), fecha: Date.now(), lanzada: false });
+        await kv.put('curiosidad:pendientes', JSON.stringify(pendientes.slice(0, 20)), { expirationTtl: 90 * 86400 });
       } catch (x) {}
+    }
+    return;
+  }
+
+  if (decision.startsWith('PROMESA:')) {
+    const matchPromesa = decision.match(/PROMESA:\s*([^H]*?)\s*HORAS:/i);
+    const matchHoras = decision.match(/HORAS:\s*(\d+)/i);
+    const matchContexto = decision.match(/CONTEXTO:\s*([\s\S]*)/i);
+    if (matchPromesa) {
+      const horas = matchHoras ? parseInt(matchHoras[1]) : 24;
+      await registrarPromesa(e, matchPromesa[1].trim(), horas, matchContexto ? matchContexto[1].trim() : '');
     }
     return;
   }
@@ -852,7 +1039,7 @@ export async function gestionarDatos(e, mensaje, uid) {
 }
 
 // ============================================================
-// REGISTRAR ACCIÓN (con confianza automática)
+// REGISTRAR ACCIÓN
 // ============================================================
 export async function registrarAccion(e, tipo, descripcion, exito, detalle) {
   const db = gDB(e, 'agente');
@@ -972,13 +1159,15 @@ export async function informeDiario(e) {
   } catch (x) {}
   try {
     const decisiones = await db.prepare('SELECT tipo, decision FROM decisiones_autonomas WHERE fecha > ? ORDER BY fecha DESC LIMIT 5').bind(Date.now() - 86400000).all();
-    if (decisiones.results.length) {
-      resumen += `Decisiones autónomas: ${decisiones.results.length}\n`;
-    }
+    if (decisiones.results.length) resumen += `Decisiones autónomas: ${decisiones.results.length}\n`;
   } catch (x) {}
   try {
     const tareas = await db.prepare("SELECT COUNT(*) as n FROM tareas WHERE estado='pendiente'").first();
     resumen += `Tareas pendientes: ${tareas.n}\n`;
+  } catch (x) {}
+  try {
+    const proms = await leerPromesasActivas(e);
+    resumen += `Promesas pendientes: ${proms.total || 0}\n`;
   } catch (x) {}
   try {
     resumen += `Confianza: ${await kv.get('confianza:actual') || '0'}/100\n`;
@@ -990,17 +1179,15 @@ export async function informeDiario(e) {
 }
 
 // ============================================================
-// VALIDACIÓN DE SINTAXIS — v5.1 (nuevo)
-// Verifica que el código propuesto sea un worker válido antes de desplegarlo.
+// VALIDACIÓN DE SINTAXIS
 // ============================================================
 function validarSintaxis(codigo) {
   try {
-    // 1. Imports relativos deben apuntar a archivos conocidos
     const imports = codigo.match(/import\s+.*?\s+from\s+['"](.+?)['"]/g) || [];
     const archivosConocidos = [
-      './shared.js', './proc.js', './presupuesto.js', './nucleo.js', './tools.js',
+      './shared.js', './storage.js', './proc.js', './presupuesto.js', './nucleo.js', './tools.js',
       './autonomia.js', './salud.js', './examen.js', './publisher.js', './social.js',
-      './sandbox.js', './notify.js', './doctrina.js', './identidad.js'
+      './sandbox.js', './notify.js', './doctrina.js', './identidad.js', './kernel.js', './worker.js'
     ];
     for (const imp of imports) {
       const match = imp.match(/from\s+['"](.+?)['"]/);
@@ -1008,50 +1195,25 @@ function validarSintaxis(codigo) {
         return { ok: false, error: 'Import desconocido: ' + match[1] };
       }
     }
-    // 2. Debe tener export default (es un worker)
-    if (!codigo.includes('export default')) {
-      return { ok: false, error: 'Falta export default (no es un worker válido)' };
-    }
-    // 3. Debe tener método fetch
-    if (!codigo.includes('async fetch')) {
-      return { ok: false, error: 'Falta método fetch' };
-    }
-    // 4. Llaves balanceadas
+    if (!codigo.includes('export default')) return { ok: false, error: 'Falta export default (no es un worker válido)' };
+    if (!codigo.includes('async fetch')) return { ok: false, error: 'Falta método fetch' };
     const apertura = (codigo.match(/{/g) || []).length;
     const cierre = (codigo.match(/}/g) || []).length;
-    if (apertura !== cierre) {
-      return { ok: false, error: `Llaves desbalanceadas: ${apertura} abiertas, ${cierre} cerradas` };
-    }
+    if (apertura !== cierre) return { ok: false, error: `Llaves desbalanceadas: ${apertura} abiertas, ${cierre} cerradas` };
     return { ok: true };
-  } catch (x) {
-    return { ok: false, error: x.message };
-  }
+  } catch (x) { return { ok: false, error: x.message }; }
 }
 
-// ============================================================
-// DEPLOY SEGURO — v5.1 (nuevo)
-// Flujo: validar sintaxis → snapshot → deploy → verificar → revertir si falla.
-// ============================================================
 export async function deploySeguro(e, nombre, codigo) {
-  // 1. Validar sintaxis
   const validacion = validarSintaxis(codigo);
-  if (!validacion.ok) {
-    return { ok: false, error: 'Validación falló: ' + validacion.error, fase: 'validacion' };
-  }
+  if (!validacion.ok) return { ok: false, error: 'Validación falló: ' + validacion.error, fase: 'validacion' };
 
-  // 2. Snapshot del actual
   const snap = await crearSnapshot(e, nombre);
-  if (snap.error) {
-    return { ok: false, error: 'Snapshot falló: ' + snap.error, fase: 'snapshot' };
-  }
+  if (snap.error) return { ok: false, error: 'Snapshot falló: ' + snap.error, fase: 'snapshot' };
 
-  // 3. Deploy
   const upd = await actualizarWorker(e, nombre, codigo);
-  if (!upd.ok) {
-    return { ok: false, error: 'Deploy falló: ' + upd.error, fase: 'deploy', snapshot: snap.ts };
-  }
+  if (!upd.ok) return { ok: false, error: 'Deploy falló: ' + upd.error, fase: 'deploy', snapshot: snap.ts };
 
-  // 4. Verificar post-deploy
   let verificado = false;
   let errorVerificacion = null;
   try {
@@ -1064,11 +1226,8 @@ export async function deploySeguro(e, nombre, codigo) {
     } else {
       errorVerificacion = 'Worker responde con status ' + check.status;
     }
-  } catch (x) {
-    errorVerificacion = x.message;
-  }
+  } catch (x) { errorVerificacion = x.message; }
 
-  // 5. Si no verifica, revertir
   if (!verificado) {
     const rev = await revertir(e, nombre);
     return { ok: false, error: 'Verificación falló: ' + errorVerificacion, fase: 'verificacion', revertido: rev.ok === true, snapshot: snap.ts };
