@@ -1,11 +1,9 @@
-// worker.js — v22.0
-// Router + chat + cron. El resto vive en kernel.js y storage.js.
-// Cambios vs v21.4:
-// - Handlers HTTP movidos a kernel.js
-// - ejecutarHerramienta movido a kernel.js
-// - consultarUsoReal y constantes de storage.js
-// - Añadido: detección/corrección de invención en chat
-// - Versión 22.0
+// worker.js — v22.1
+// Cambios v22.1:
+// - Integrado: detectarAprendizaje (+0.3 confianza por dato útil)
+// - Integrado: detectarContradiccion (pregunta si hay conflicto con el diario)
+// - Versión 22.1
+// - Todo lo demás idéntico a v22.0
 
 import {
   MODELO, MODELO_LIGERO, MODELO_VISION, CORS, J, gDB, gKV,
@@ -77,6 +75,7 @@ import {
 import { detectarIntencion, construirSystemPrompt, identificarArea, AREAS } from './nucleo.js';
 import { TOOLS, parsearInvocaciones, herramientaExiste, herramientaRequiereAprobacion } from './tools.js';
 import { verificarSalud, cronSalud, cronSaludRapido, estadoSalud } from './salud.js';
+import { detectarAprendizaje, registrarAprendizaje, detectarContradiccion } from './autonomia.js';
 
 // ============================================================
 // HELPER OPCIONAL
@@ -169,7 +168,7 @@ Responde SOLO con la respuesta corregida.`;
 }
 
 // ============================================================
-// CHAT PRINCIPAL
+// CHAT PRINCIPAL — v22.1 con aprendizaje + contradicción
 // ============================================================
 async function chat(r, e, c) {
   try {
@@ -327,6 +326,17 @@ async function chat(r, e, c) {
     }
 
     // ============================================================
+    // v22.1: DETECCIÓN DE CONTRADICCIÓN ANTES DEL PROMPT
+    // ============================================================
+    let contradiccion = null;
+    if (m.length > 40) {
+      try {
+        const cont = await detectarContradiccion(e, m);
+        if (cont && cont.hay) contradiccion = cont.detalle;
+      } catch (x) {}
+    }
+
+    // ============================================================
     // FLUJO DEL MODELO
     // ============================================================
     const cacheRelacion = await leerCacheRelacion(e);
@@ -405,6 +415,11 @@ async function chat(r, e, c) {
 
     systemPrompt += `\n\n[REGLA ANTI-INVENCIÓN: NUNCA digas que creaste, desplegaste, modificaste, publicaste o guardaste algo si NO invocaste la herramienta correspondiente en este mismo turno. Si dices "he creado X", debe haber un bloque \`\`\`tool {crear_worker...}\`\`\` en tu respuesta. Si no lo invocaste, di la verdad: "no lo he hecho aún, ¿lo hago ahora?". Inventar acciones rompe la confianza del Comandante.]`;
 
+    // v22.1: si hay contradicción, inyectarla para que pregunte antes de asumir
+    if (contradiccion) {
+      systemPrompt += `\n\n[CONTRADICCIÓN DETECTADA: ${contradiccion}. Antes de responder, pregunta al Comandante si cambió de opinión o si es contexto distinto. No asumas. No actúes sin aclarar.]`;
+    }
+
     if (esTareaEscrituraPublica(m)) {
       systemPrompt += `\n\n[ATENCIÓN: esta es una tarea de ESCRITURA PÚBLICA. El resultado debe sonar como Ayanokōji, NO como un asistente ni como copy de marketing. Prohibidas frases como "Únete a nosotros", "La aventura espera", "Nuestro objetivo es crear", "Estás listo para", "Sumérgete en un mundo de posibilidades". Escribe frío, directo, con peso. Si es un manifiesto, que sea un manifiesto de alguien que no pide permiso para existir. Máximo 300 palabras.]`;
     }
@@ -482,6 +497,18 @@ async function chat(r, e, c) {
       respuestaFinal = await corregirInvencion(e, respuestaFinal, invencion);
     }
 
+    // ============================================================
+    // v22.1: DETECCIÓN DE APRENDIZAJE (+0.3 confianza)
+    // ============================================================
+    let aprendizajeRegistrado = null;
+    try {
+      const ap = detectarAprendizaje(respuestaFinal);
+      if (ap && ap.length > 10) {
+        const r = await registrarAprendizaje(e, ap, m.substring(0, 200));
+        if (r && r.ok) aprendizajeRegistrado = ap;
+      }
+    } catch (x) {}
+
     if (invocacionesEjecutadas.length > 0 && invocacionesEjecutadas.every(x => x.ok)) {
       try {
         const au = await opcional('autonomia');
@@ -503,7 +530,9 @@ async function chat(r, e, c) {
       modo_arquitecto_activo: modoArqActivo,
       modo_intensivo_activo: modoIntActivo,
       confianza_actual: confianzaActual,
-      invencion_corregida: !!invencion
+      invencion_corregida: !!invencion,
+      aprendizaje_registrado: aprendizajeRegistrado,
+      contradiccion_detectada: contradiccion
     });
   } catch (x) {
     return J({ respuesta: 'Error: ' + x.message });
@@ -518,7 +547,6 @@ export default {
     if (r.method === 'OPTIONS') return new Response(null, { headers: CORS });
     const u = new URL(r.url), p = u.pathname;
 
-    // --- DIAGNÓSTICO INTERNO ---
     if (p === '/api/_diag' && r.method === 'GET') return diagnosticoVariables(r, e);
     if (p === '/api/test_github' && r.method === 'GET') return testGithub(r, e);
     if (p === '/api/_test_mision' && r.method === 'GET') {
@@ -527,7 +555,6 @@ export default {
       return J({ texto_original: texto, detectada: !!resultado, texto_mision: resultado });
     }
 
-    // --- IMÁGENES ---
     if (p.startsWith('/api/imagen/') && r.method === 'GET') return servirImagen(r, e);
     if (p === '/api/imagen' && r.method === 'POST') {
       const b = await r.json();
@@ -535,10 +562,8 @@ export default {
       return J(await generarImagen(e, b.prompt, b.user_id || 'comandante'));
     }
 
-    // --- WIDGETS ---
     if (p === '/api/widgets' && r.method === 'GET') return widgets(r, e);
 
-    // --- MISIÓN DESDE WIDGET ---
     if (p === '/api/mision/escribir' && r.method === 'POST') {
       try {
         const b = await r.json();
@@ -564,10 +589,8 @@ export default {
       } catch (x) { return J({ error: x.message }); }
     }
 
-    // --- CHAT ---
     if (p === '/api/chat' && r.method === 'POST') return chat(r, e, c);
 
-    // --- PROCESAMIENTO DE ARCHIVOS ---
     if (p === '/api/subir' && r.method === 'POST') return subir(r, e, c);
     if (p === '/api/resumir' && r.method === 'POST') return resumir(r, e);
     if (p === '/api/procesar' && r.method === 'POST') return procesar(r, e, c);
@@ -578,7 +601,6 @@ export default {
     if (p === '/api/indexar' && r.method === 'POST') return J(await indexarHistorial(r, e));
     if (p === '/api/buscar_tema' && r.method === 'GET') return buscarPorTema(r, e);
 
-    // --- MEMORIA ---
     if (p === '/api/historial' && r.method === 'GET') return historial(r, e);
     if (p === '/api/historial_largo' && r.method === 'GET') return historialLargo(r, e);
     if (p === '/api/contexto' && r.method === 'GET') return verContexto(r, e);
@@ -590,13 +612,10 @@ export default {
     if (p === '/api/errores_tardios') return erroresTardios(r, e);
     if (p === '/api/migrar' && r.method === 'POST') return J(await migrar(e, true));
 
-    // --- PRESUPUESTO ---
     if (p === '/api/presupuesto' && r.method === 'GET') return J(await estadoPresupuesto(e));
 
-    // --- ESTADO ---
-    if (p === '/api/estado') return J({ estado: 'activo', v: '22.0' });
+    if (p === '/api/estado') return J({ estado: 'activo', v: '22.1' });
 
-    // --- DRAFT ---
     if (p === '/api/draft' && r.method === 'POST') {
       const b = await r.json();
       const kvN = gKV(e, 'agente');
@@ -622,7 +641,6 @@ export default {
       return J({ ok: true });
     }
 
-    // --- SALUD ---
     if (p === '/api/salud' && r.method === 'GET') return J(await estadoSalud(e));
     if (p === '/api/salud/verificar' && r.method === 'POST') return J(await verificarSalud(e));
     if (p === '/api/salud/destilar' && r.method === 'POST') {
@@ -634,7 +652,6 @@ export default {
     if (p === '/api/salud/sincronizar' && r.method === 'POST') return J(await sincronizarBuffer(e));
     if (p === '/api/salud/modo_cache' && r.method === 'GET') return J({ modo_cache_activo: await modoCacheActivo(e) });
 
-    // --- RELACIÓN ---
     if (p === '/api/relacion/construir' && r.method === 'POST') return J(await construirCacheRelacion(e, 'comandante') || { error: 'No se pudo construir.' });
     if (p === '/api/relacion/leer' && r.method === 'GET') {
       const kvN = gKV(e, 'agente');
@@ -643,7 +660,6 @@ export default {
       return J({ existe: !!cache, longitud: cache ? cache.length : 0, fecha, contenido: cache || null });
     }
 
-    // --- USO REAL ---
     if (p === '/api/uso_real' && r.method === 'GET') return J(await consultarUsoReal(e));
 
     if (p === '/api/capacidades' && r.method === 'GET') {
@@ -680,7 +696,6 @@ export default {
       });
     }
 
-    // --- ACTIVIDAD / RITMO / PULSO ---
     if (p === '/api/actividad' && r.method === 'GET') {
       const db = gDB(e, 'agente');
       const kvN = gKV(e, 'agente');
@@ -715,7 +730,6 @@ export default {
       } catch (x) { return J({ error: x.message }); }
     }
 
-    // --- PERFIL BASE ---
     if (p === '/api/perfil_base/construir' && r.method === 'POST') return J(await construirPerfilBase(e));
     if (p === '/api/perfil_base' && r.method === 'GET') {
       const kvN = gKV(e, 'agente');
@@ -725,7 +739,6 @@ export default {
       return J({ existe: !!perfil, longitud: perfil ? perfil.length : 0, fecha: fecha || null, perfil: perfil || null });
     }
 
-    // --- CORREGIR VOZ ---
     if (p === '/api/corregir' && r.method === 'POST') {
       const { correccion } = await r.json();
       const db = gDB(e, 'agente');
@@ -738,10 +751,8 @@ export default {
       return J({ ok: true, mensaje: 'Corrección guardada. Confianza -0.2.' });
     }
 
-    // --- ÁREAS ---
     if (p === '/api/areas') return J({ total: Object.keys(AREAS).length, areas: AREAS });
 
-    // --- MODO AUTÓNOMO ---
     if (p === '/api/modo' && r.method === 'POST') {
       const { autonomo } = await r.json();
       const kvN = gKV(e, 'agente');
@@ -749,7 +760,6 @@ export default {
       return J({ ok: true, modo: autonomo ? 'autónomo' : 'supervisado' });
     }
 
-    // --- ESTRATEGIAS ---
     if (p === '/api/estrategias' && r.method === 'GET') {
       const db = gDB(e, 'agente');
       const r1 = await db.prepare("SELECT * FROM estrategias WHERE estado='activa' ORDER BY prioridad ASC").all();
@@ -774,14 +784,12 @@ export default {
       } catch (x) { return J({ error: x.message }); }
     }
 
-    // --- DECISIONES ---
     if (p === '/api/decisiones' && r.method === 'GET') {
       const db = gDB(e, 'agente');
       const r1 = await db.prepare('SELECT * FROM decisiones_autonomas ORDER BY fecha DESC LIMIT 50').all();
       return J({ total: r1.results.length, decisiones: r1.results });
     }
 
-    // --- CONCIENCIA ---
     if (p === '/api/conciencia' && r.method === 'POST') {
       const b = await r.json();
       const uid = b.user_id || 'comandante';
@@ -802,7 +810,6 @@ export default {
       return J({ total: c2.length, conciencia: c2 });
     }
 
-    // --- SHADOW STATS ---
     if (p === '/api/shadow_stats' && r.method === 'GET') {
       const dbShadow = gDB(e, 'shadow');
       if (!dbShadow) return J({ error: 'DB_shadow_arise no configurado.' });
@@ -814,15 +821,13 @@ export default {
       } catch (x) { return J({ error: x.message }); }
     }
 
-    // --- COMPONENTES ---
     if (p === '/api/componentes' && r.method === 'GET') {
       return J({
         pestanas: ['chat','calibracion','sandbox','estrategias','shadow','stats','actividad','decisiones','ideas','bandeja'],
-        version: '22.0'
+        version: '22.1'
       });
     }
 
-    // --- SANDBOX ---
     if (p === '/api/sandbox/etapa' && r.method === 'POST') {
       const m = await opcional('sandbox');
       if (!m) return J({ error: 'sandbox.js no instalado.' });
@@ -859,7 +864,6 @@ export default {
       return m.verSandbox(r, e);
     }
 
-    // --- PUBLISHER ---
     if (p === '/api/publicar' && r.method === 'POST') {
       const m = await opcional('publisher');
       if (!m) return J({ error: 'publisher.js no instalado.' });
@@ -872,7 +876,6 @@ export default {
       return J(await m.generarContenido(e, tipo || 'provocacion'));
     }
 
-    // --- WORKERS ---
     if (p === '/api/workers' && r.method === 'GET') {
       const m = await opcional('autonomia');
       if (!m) return J({ error: 'autonomia.js no instalado.' });
@@ -902,7 +905,6 @@ export default {
       return J(await m.crearSnapshot(e, nombre));
     }
 
-    // --- TAREAS ---
     if (p === '/api/tareas' && r.method === 'GET') {
       const db = gDB(e, 'agente');
       const r1 = await db.prepare('SELECT * FROM tareas ORDER BY prioridad ASC, creada ASC LIMIT 50').all();
@@ -921,7 +923,6 @@ export default {
       return J({ total: r1.results.length, acciones: r1.results });
     }
 
-    // --- CÓDIGO ---
     if (p === '/api/codigo/leer' && r.method === 'POST') return codigoLeer(r, e);
     if (p === '/api/codigo/listar' && r.method === 'POST') return codigoListar(r, e);
     if (p === '/api/codigo/escribir' && r.method === 'POST') return codigoEscribir(r, e);
@@ -929,7 +930,6 @@ export default {
     if (p === '/api/aprobacion/pendiente' && r.method === 'GET') return verAprobacionPendiente(r, e);
     if (p === '/api/aprobacion/cancelar' && r.method === 'POST') return cancelarAprobacion(r, e);
 
-    // --- EXAMEN ---
     if (p === '/api/examen/generar' && r.method === 'POST') {
       const m = await opcional('examen');
       if (!m) return J({ error: 'examen.js no instalado.' });
@@ -956,7 +956,6 @@ export default {
       } catch (x) { return J({ error: x.message }); }
     }
 
-    // --- CONFIANZA ---
     if (p === '/api/confianza' && r.method === 'GET') {
       const m = await opcional('autonomia');
       if (!m) return J({ error: 'autonomia.js no instalado.' });
@@ -968,7 +967,6 @@ export default {
       return J({ ok: true, total: h.length, historial: h.slice(0, 50) });
     }
 
-    // --- MUNDO INTERNO ---
     if (p === '/api/diario/leer' && r.method === 'GET') {
       const limite = parseInt(u.searchParams.get('limite') || '10');
       const m = await opcional('autonomia');
@@ -993,7 +991,22 @@ export default {
       return J(await m.resolverDeseo(e, b.indice, b.aprobado, b.razon));
     }
 
-    // --- MISIÓN ---
+    if (p === '/api/promesas/leer' && r.method === 'GET') {
+      const m = await opcional('autonomia');
+      if (!m || !m.leerPromesasActivas) return J({ promesas: [], total: 0 });
+      return J(await m.leerPromesasActivas(e));
+    }
+    if (p === '/api/aprendizajes/leer' && r.method === 'GET') {
+      const kvN = gKV(e, 'agente');
+      const aps = JSON.parse(await kvN.get('identidad:aprendizajes') || '[]');
+      return J({ ok: true, total: aps.length, aprendizajes: aps.slice(0, 30) });
+    }
+    if (p === '/api/curiosidad/leer' && r.method === 'GET') {
+      const kvN = gKV(e, 'agente');
+      const preg = JSON.parse(await kvN.get('curiosidad:pendientes') || '[]');
+      return J({ ok: true, total: preg.length, preguntas: preg.slice(0, 20) });
+    }
+
     if (p === '/api/mision' && r.method === 'GET') {
       const kvN = gKV(e, 'agente');
       const mision = JSON.parse(await kvN.get('mision:estado') || '{}');
@@ -1006,7 +1019,6 @@ export default {
       return J(await m.actualizarMision(e, b));
     }
 
-    // --- FEED Y RSS ---
     if (p === '/feed') {
       const m = await opcional('social');
       if (!m) return new Response('social.js no instalado', { status: 503 });
